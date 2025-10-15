@@ -131,4 +131,4 @@ TODO: License declaration
 
 ## Maintainer
 
-svaghela (svaghela@todo.todo)
+siddharth.vaghela@tufts.edu
