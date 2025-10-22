@@ -1,0 +1,579 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sphero Controller Node for Battleship Game.
+
+This node interfaces with Sphero robots using the spherov2 API and provides
+ROS2 topic-based control for various Sphero commands.
+"""
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+import json
+import signal
+import sys
+from typing import Optional
+import time
+
+from spherov2 import scanner
+from spherov2.sphero_edu import SpheroEduAPI
+from spherov2.types import Color
+
+
+class SpheroControllerNode(Node):
+    """
+    ROS2 node for controlling Sphero robots.
+
+    Provides topic-based interface for:
+    - LED control
+    - Movement (roll, spin, heading, speed)
+    - Matrix display (for BOLT)
+    - Sensor data publishing
+    - Stop command
+    """
+
+    def __init__(self, robot, api, toy_name: str = "Sphero"):
+        """
+        Initialize the Sphero controller node.
+
+        Args:
+            robot: The Sphero robot object from scanner
+            api: The SpheroEduAPI object
+            toy_name: Name of the toy for identification
+        """
+        super().__init__('sphero_controller_node')
+
+        self.robot = robot
+        self.api = api
+        self.toy_name = toy_name
+
+        # Internal state
+        self._current_heading = 0
+        self._current_speed = 0
+        self._is_moving = False
+
+        # Create subscribers for Sphero commands using JSON over String
+        self.led_sub = self.create_subscription(
+            String,
+            'sphero/led',
+            self.led_callback,
+            10
+        )
+
+        self.roll_sub = self.create_subscription(
+            String,
+            'sphero/roll',
+            self.roll_callback,
+            10
+        )
+
+        self.spin_sub = self.create_subscription(
+            String,
+            'sphero/spin',
+            self.spin_callback,
+            10
+        )
+
+        self.heading_sub = self.create_subscription(
+            String,
+            'sphero/heading',
+            self.heading_callback,
+            10
+        )
+
+        self.speed_sub = self.create_subscription(
+            String,
+            'sphero/speed',
+            self.speed_callback,
+            10
+        )
+
+        self.stop_sub = self.create_subscription(
+            String,
+            'sphero/stop',
+            self.stop_callback,
+            10
+        )
+
+        self.matrix_sub = self.create_subscription(
+            String,
+            'sphero/matrix',
+            self.matrix_callback,
+            10
+        )
+
+        self.command_sub = self.create_subscription(
+            String,
+            'sphero/command',
+            self.command_callback,
+            10
+        )
+
+        # Create publishers for sensor data and status
+        self.sensor_pub = self.create_publisher(
+            String,
+            'sphero/sensors',
+            10
+        )
+
+        self.status_pub = self.create_publisher(
+            String,
+            'sphero/status',
+            10
+        )
+
+        # Create timer for periodic sensor publishing (10 Hz)
+        self.sensor_timer = self.create_timer(0.1, self.publish_sensors)
+
+        self.get_logger().info(f'Sphero Controller Node initialized for {toy_name}')
+        self.get_logger().info('Subscribed to:')
+        self.get_logger().info('  - sphero/led')
+        self.get_logger().info('  - sphero/roll')
+        self.get_logger().info('  - sphero/spin')
+        self.get_logger().info('  - sphero/heading')
+        self.get_logger().info('  - sphero/speed')
+        self.get_logger().info('  - sphero/stop')
+        self.get_logger().info('  - sphero/matrix')
+        self.get_logger().info('  - sphero/command')
+
+        # Initial LED indicator (green = ready)
+        self.api.set_main_led(Color(r=0, g=255, b=0))
+
+    def led_callback(self, msg: String):
+        """
+        Handle LED color commands.
+
+        Expected JSON format:
+        {
+            "red": 255,
+            "green": 0,
+            "blue": 0
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            red = data.get('red', 0)
+            green = data.get('green', 0)
+            blue = data.get('blue', 0)
+
+            # Validate RGB values
+            red = max(0, min(255, int(red)))
+            green = max(0, min(255, int(green)))
+            blue = max(0, min(255, int(blue)))
+
+            self.api.set_main_led(Color(r=red, g=green, b=blue))
+            self.get_logger().info(f'LED set to RGB({red}, {green}, {blue})')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in LED command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in LED callback: {str(e)}')
+
+    def roll_callback(self, msg: String):
+        """
+        Handle roll commands.
+
+        Expected JSON format:
+        {
+            "heading": 90,
+            "speed": 128,
+            "duration": 2.0
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            heading = int(data.get('heading', 0))
+            speed = int(data.get('speed', 100))
+            duration = float(data.get('duration', 0))
+
+            # Normalize heading to 0-359
+            heading = heading % 360
+
+            # Clamp speed to 0-255
+            speed = max(0, min(255, speed))
+
+            self._current_heading = heading
+            self._current_speed = speed
+            self._is_moving = True
+
+            self.api.set_heading(heading)
+            self.api.set_speed(speed)
+
+            self.get_logger().info(
+                f'Rolling at heading {heading}deg with speed {speed} for {duration}s'
+            )
+
+            # If duration is specified, stop after duration
+            if duration > 0:
+                time.sleep(duration)
+                self.api.set_speed(0)
+                self._is_moving = False
+                self.get_logger().info('Roll complete, stopped')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in roll command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in roll callback: {str(e)}')
+
+    def spin_callback(self, msg: String):
+        """
+        Handle spin commands.
+
+        Expected JSON format:
+        {
+            "angle": 360,
+            "duration": 1.0
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            angle = int(data.get('angle', 360))
+            duration = float(data.get('duration', 1.0))
+
+            self.get_logger().info(f'Spinning {angle}deg over {duration}s')
+
+            # Spin by rotating heading
+            initial_heading = self._current_heading
+            target_heading = (initial_heading + angle) % 360
+
+            self.api.spin(angle, duration)
+            self._current_heading = target_heading
+
+            self.get_logger().info(f'Spin complete, new heading: {target_heading}deg')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in spin command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in spin callback: {str(e)}')
+
+    def heading_callback(self, msg: String):
+        """
+        Handle heading commands.
+
+        Expected JSON format:
+        {
+            "heading": 180
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            heading = int(data.get('heading', 0))
+
+            # Normalize heading to 0-359
+            heading = heading % 360
+
+            self.api.set_heading(heading)
+            self._current_heading = heading
+
+            self.get_logger().info(f'Heading set to {heading}deg')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in heading command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in heading callback: {str(e)}')
+
+    def speed_callback(self, msg: String):
+        """
+        Handle speed commands.
+
+        Expected JSON format:
+        {
+            "speed": 150,
+            "duration": 3.0
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            speed = int(data.get('speed', 0))
+            duration = float(data.get('duration', 0))
+
+            # Clamp speed to 0-255
+            speed = max(0, min(255, speed))
+
+            self.api.set_speed(speed)
+            self._current_speed = speed
+            self._is_moving = speed > 0
+
+            self.get_logger().info(f'Speed set to {speed}')
+
+            # If duration is specified, stop after duration
+            if duration > 0:
+                time.sleep(duration)
+                self.api.set_speed(0)
+                self._current_speed = 0
+                self._is_moving = False
+                self.get_logger().info('Duration complete, stopped')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in speed command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in speed callback: {str(e)}')
+
+    def stop_callback(self, msg: String):
+        """
+        Handle stop commands.
+
+        Expected JSON format:
+        {} (empty or any data)
+        """
+        try:
+            self.api.set_speed(0)
+            self._current_speed = 0
+            self._is_moving = False
+
+            self.get_logger().info('Sphero stopped')
+
+        except Exception as e:
+            self.get_logger().error(f'Error in stop callback: {str(e)}')
+
+    def matrix_callback(self, msg: String):
+        """
+        Handle LED matrix commands (for Sphero BOLT).
+
+        Expected JSON format:
+        {
+            "pattern": "smile",  // or "custom"
+            "matrix": [0, 1, 0, ...],  // 64 values for custom pattern
+            "red": 255,
+            "green": 255,
+            "blue": 255,
+            "duration": 2.0
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            pattern = data.get('pattern', '')
+            custom_matrix = data.get('matrix', [])
+            red = int(data.get('red', 255))
+            green = int(data.get('green', 255))
+            blue = int(data.get('blue', 255))
+            duration = float(data.get('duration', 0))
+
+            # Check if Sphero supports matrix
+            if not hasattr(self.api, 'set_matrix_pixel'):
+                self.get_logger().warning('This Sphero does not support LED matrix')
+                return
+
+            # Predefined patterns
+            patterns = {
+                'smile': [
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 1, 1, 0, 0, 1, 1, 0,
+                    0, 1, 1, 0, 0, 1, 1, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 1, 0, 0, 0, 0, 1, 0,
+                    0, 0, 1, 1, 1, 1, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0
+                ],
+                'cross': [
+                    1, 0, 0, 0, 0, 0, 0, 1,
+                    0, 1, 0, 0, 0, 0, 1, 0,
+                    0, 0, 1, 0, 0, 1, 0, 0,
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 1, 0, 0, 1, 0, 0,
+                    0, 1, 0, 0, 0, 0, 1, 0,
+                    1, 0, 0, 0, 0, 0, 0, 1
+                ],
+                'arrow_up': [
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 1, 1, 1, 1, 0, 0,
+                    0, 1, 0, 1, 1, 0, 1, 0,
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 0, 1, 1, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0
+                ]
+            }
+
+            # Use predefined pattern or custom matrix
+            if pattern in patterns:
+                matrix_data = patterns[pattern]
+            elif custom_matrix and len(custom_matrix) == 64:
+                matrix_data = custom_matrix
+            else:
+                self.get_logger().error('Invalid pattern or matrix data')
+                return
+
+            # Set matrix pixels
+            for i, brightness in enumerate(matrix_data):
+                if brightness > 0:
+                    row = i // 8
+                    col = i % 8
+                    self.api.set_matrix_pixel(row, col, Color(r=red, g=green, b=blue))
+
+            self.get_logger().info(f'Matrix pattern "{pattern}" displayed')
+
+            # Clear after duration
+            if duration > 0:
+                time.sleep(duration)
+                self.api.clear_matrix()
+                self.get_logger().info('Matrix cleared')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in matrix command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in matrix callback: {str(e)}')
+
+    def command_callback(self, msg: String):
+        """
+        Handle generic command messages.
+
+        Expected JSON format:
+        {
+            "command_type": "led" | "roll" | "spin" | "stop" | etc.,
+            "parameters": { ... }
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            command_type = data.get('command_type', '')
+            parameters = data.get('parameters', {})
+
+            # Route to appropriate handler
+            if command_type == 'led':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.led_callback(param_msg)
+
+            elif command_type == 'roll':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.roll_callback(param_msg)
+
+            elif command_type == 'spin':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.spin_callback(param_msg)
+
+            elif command_type == 'heading':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.heading_callback(param_msg)
+
+            elif command_type == 'speed':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.speed_callback(param_msg)
+
+            elif command_type == 'stop':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.stop_callback(param_msg)
+
+            elif command_type == 'matrix':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.matrix_callback(param_msg)
+
+            else:
+                self.get_logger().warning(f'Unknown command type: {command_type}')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in command callback: {str(e)}')
+
+    def publish_sensors(self):
+        """Publish sensor data periodically."""
+        try:
+            # Get sensor data from Sphero
+            # Note: Actual sensor reading depends on Sphero model
+            sensor_data = {
+                'heading': self._current_heading,
+                'speed': self._current_speed,
+                'is_moving': self._is_moving,
+                'toy_name': self.toy_name,
+                'timestamp': self.get_clock().now().to_msg().sec
+            }
+
+            # Try to get additional sensor data if available
+            try:
+                if hasattr(self.api, 'get_orientation'):
+                    orientation = self.api.get_orientation()
+                    sensor_data['pitch'] = orientation.get('pitch', 0.0)
+                    sensor_data['roll'] = orientation.get('roll', 0.0)
+                    sensor_data['yaw'] = orientation.get('yaw', 0.0)
+            except:
+                pass
+
+            msg = String()
+            msg.data = json.dumps(sensor_data)
+            self.sensor_pub.publish(msg)
+
+        except Exception as e:
+            self.get_logger().error(f'Error publishing sensors: {str(e)}', throttle_duration_sec=5.0)
+
+    def cleanup(self):
+        """Clean up resources before shutdown."""
+        self.get_logger().info('Cleaning up Sphero controller...')
+        try:
+            # Stop movement
+            self.api.set_speed(0)
+
+            # Turn off LED
+            self.api.set_main_led(Color(r=0, g=0, b=0))
+
+            # Clear matrix if supported
+            if hasattr(self.api, 'clear_matrix'):
+                self.api.clear_matrix()
+
+            self.get_logger().info('Sphero cleanup complete')
+
+        except Exception as e:
+            self.get_logger().error(f'Error during cleanup: {e}')
+
+
+def main(args=None):
+    """Main entry point for the Sphero controller node."""
+    rclpy.init(args=args)
+    node = None
+    shutdown_requested = False
+
+    def signal_handler(_sig, _frame):
+        nonlocal shutdown_requested
+        print("\nKeyboard interrupt detected. Shutting down...")
+        shutdown_requested = True
+
+    # Register signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        # Scan for Sphero (modify toy_name as needed)
+        print("Scanning for Sphero robots...")
+        toy_name = "SB-3660"  # Change this to your Sphero's name
+        robot = scanner.find_toy(toy_name=toy_name)
+
+        with SpheroEduAPI(toy=robot) as api:
+            print(f"Connected to {toy_name}")
+
+            # Create the node
+            node = SpheroControllerNode(robot, api, toy_name)
+
+            # Spin until shutdown requested
+            while rclpy.ok() and not shutdown_requested:
+                rclpy.spin_once(node, timeout_sec=0.1)
+
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    except Exception as e:
+        print(f"Error: {e}")
+
+    finally:
+        # Clean up the node
+        if node:
+            node.cleanup()
+            node.destroy_node()
+
+        # Shutdown ROS 2
+        if rclpy.ok():
+            rclpy.shutdown()
+
+        print("Goodbye!")
+
+
+if __name__ == '__main__':
+    main()
