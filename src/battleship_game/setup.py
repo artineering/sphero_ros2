@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'msg'), glob('msg/*.msg')),
     ],
-    install_requires=['setuptools', 'spherov2'],
+    install_requires=['setuptools', 'spherov2', 'openai', 'openai-swarm', 'speechrecognition'],
     zip_safe=True,
     maintainer='Siddharth',
     maintainer_email='siddharth.vaghela@tufts.edu',
@@ -30,6 +30,7 @@ setup(
             'game_controller_node = battleship_game.game_controller_node:main',
             'human_controller_node = battleship_game.human_controller_node:main',
             'sphero_controller_node = battleship_game.sphero_controller_node:main',
+            'sphero_agent_node = battleship_game.sphero_agent_node:main',
             'test_publisher = battleship_game.test_publisher:main'
         ],
     },

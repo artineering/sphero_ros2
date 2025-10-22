@@ -1,0 +1,9 @@
+# ROS2 Battleship Game Requirements
+
+# Sphero control
+spherov2>=0.12.0
+
+# OpenAI Swarm agent
+openai>=1.0.0
+openai-swarm>=0.1.0
+speechrecognition>=3.10.0
