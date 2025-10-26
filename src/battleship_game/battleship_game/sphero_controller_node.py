@@ -24,17 +24,9 @@ from spherov2.types import Color
 
 from battleship_game.core.sphero.state import (
     SpheroState,
-    SpheroConnectionState,
-    SpheroOrientation,
-    SpheroAccelerometer,
-    SpheroGyroscope,
-    SpheroPosition,
-    SpheroVelocity,
-    SpheroLEDState,
-    SpheroMotionState,
-    SpheroBatteryState,
-    SpheroMatrixState
+    SpheroConnectionState
 )
+from battleship_game.core.sphero.matrix_patterns import get_pattern, get_all_pattern_names
 
 
 class SpheroControllerNode(Node):
@@ -412,43 +404,11 @@ class SpheroControllerNode(Node):
                 self.get_logger().warning('This Sphero does not support LED matrix')
                 return
 
-            # Predefined patterns
-            patterns = {
-                'smile': [
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 1, 1, 0, 0, 1, 1, 0,
-                    0, 1, 1, 0, 0, 1, 1, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 1, 0, 0, 0, 0, 1, 0,
-                    0, 0, 1, 1, 1, 1, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0
-                ],
-                'cross': [
-                    1, 0, 0, 0, 0, 0, 0, 1,
-                    0, 1, 0, 0, 0, 0, 1, 0,
-                    0, 0, 1, 0, 0, 1, 0, 0,
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 1, 0, 0, 1, 0, 0,
-                    0, 1, 0, 0, 0, 0, 1, 0,
-                    1, 0, 0, 0, 0, 0, 0, 1
-                ],
-                'arrow_up': [
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 1, 1, 1, 1, 0, 0,
-                    0, 1, 0, 1, 1, 0, 1, 0,
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 0, 1, 1, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0
-                ]
-            }
-
             # Use predefined pattern or custom matrix
-            if pattern in patterns:
-                matrix_data = patterns[pattern]
+            matrix_data = get_pattern(pattern)
+            if matrix_data is not None:
+                # Pattern found
+                pass
             elif custom_matrix and len(custom_matrix) == 64:
                 matrix_data = custom_matrix
             else:
