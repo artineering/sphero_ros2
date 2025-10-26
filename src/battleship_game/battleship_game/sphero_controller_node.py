@@ -10,6 +10,8 @@ ROS2 topic-based control for various Sphero commands.
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from sensor_msgs.msg import BatteryState
+from battleship_game.msg import SpheroSensor
 import json
 import signal
 import sys
@@ -19,6 +21,20 @@ import time
 from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
 from spherov2.types import Color
+
+from battleship_game.core.sphero.state import (
+    SpheroState,
+    SpheroConnectionState,
+    SpheroOrientation,
+    SpheroAccelerometer,
+    SpheroGyroscope,
+    SpheroPosition,
+    SpheroVelocity,
+    SpheroLEDState,
+    SpheroMotionState,
+    SpheroBatteryState,
+    SpheroMatrixState
+)
 
 
 class SpheroControllerNode(Node):
@@ -48,7 +64,25 @@ class SpheroControllerNode(Node):
         self.api = api
         self.toy_name = toy_name
 
-        # Internal state
+        # Declare and get ROS parameters
+        self.declare_parameter('sensor_rate', 10.0)  # Default: 10 Hz
+        self.declare_parameter('heartbeat_rate', 5.0)  # Default: 5 seconds
+
+        self.sensor_rate = self.get_parameter('sensor_rate').value
+        self.heartbeat_rate = self.get_parameter('heartbeat_rate').value
+
+        # Calculate sensor timer period (1/frequency)
+        self.sensor_period = 1.0 / self.sensor_rate if self.sensor_rate > 0 else 0.1
+
+        # Initialize Sphero state
+        self.sphero_state = SpheroState(
+            toy_name=toy_name,
+            connection_state=SpheroConnectionState.CONNECTED
+        )
+        # Set API handle so state can query device directly
+        self.sphero_state.set_api(api)
+
+        # Internal state (for backward compatibility)
         self._current_heading = 0
         self._current_speed = 0
         self._is_moving = False
@@ -112,8 +146,20 @@ class SpheroControllerNode(Node):
 
         # Create publishers for sensor data and status
         self.sensor_pub = self.create_publisher(
-            String,
+            SpheroSensor,
             'sphero/sensors',
+            10
+        )
+
+        self.state_pub = self.create_publisher(
+            String,
+            'sphero/state',
+            10
+        )
+
+        self.battery_pub = self.create_publisher(
+            BatteryState,
+            'sphero/battery',
             10
         )
 
@@ -123,10 +169,16 @@ class SpheroControllerNode(Node):
             10
         )
 
-        # Create timer for periodic sensor publishing (10 Hz)
-        self.sensor_timer = self.create_timer(0.1, self.publish_sensors)
+        # Create timer for periodic sensor publishing (configurable rate)
+        self.sensor_timer = self.create_timer(self.sensor_period, self.publish_sensors)
+
+        # Create heartbeat timer for battery health (configurable rate)
+        self.heartbeat_timer = self.create_timer(self.heartbeat_rate, self.publish_heartbeat)
 
         self.get_logger().info(f'Sphero Controller Node initialized for {toy_name}')
+        self.get_logger().info('Parameters:')
+        self.get_logger().info(f'  - sensor_rate: {self.sensor_rate} Hz (period: {self.sensor_period:.3f}s)')
+        self.get_logger().info(f'  - heartbeat_rate: {self.heartbeat_rate} seconds')
         self.get_logger().info('Subscribed to:')
         self.get_logger().info('  - sphero/led')
         self.get_logger().info('  - sphero/roll')
@@ -136,6 +188,11 @@ class SpheroControllerNode(Node):
         self.get_logger().info('  - sphero/stop')
         self.get_logger().info('  - sphero/matrix')
         self.get_logger().info('  - sphero/command')
+        self.get_logger().info('Publishing to:')
+        self.get_logger().info(f'  - sphero/sensors (battleship_game/SpheroSensor, {self.sensor_rate} Hz)')
+        self.get_logger().info(f'  - sphero/state (complete state JSON, {self.sensor_rate} Hz)')
+        self.get_logger().info(f'  - sphero/battery (sensor_msgs/BatteryState, every {self.heartbeat_rate}s)')
+        self.get_logger().info(f'  - sphero/status (health heartbeat JSON, every {self.heartbeat_rate}s)')
 
         # Initial LED indicator (green = ready)
         self.api.set_main_led(Color(r=0, g=255, b=0))
@@ -478,34 +535,111 @@ class SpheroControllerNode(Node):
             self.get_logger().error(f'Error in command callback: {str(e)}')
 
     def publish_sensors(self):
-        """Publish sensor data periodically."""
+        """
+        Publish sensor data periodically by querying the Sphero device.
+
+        This method delegates sensor querying to the SpheroState object,
+        which manages all device communication internally.
+
+        Published topics:
+        - sphero/state: Complete state as JSON (includes all sensor data)
+        - sphero/sensors: battleship_game/SpheroSensor message format
+
+        Note: Battery state (sensor_msgs/BatteryState) is published separately
+              in publish_heartbeat() to avoid excessive publishing.
+
+        Rate controlled by ROS parameter 'sensor_rate' (Hz).
+        """
         try:
-            # Get sensor data from Sphero
-            # Note: Actual sensor reading depends on Sphero model
-            sensor_data = {
-                'heading': self._current_heading,
-                'speed': self._current_speed,
-                'is_moving': self._is_moving,
-                'toy_name': self.toy_name,
-                'timestamp': self.get_clock().now().to_msg().sec
-            }
+            # Update state from device (handles all sensor queries internally)
+            self.sphero_state.update_from_device()
 
-            # Try to get additional sensor data if available
-            try:
-                if hasattr(self.api, 'get_orientation'):
-                    orientation = self.api.get_orientation()
-                    sensor_data['pitch'] = orientation.get('pitch', 0.0)
-                    sensor_data['roll'] = orientation.get('roll', 0.0)
-                    sensor_data['yaw'] = orientation.get('yaw', 0.0)
-            except:
-                pass
+            # Update backward compatibility variables
+            self._current_heading = self.sphero_state.get('motion', 'heading', 0)
+            self._current_speed = self.sphero_state.get('motion', 'speed', 0)
+            self._is_moving = self.sphero_state.get('motion', 'is_moving', False)
 
-            msg = String()
-            msg.data = json.dumps(sensor_data)
-            self.sensor_pub.publish(msg)
+            # Publish complete state as JSON
+            state_msg = String()
+            state_msg.data = json.dumps(self.sphero_state.to_dict())
+            self.state_pub.publish(state_msg)
+
+            # Publish sensor data using SpheroSensor message format
+            sensor_msg = self.sphero_state.to_sphero_sensor_msg()
+            if sensor_msg is not None:
+                sensor_msg.timestamp = self.get_clock().now().to_msg()
+                self.sensor_pub.publish(sensor_msg)
 
         except Exception as e:
             self.get_logger().error(f'Error publishing sensors: {str(e)}', throttle_duration_sec=5.0)
+
+    def publish_heartbeat(self):
+        """
+        Publish heartbeat with battery health information at configured rate.
+
+        This provides a periodic health check of the Sphero, including:
+        - Battery percentage and health status (sensor_msgs/BatteryState)
+        - Connection state
+        - Overall system health
+        - Uptime information
+
+        Published topics:
+        - sphero/status: JSON heartbeat message with health summary
+        - sphero/battery: Standard sensor_msgs/BatteryState message
+
+        Note: This is the ONLY place where sensor_msgs/BatteryState is published
+              to avoid duplication with high-frequency sensor updates.
+        """
+        try:
+            # Create heartbeat message with battery health
+            heartbeat_data = {
+                'toy_name': self.toy_name,
+                'timestamp': self.get_clock().now().to_msg().sec,
+                'connection_state': self.sphero_state.connection_state.value,
+                'battery': {
+                    'percentage': self.sphero_state.battery.percentage,
+                    'voltage': self.sphero_state.battery.voltage,
+                    'health': 'GOOD' if self.sphero_state.battery.percentage > 10 else 'DEAD',
+                    'status': 'FULL' if self.sphero_state.battery.percentage >= 100 else 'DISCHARGING'
+                },
+                'is_healthy': self.sphero_state.is_healthy(),
+                'uptime': time.time() - self.sphero_state.timestamp
+            }
+
+            # Publish heartbeat as JSON string
+            heartbeat_msg = String()
+            heartbeat_msg.data = json.dumps(heartbeat_data)
+            self.status_pub.publish(heartbeat_msg)
+
+            # Also publish dedicated battery state message
+            battery_msg = self.sphero_state.battery.to_battery_state_msg()
+            if battery_msg is not None:
+                battery_msg.header.stamp = self.get_clock().now().to_msg()
+                battery_msg.header.frame_id = f'sphero_{self.toy_name}'
+                self.battery_pub.publish(battery_msg)
+
+            # Log warning if battery is low
+            if self.sphero_state.battery.percentage < 20:
+                self.get_logger().warning(
+                    f'Low battery: {self.sphero_state.battery.percentage}%',
+                    throttle_duration_sec=30.0
+                )
+            elif self.sphero_state.battery.percentage < 10:
+                self.get_logger().error(
+                    f'Critical battery: {self.sphero_state.battery.percentage}%',
+                    throttle_duration_sec=30.0
+                )
+
+            # Log heartbeat at info level (throttled to avoid spam)
+            self.get_logger().info(
+                f'Heartbeat: {self.toy_name} - Battery: {self.sphero_state.battery.percentage}% - '
+                f'Connection: {self.sphero_state.connection_state.value} - '
+                f'Healthy: {self.sphero_state.is_healthy()}',
+                throttle_duration_sec=30.0
+            )
+
+        except Exception as e:
+            self.get_logger().error(f'Error publishing heartbeat: {str(e)}')
 
     def cleanup(self):
         """Clean up resources before shutdown."""
