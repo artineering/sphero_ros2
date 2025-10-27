@@ -63,7 +63,7 @@ All message definitions are in the `msg/` directory:
 ### Building
 
 ```bash
-cd ~/ros2_ws_2
+cd ~/ros2_ws
 colcon build --packages-select sphero_package --symlink-install
 source install/setup.bash
 ```
@@ -73,7 +73,7 @@ source install/setup.bash
 ### Running the Controller Node
 
 ```bash
-ros2 run sphero_package sphero_controller_node
+ros2 run sphero_package sphero_controller_node.py
 ```
 
 ### ROS Parameters
