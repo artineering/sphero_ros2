@@ -24,14 +24,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Attack.msg"
   "msg/AttackResult.msg"
   "msg/NewBoard.msg"
-  "msg/SpheroCommand.msg"
-  "msg/SpheroHeading.msg"
-  "msg/SpheroLED.msg"
-  "msg/SpheroMatrix.msg"
-  "msg/SpheroRoll.msg"
-  "msg/SpheroSensor.msg"
-  "msg/SpheroSpeed.msg"
-  "msg/SpheroSpin.msg"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 
@@ -47,7 +39,6 @@ install(
   PROGRAMS
     ${PROJECT_NAME}/game_controller_node.py
     ${PROJECT_NAME}/human_controller_node.py
-    ${PROJECT_NAME}/sphero_controller_node.py
     ${PROJECT_NAME}/sphero_agent_node.py
     ${PROJECT_NAME}/test_publisher.py
   DESTINATION lib/${PROJECT_NAME}
