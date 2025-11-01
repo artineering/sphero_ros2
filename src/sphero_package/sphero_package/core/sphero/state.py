@@ -649,6 +649,151 @@ class SpheroState:
         # Update timestamp is called automatically by set() method
         return True
 
+    def query_property(self, property_name: str, subproperty: Optional[str] = None):
+        """
+        Query a specific property from the Sphero device and update the state.
+
+        This method queries a single property from the device rather than updating
+        the entire state. It's useful for targeted updates without overhead.
+
+        Args:
+            property_name: The property to query (e.g., 'orientation', 'battery', 'motion')
+            subproperty: Optional sub-property (e.g., 'pitch', 'heading', 'percentage')
+
+        Returns:
+            The queried value, or None if query failed or API not available
+
+        Examples:
+            >>> state.query_property('orientation', 'pitch')  # Query only pitch
+            45.0
+            >>> state.query_property('battery', 'percentage')  # Query battery %
+            85
+            >>> state.query_property('motion', 'heading')  # Query heading
+            180
+
+        Raises:
+            ValueError: If property_name is not supported
+        """
+        if self._api is None:
+            return None
+
+        # Map properties to their API methods
+        property_queries = {
+            'orientation': {
+                'method': 'get_orientation',
+                'subproperties': ['pitch', 'roll', 'yaw']
+            },
+            'accelerometer': {
+                'method': 'get_acceleration',
+                'subproperties': ['x', 'y', 'z']
+            },
+            'gyroscope': {
+                'method': 'get_gyroscope',
+                'subproperties': ['x', 'y', 'z']
+            },
+            'position': {
+                'method': 'get_location',
+                'subproperties': ['x', 'y']
+            },
+            'velocity': {
+                'method': 'get_velocity',
+                'subproperties': ['x', 'y']
+            },
+            'motion': {
+                'method': 'get_heading',  # Default to heading
+                'subproperties': ['heading', 'speed', 'is_moving']
+            },
+            'led': {
+                'method': 'get_main_led',
+                'subproperties': ['red', 'green', 'blue']
+            },
+            'battery': {
+                'method': 'get_battery_percentage',
+                'subproperties': ['percentage', 'voltage']
+            }
+        }
+
+        if property_name not in property_queries:
+            raise ValueError(
+                f"Unsupported property: {property_name}. "
+                f"Supported properties: {', '.join(property_queries.keys())}"
+            )
+
+        query_info = property_queries[property_name]
+
+        try:
+            # Special handling for different property types
+            if property_name == 'motion':
+                if subproperty == 'heading' or subproperty is None:
+                    heading = self._api.get_heading()
+                    value = int(heading) % 360
+                    self.set('motion', value, 'heading')
+                    if subproperty == 'heading':
+                        return value
+                elif subproperty == 'speed':
+                    speed = self._api.get_speed()
+                    value = abs(int(speed))
+                    self.set('motion', value, 'speed')
+                    self.set('motion', abs(speed) > 0, 'is_moving')
+                    return value
+                elif subproperty == 'is_moving':
+                    speed = self._api.get_speed()
+                    value = abs(speed) > 0
+                    self.set('motion', abs(int(speed)), 'speed')
+                    self.set('motion', value, 'is_moving')
+                    return value
+                else:
+                    # Return entire motion state if no subproperty
+                    return self.motion
+
+            elif property_name == 'battery':
+                if subproperty == 'voltage':
+                    if hasattr(self._api, 'get_battery_voltage'):
+                        voltage = self._api.get_battery_voltage()
+                        value = float(voltage)
+                        self.set('battery', value, 'voltage')
+                        return value
+                    return None
+                else:  # percentage or None
+                    if hasattr(self._api, query_info['method']):
+                        battery_pct = self._api.get_battery_percentage()
+                        value = int(battery_pct)
+                        self.set('battery', value, 'percentage')
+                        if subproperty == 'percentage':
+                            return value
+                        return self.battery
+
+            else:
+                # Standard property query
+                api_method = getattr(self._api, query_info['method'])
+                data = api_method()
+
+                if isinstance(data, dict):
+                    # Update all subproperties
+                    for subprop in query_info['subproperties']:
+                        if subprop in data:
+                            self.set(property_name, data[subprop], subprop)
+
+                    # Return requested subproperty or entire object
+                    if subproperty:
+                        return data.get(subproperty)
+                    else:
+                        return self.get(property_name)
+                else:
+                    # Single value returned
+                    if subproperty:
+                        self.set(property_name, data, subproperty)
+                        return data
+                    else:
+                        return self.get(property_name)
+
+        except AttributeError as e:
+            # API method doesn't exist
+            return None
+        except Exception as e:
+            # Query failed
+            return None
+
     def to_sphero_sensor_msg(self):
         """
         Convert the state to a battleship_game/SpheroSensor message.

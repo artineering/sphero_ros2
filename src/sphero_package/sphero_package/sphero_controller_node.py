@@ -7,26 +7,26 @@ This node interfaces with Sphero robots using the spherov2 API and provides
 ROS2 topic-based control for various Sphero commands.
 """
 
+import time
+import json
+import signal
+
 import rclpy
 from rclpy.node import Node
+
 from std_msgs.msg import String
 from sensor_msgs.msg import BatteryState
 from sphero_package.msg import SpheroSensor
-import json
-import signal
-import sys
-from typing import Optional
-import time
 
 from spherov2 import scanner
-from spherov2.sphero_edu import SpheroEduAPI
+from spherov2.sphero_edu import SpheroEduAPI, EventType
 from spherov2.types import Color
 
 from sphero_package.core.sphero.state import (
     SpheroState,
     SpheroConnectionState
 )
-from sphero_package.core.sphero.matrix_patterns import get_pattern, get_all_pattern_names
+from sphero_package.core.sphero.matrix_patterns import get_pattern
 
 
 class SpheroControllerNode(Node):
@@ -78,6 +78,10 @@ class SpheroControllerNode(Node):
         self._current_heading = 0
         self._current_speed = 0
         self._is_moving = False
+        self._collision_mode = None
+        self._collision_timer = None
+        self._prev_accel_z = 0.0
+        self._accel_threshold = 1.5  # Threshold for detecting sudden acceleration change (in Gs)
 
         # Create subscribers for Sphero commands using JSON over String
         self.led_sub = self.create_subscription(
@@ -158,6 +162,18 @@ class SpheroControllerNode(Node):
         self.status_pub = self.create_publisher(
             String,
             'sphero/status',
+            10
+        )
+
+        self.tap_pub = self.create_publisher(
+            String,
+            'sphero/tap',
+            10
+        )
+
+        self.obstacle_pub = self.create_publisher(
+            String,
+            'sphero/obstacle',
             10
         )
 
@@ -435,6 +451,145 @@ class SpheroControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error in matrix callback: {str(e)}')
 
+    def collision_callback(self, msg: String):
+        """
+        Handle collision messages.
+        Expected JSON format:
+        {
+            "action": "start" | "stop",
+            "mode": "tap" | "obstacle",
+            "threshold": 1.5  (optional, defaults to 1.5 Gs)
+        }
+        """
+        try:
+            data = json.loads(msg.data)
+            action = data.get('action', '')
+            if action == 'start':
+                self._collision_mode = data.get('mode', None)
+
+                # Get optional threshold parameter
+                threshold = data.get('threshold', 1.5)
+                self._accel_threshold = float(threshold)
+
+                # Initialize previous acceleration reading
+                self._prev_accel_z = self.sphero_state.query_property('accelerometer', 'z')
+                if self._prev_accel_z is None:
+                    self._prev_accel_z = 0.0
+
+                # Create timer to check accelerometer at 50 Hz (20ms period)
+                if self._collision_timer is not None:
+                    self._collision_timer.cancel()
+
+                self._collision_timer = self.create_timer(0.01, self._check_collision)
+
+                self.get_logger().info(
+                    f'Starting collision detection in "{self._collision_mode}" mode '
+                    f'(threshold: {self._accel_threshold} Gs)'
+                )
+
+            elif action == 'stop':
+                if self._collision_timer is not None:
+                    self._collision_timer.cancel()
+                    self._collision_timer = None
+
+                self._collision_mode = None
+                self.get_logger().info('Stopped collision detection')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in collision command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in collision callback: {str(e)}')
+
+    def _check_collision(self):
+        """
+        Timer callback to continuously monitor accelerometer for collision detection.
+
+        Checks for sudden changes in z-axis acceleration:
+        - In 'tap' mode: Detects sudden acceleration changes when Sphero is stationary
+        - In 'obstacle' mode: Detects sudden acceleration changes when Sphero is in motion
+        """
+        if self._collision_mode is None:
+            return
+
+        try:
+            # Query current z-axis acceleration
+            current_accel_z = self.sphero_state.query_property('accelerometer', 'z')
+            if current_accel_z is None:
+                return
+
+            # Query current motion state
+            is_moving = self.sphero_state.query_property('motion', 'is_moving')
+            if is_moving is None:
+                is_moving = self._is_moving  # Fallback to internal state
+
+            # Calculate the change in acceleration
+            accel_change = abs(current_accel_z - self._prev_accel_z)
+
+            # Check if acceleration change exceeds threshold
+            if accel_change > self._accel_threshold:
+                # Tap mode: Detect impacts when stationary
+                if self._collision_mode == 'tap' and not is_moving:
+                    self.get_logger().info(
+                        f'Tap detected! Z-accel change: {accel_change:.2f} Gs '
+                        f'(was: {self._prev_accel_z:.2f}, now: {current_accel_z:.2f})'
+                    )
+
+                    # Flash LED red for visual feedback
+                    self._flash_red_led()
+
+                    tap_msg = String()
+                    tap_msg.data = json.dumps({
+                        'accel_change': accel_change,
+                        'accel_z': current_accel_z,
+                        'timestamp': self.get_clock().now().to_msg().sec
+                    })
+                    self.tap_pub.publish(tap_msg)
+
+                # Obstacle mode: Detect collisions when in motion
+                elif self._collision_mode == 'obstacle' and is_moving:
+                    self.get_logger().info(
+                        f'Obstacle collision detected! Z-accel change: {accel_change:.2f} Gs '
+                        f'(was: {self._prev_accel_z:.2f}, now: {current_accel_z:.2f})'
+                    )
+
+                    # Flash LED red for visual feedback
+                    self._flash_red_led()
+
+                    obstacle_msg = String()
+                    obstacle_msg.data = json.dumps({
+                        'accel_change': accel_change,
+                        'accel_z': current_accel_z,
+                        'timestamp': self.get_clock().now().to_msg().sec
+                    })
+                    self.obstacle_pub.publish(obstacle_msg)
+
+            # Update previous acceleration for next comparison
+            self._prev_accel_z = current_accel_z
+
+        except Exception as e:
+            self.get_logger().error(
+                f'Error in collision check: {str(e)}',
+                throttle_duration_sec=1.0
+            )
+
+    def _flash_red_led(self):
+        """
+        Flash the main LED red for 1.5 seconds to indicate collision detection.
+        The LED will then return to green.
+        """
+        try:
+            # Set LED to red
+            self.api.set_main_led(Color(r=255, g=0, b=0))
+
+            # Wait for 1.5 seconds
+            time.sleep(1.5)
+
+            # Return LED to green (ready state)
+            self.api.set_main_led(Color(r=0, g=255, b=0))
+
+        except Exception as e:
+            self.get_logger().error(f'Error flashing LED: {str(e)}')
+
     def command_callback(self, msg: String):
         """
         Handle generic command messages.
@@ -485,6 +640,16 @@ class SpheroControllerNode(Node):
                 param_msg = String()
                 param_msg.data = json.dumps(parameters)
                 self.matrix_callback(param_msg)
+
+            elif command_type == 'collision':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.collision_callback(param_msg)
+
+            elif command_type == 'ir':
+                param_msg = String()
+                param_msg.data = json.dumps(parameters)
+                self.ir_callback(param_msg)
 
             else:
                 self.get_logger().warning(f'Unknown command type: {command_type}')
@@ -605,6 +770,11 @@ class SpheroControllerNode(Node):
         """Clean up resources before shutdown."""
         self.get_logger().info('Cleaning up Sphero controller...')
         try:
+            # Stop collision detection timer
+            if self._collision_timer is not None:
+                self._collision_timer.cancel()
+                self._collision_timer = None
+
             # Stop movement
             self.api.set_speed(0)
 
