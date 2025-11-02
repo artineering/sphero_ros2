@@ -1,0 +1,523 @@
+// WebSocket connection
+let socket;
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    initializeWebSocket();
+    updateLedColorPreview();
+    updateMatrixColorPreview();
+    checkStatus();
+
+    // Poll status every 2 seconds
+    setInterval(checkStatus, 2000);
+});
+
+// Initialize WebSocket connection
+function initializeWebSocket() {
+    socket = io();
+
+    socket.on('connect', function() {
+        console.log('WebSocket connected');
+    });
+
+    socket.on('disconnect', function() {
+        console.log('WebSocket disconnected');
+    });
+
+    socket.on('state_update', function(data) {
+        updateStateDisplay(data);
+    });
+
+    socket.on('sensor_update', function(data) {
+        updateSensorDisplay(data);
+    });
+
+    socket.on('battery_update', function(data) {
+        updateBatteryDisplay(data);
+    });
+
+    socket.on('status_update', function(data) {
+        updateStatusDisplay(data);
+    });
+
+    socket.on('error', function(data) {
+        handleError(data);
+    });
+
+    socket.on('force_disconnect', function(data) {
+        handleForceDisconnect(data);
+    });
+}
+
+// Tab switching
+function openTab(evt, tabName) {
+    // Hide all tab contents
+    const tabContents = document.getElementsByClassName('tab-content');
+    for (let i = 0; i < tabContents.length; i++) {
+        tabContents[i].classList.remove('active');
+    }
+
+    // Remove active class from all buttons
+    const tabButtons = document.getElementsByClassName('tab-button');
+    for (let i = 0; i < tabButtons.length; i++) {
+        tabButtons[i].classList.remove('active');
+    }
+
+    // Show current tab and mark button as active
+    document.getElementById(tabName).classList.add('active');
+    evt.currentTarget.classList.add('active');
+}
+
+// Connection functions
+async function connectSphero() {
+    const spheroName = document.getElementById('sphero-name').value.trim();
+
+    if (!spheroName) {
+        showMessage('Please enter a Sphero name', 'error');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/connect', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ sphero_name: spheroName })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            showMessage(data.message, 'success');
+            document.getElementById('connect-btn').disabled = true;
+            document.getElementById('disconnect-btn').disabled = false;
+            document.getElementById('sphero-name').disabled = true;
+            enableTabs();
+
+            // Update status
+            document.getElementById('connection-status').textContent = 'Connecting...';
+            document.getElementById('connection-status').className = 'status-connected';
+        } else {
+            showMessage(data.message, 'error');
+        }
+    } catch (error) {
+        showMessage('Failed to connect: ' + error.message, 'error');
+    }
+}
+
+async function disconnectSphero() {
+    try {
+        const response = await fetch('/api/disconnect', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            showMessage(data.message, 'success');
+            document.getElementById('connect-btn').disabled = false;
+            document.getElementById('disconnect-btn').disabled = true;
+            document.getElementById('sphero-name').disabled = false;
+            disableTabs();
+
+            // Update status
+            document.getElementById('connection-status').textContent = 'Disconnected';
+            document.getElementById('connection-status').className = 'status-disconnected';
+            document.getElementById('battery-status').textContent = 'Battery: --';
+        } else {
+            showMessage(data.message, 'error');
+        }
+    } catch (error) {
+        showMessage('Failed to disconnect: ' + error.message, 'error');
+    }
+}
+
+async function checkStatus() {
+    try {
+        const response = await fetch('/api/status');
+        const data = await response.json();
+
+        if (data.connected) {
+            if (data.ready) {
+                document.getElementById('connection-status').textContent = 'Connected';
+                document.getElementById('connection-status').className = 'status-connected';
+            } else {
+                document.getElementById('connection-status').textContent = 'Connecting...';
+                document.getElementById('connection-status').className = 'status-connected';
+            }
+
+            if (data.latest_battery && data.latest_battery.percentage !== undefined) {
+                document.getElementById('battery-status').textContent =
+                    `Battery: ${data.latest_battery.percentage.toFixed(0)}%`;
+            }
+        } else {
+            document.getElementById('connection-status').textContent = 'Disconnected';
+            document.getElementById('connection-status').className = 'status-disconnected';
+        }
+    } catch (error) {
+        console.error('Failed to check status:', error);
+    }
+}
+
+// UI Helper functions
+function showMessage(message, type) {
+    const messageDiv = document.getElementById('connection-message');
+    messageDiv.textContent = message;
+    messageDiv.className = `message ${type}`;
+    messageDiv.style.display = 'block';
+
+    setTimeout(() => {
+        messageDiv.style.display = 'none';
+    }, 5000);
+}
+
+function enableTabs() {
+    document.getElementById('state-tab').disabled = false;
+    document.getElementById('sensors-tab').disabled = false;
+    document.getElementById('matrix-tab').disabled = false;
+    document.getElementById('motion-tab').disabled = false;
+}
+
+function disableTabs() {
+    document.getElementById('state-tab').disabled = true;
+    document.getElementById('sensors-tab').disabled = true;
+    document.getElementById('matrix-tab').disabled = true;
+    document.getElementById('motion-tab').disabled = true;
+
+    // Switch back to connection tab
+    document.querySelector('.tab-button').click();
+}
+
+// State display update
+function updateStateDisplay(state) {
+    // Connection info
+    document.getElementById('state-name').textContent = state.toy_name || '--';
+    document.getElementById('state-connection').textContent = state.connection_state || '--';
+
+    // Calculate is_healthy from state
+    const is_healthy = state.connection_state === 'connected' && state.battery && state.battery.percentage > 10;
+    document.getElementById('state-healthy').textContent = is_healthy ? 'Yes' : 'No';
+
+    // Update main connection status when we get state updates (lowercase 'connected')
+    if (state.connection_state === 'connected') {
+        document.getElementById('connection-status').textContent = 'Connected';
+        document.getElementById('connection-status').className = 'status-connected';
+    }
+
+    // Battery info
+    if (state.battery) {
+        const batteryPct = state.battery.percentage !== undefined ? state.battery.percentage : null;
+        const batteryVolt = state.battery.voltage !== undefined ? state.battery.voltage : null;
+
+        document.getElementById('state-battery').textContent =
+            batteryPct !== null ? (typeof batteryPct === 'number' ? batteryPct.toFixed(0) : batteryPct) : '--';
+        document.getElementById('state-voltage').textContent =
+            batteryVolt !== null ? (typeof batteryVolt === 'number' ? batteryVolt.toFixed(2) : batteryVolt) : '--';
+        document.getElementById('state-bat-health').textContent =
+            batteryPct && batteryPct > 20 ? 'Good' : (batteryPct !== null ? 'Low' : '--');
+
+        // Update battery in header
+        if (batteryPct !== null) {
+            document.getElementById('battery-status').textContent =
+                `Battery: ${typeof batteryPct === 'number' ? batteryPct.toFixed(0) : batteryPct}%`;
+        }
+    }
+
+    // Motion info
+    if (state.motion) {
+        document.getElementById('state-heading').textContent =
+            state.motion.heading !== undefined ? state.motion.heading : '--';
+        document.getElementById('state-speed').textContent =
+            state.motion.speed !== undefined ? state.motion.speed : '--';
+        document.getElementById('state-moving').textContent =
+            state.motion.is_moving ? 'Yes' : 'No';
+    }
+
+    // LED color (state.led has red, green, blue directly, not nested under color)
+    if (state.led) {
+        const ledDisplay = document.getElementById('state-led');
+        ledDisplay.style.background =
+            `rgb(${state.led.red || 0}, ${state.led.green || 0}, ${state.led.blue || 0})`;
+    }
+
+    // Update sensor displays from state data
+    // Sensors are top-level properties in state, not nested under "sensors"
+    updateSensorDisplayFromState(state);
+
+    // Raw data
+    document.getElementById('raw-state-data').textContent =
+        JSON.stringify(state, null, 2);
+}
+
+// Update sensor displays from state sensor data
+function updateSensorDisplayFromState(sensors) {
+    // Accelerometer
+    if (sensors.accelerometer) {
+        document.getElementById('sensor-accel-x').textContent =
+            sensors.accelerometer.x ? sensors.accelerometer.x.toFixed(2) : '--';
+        document.getElementById('sensor-accel-y').textContent =
+            sensors.accelerometer.y ? sensors.accelerometer.y.toFixed(2) : '--';
+        document.getElementById('sensor-accel-z').textContent =
+            sensors.accelerometer.z ? sensors.accelerometer.z.toFixed(2) : '--';
+    }
+
+    // Gyroscope
+    if (sensors.gyroscope) {
+        document.getElementById('sensor-gyro-x').textContent =
+            sensors.gyroscope.x ? sensors.gyroscope.x.toFixed(2) : '--';
+        document.getElementById('sensor-gyro-y').textContent =
+            sensors.gyroscope.y ? sensors.gyroscope.y.toFixed(2) : '--';
+        document.getElementById('sensor-gyro-z').textContent =
+            sensors.gyroscope.z ? sensors.gyroscope.z.toFixed(2) : '--';
+    }
+
+    // Velocity
+    if (sensors.velocity) {
+        document.getElementById('sensor-vel-x').textContent =
+            sensors.velocity.x ? sensors.velocity.x.toFixed(2) : '--';
+        document.getElementById('sensor-vel-y').textContent =
+            sensors.velocity.y ? sensors.velocity.y.toFixed(2) : '--';
+    }
+
+    // Location
+    if (sensors.location) {
+        document.getElementById('sensor-loc-x').textContent =
+            sensors.location.x ? sensors.location.x.toFixed(2) : '--';
+        document.getElementById('sensor-loc-y').textContent =
+            sensors.location.y ? sensors.location.y.toFixed(2) : '--';
+    }
+}
+
+// Sensor display update
+function updateSensorDisplay(data) {
+    console.log('Sensor update:', data);
+}
+
+// Battery display update
+function updateBatteryDisplay(data) {
+    if (data.percentage !== undefined) {
+        document.getElementById('battery-status').textContent =
+            `Battery: ${data.percentage.toFixed(0)}%`;
+    }
+}
+
+// Status display update
+function updateStatusDisplay(data) {
+    console.log('Status update:', data);
+
+    // Update connection status when we receive heartbeat (lowercase 'connected')
+    if (data.connection_state === 'connected') {
+        document.getElementById('connection-status').textContent = 'Connected';
+        document.getElementById('connection-status').className = 'status-connected';
+    }
+
+    // Update battery from status
+    if (data.battery && data.battery.percentage !== undefined) {
+        const batteryPct = data.battery.percentage;
+        document.getElementById('battery-status').textContent =
+            `Battery: ${typeof batteryPct === 'number' ? batteryPct.toFixed(0) : batteryPct}%`;
+    }
+}
+
+// LED Control
+function updateLedColorPreview() {
+    const r = document.getElementById('led-red').value;
+    const g = document.getElementById('led-green').value;
+    const b = document.getElementById('led-blue').value;
+
+    document.getElementById('led-red-val').textContent = r;
+    document.getElementById('led-green-val').textContent = g;
+    document.getElementById('led-blue-val').textContent = b;
+
+    document.getElementById('led-color-preview').style.background =
+        `rgb(${r}, ${g}, ${b})`;
+}
+
+async function sendLed() {
+    const r = parseInt(document.getElementById('led-red').value);
+    const g = parseInt(document.getElementById('led-green').value);
+    const b = parseInt(document.getElementById('led-blue').value);
+
+    try {
+        await fetch('/api/led', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ red: r, green: g, blue: b })
+        });
+    } catch (error) {
+        console.error('Failed to send LED command:', error);
+    }
+}
+
+// Matrix Control
+function updateMatrixColorPreview() {
+    const r = document.getElementById('matrix-red').value;
+    const g = document.getElementById('matrix-green').value;
+    const b = document.getElementById('matrix-blue').value;
+
+    document.getElementById('matrix-red-val').textContent = r;
+    document.getElementById('matrix-green-val').textContent = g;
+    document.getElementById('matrix-blue-val').textContent = b;
+
+    document.getElementById('matrix-color-preview').style.background =
+        `rgb(${r}, ${g}, ${b})`;
+}
+
+async function sendMatrix(pattern) {
+    const r = parseInt(document.getElementById('matrix-red').value);
+    const g = parseInt(document.getElementById('matrix-green').value);
+    const b = parseInt(document.getElementById('matrix-blue').value);
+
+    try {
+        await fetch('/api/matrix', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                pattern: pattern,
+                red: r,
+                green: g,
+                blue: b
+            })
+        });
+    } catch (error) {
+        console.error('Failed to send matrix command:', error);
+    }
+}
+
+async function clearMatrix() {
+    try {
+        await fetch('/api/matrix/clear', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (error) {
+        console.error('Failed to clear matrix:', error);
+    }
+}
+
+// Heading Control
+function updateHeading() {
+    const heading = document.getElementById('heading').value;
+    document.getElementById('heading-val').textContent = heading;
+
+    // Update compass arrow
+    const arrow = document.getElementById('compass-arrow');
+    arrow.style.transform = `rotate(${heading}deg)`;
+}
+
+async function sendHeading() {
+    const heading = parseInt(document.getElementById('heading').value);
+
+    try {
+        await fetch('/api/motion/heading', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ heading: heading })
+        });
+    } catch (error) {
+        console.error('Failed to send heading command:', error);
+    }
+}
+
+// Speed Control
+function updateSpeedVal() {
+    const speed = document.getElementById('speed').value;
+    document.getElementById('speed-val').textContent = speed;
+}
+
+async function sendSpeed() {
+    const speed = parseInt(document.getElementById('speed').value);
+
+    try {
+        await fetch('/api/motion/speed', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ speed: speed })
+        });
+    } catch (error) {
+        console.error('Failed to send speed command:', error);
+    }
+}
+
+async function sendStop() {
+    try {
+        await fetch('/api/motion/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (error) {
+        console.error('Failed to send stop command:', error);
+    }
+}
+
+// Quick Move
+async function quickMove(heading) {
+    const speed = 100;
+
+    try {
+        await fetch('/api/motion/roll', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                heading: heading,
+                speed: speed,
+                duration: 0
+            })
+        });
+    } catch (error) {
+        console.error('Failed to send roll command:', error);
+    }
+}
+
+// Error Handling
+function handleError(data) {
+    console.error('Error from server:', data);
+
+    // Show error notification
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'error-notification';
+    errorDiv.innerHTML = `
+        <strong>Error #${data.error_count}:</strong> ${data.message}
+        <button onclick="this.parentElement.remove()">×</button>
+    `;
+    document.body.appendChild(errorDiv);
+
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        if (errorDiv.parentElement) {
+            errorDiv.remove();
+        }
+    }, 5000);
+
+    // Update status display
+    document.getElementById('connection-status').textContent = 'Error';
+    document.getElementById('connection-status').className = 'status-error';
+}
+
+function handleForceDisconnect(data) {
+    console.warn('Force disconnect:', data);
+
+    // Show critical error notification
+    alert(`Connection Lost!\n\nReason: ${data.reason}\n\n${data.message}`);
+
+    // Force UI to disconnect state
+    document.getElementById('connect-btn').disabled = false;
+    document.getElementById('disconnect-btn').disabled = true;
+    document.getElementById('sphero-name').disabled = false;
+    disableTabs();
+
+    // Update status
+    document.getElementById('connection-status').textContent = 'Disconnected';
+    document.getElementById('connection-status').className = 'status-disconnected';
+    document.getElementById('battery-status').textContent = 'Battery: --';
+
+    // Show error in connection tab
+    showMessage(`Disconnected: ${data.message}`, 'error');
+
+    // Switch to connection tab
+    document.querySelector('.tab-button').click();
+}

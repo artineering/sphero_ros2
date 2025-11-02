@@ -795,6 +795,7 @@ def main(args=None):
     """Main entry point for the Sphero controller node."""
     rclpy.init(args=args)
     node = None
+    temp_node = None
     shutdown_requested = False
 
     def signal_handler(_sig, _frame):
@@ -806,9 +807,19 @@ def main(args=None):
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        # Scan for Sphero (modify toy_name as needed)
-        print("Scanning for Sphero robots...")
-        toy_name = "SB-3660"  # Change this to your Sphero's name
+        # Create a temporary node to read the toy_name parameter
+        temp_node = rclpy.create_node('temp_param_node')
+        temp_node.declare_parameter('toy_name', 'SB-3660')  # Default value
+        toy_name = temp_node.get_parameter('toy_name').value
+
+        print(f"Toy name from parameter: {toy_name}")
+
+        # Destroy temporary node before creating controller node
+        temp_node.destroy_node()
+        temp_node = None
+
+        # Scan for Sphero
+        print(f"Scanning for Sphero robot: {toy_name}...")
         robot = scanner.find_toy(toy_name=toy_name)
 
         with SpheroEduAPI(toy=robot) as api:
@@ -825,9 +836,15 @@ def main(args=None):
         print("\nShutting down...")
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
     finally:
-        # Clean up the node
+        # Clean up temporary node if it exists
+        if temp_node:
+            temp_node.destroy_node()
+
+        # Clean up the controller node
         if node:
             node.cleanup()
             node.destroy_node()

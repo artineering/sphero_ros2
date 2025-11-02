@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sphero Web Interface</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Sphero Web Interface</h1>
+            <div class="status-bar">
+                <span id="connection-status" class="status-disconnected">Disconnected</span>
+                <span id="battery-status" class="battery-info">Battery: --</span>
+            </div>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-button active" onclick="openTab(event, 'connection')">Connection</button>
+            <button class="tab-button" onclick="openTab(event, 'state')" id="state-tab" disabled>State</button>
+            <button class="tab-button" onclick="openTab(event, 'sensors')" id="sensors-tab" disabled>Sensors</button>
+            <button class="tab-button" onclick="openTab(event, 'matrix')" id="matrix-tab" disabled>Matrix</button>
+            <button class="tab-button" onclick="openTab(event, 'motion')" id="motion-tab" disabled>Motion</button>
+        </div>
+
+        <!-- Connection Tab -->
+        <div id="connection" class="tab-content active">
+            <h2>Connect to Sphero</h2>
+            <div class="connection-panel">
+                <div class="form-group">
+                    <label for="sphero-name">Sphero Name:</label>
+                    <input type="text" id="sphero-name" placeholder="e.g., SB-3660" />
+                    <small>Enter the exact name of your Sphero robot</small>
+                </div>
+                <div class="button-group">
+                    <button id="connect-btn" class="btn btn-primary" onclick="connectSphero()">Connect</button>
+                    <button id="disconnect-btn" class="btn btn-secondary" onclick="disconnectSphero()" disabled>Disconnect</button>
+                </div>
+                <div id="connection-message" class="message"></div>
+            </div>
+        </div>
+
+        <!-- State Tab -->
+        <div id="state" class="tab-content">
+            <h2>Sphero State</h2>
+            <div class="state-panel">
+                <div class="info-grid">
+                    <div class="info-card">
+                        <h3>Connection</h3>
+                        <p><strong>Name:</strong> <span id="state-name">--</span></p>
+                        <p><strong>Status:</strong> <span id="state-connection">--</span></p>
+                        <p><strong>Healthy:</strong> <span id="state-healthy">--</span></p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Battery</h3>
+                        <p><strong>Level:</strong> <span id="state-battery">--</span>%</p>
+                        <p><strong>Voltage:</strong> <span id="state-voltage">--</span>V</p>
+                        <p><strong>Health:</strong> <span id="state-bat-health">--</span></p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Motion</h3>
+                        <p><strong>Heading:</strong> <span id="state-heading">--</span>°</p>
+                        <p><strong>Speed:</strong> <span id="state-speed">--</span></p>
+                        <p><strong>Moving:</strong> <span id="state-moving">--</span></p>
+                    </div>
+                    <div class="info-card">
+                        <h3>LED</h3>
+                        <p><strong>Color:</strong> <span id="state-led" style="display: inline-block; width: 50px; height: 20px; border: 1px solid #ccc; background: #000;"></span></p>
+                    </div>
+                </div>
+                <div class="raw-data">
+                    <h3>Raw State Data</h3>
+                    <pre id="raw-state-data">{}</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sensors Tab -->
+        <div id="sensors" class="tab-content">
+            <h2>Sensor Readings</h2>
+            <div class="sensors-panel">
+                <div class="info-grid">
+                    <div class="info-card">
+                        <h3>Accelerometer</h3>
+                        <p><strong>X:</strong> <span id="sensor-accel-x">--</span> Gs</p>
+                        <p><strong>Y:</strong> <span id="sensor-accel-y">--</span> Gs</p>
+                        <p><strong>Z:</strong> <span id="sensor-accel-z">--</span> Gs</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Gyroscope</h3>
+                        <p><strong>X:</strong> <span id="sensor-gyro-x">--</span> °/s</p>
+                        <p><strong>Y:</strong> <span id="sensor-gyro-y">--</span> °/s</p>
+                        <p><strong>Z:</strong> <span id="sensor-gyro-z">--</span> °/s</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Velocity</h3>
+                        <p><strong>X:</strong> <span id="sensor-vel-x">--</span> cm/s</p>
+                        <p><strong>Y:</strong> <span id="sensor-vel-y">--</span> cm/s</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Location</h3>
+                        <p><strong>X:</strong> <span id="sensor-loc-x">--</span> cm</p>
+                        <p><strong>Y:</strong> <span id="sensor-loc-y">--</span> cm</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Matrix Tab -->
+        <div id="matrix" class="tab-content">
+            <h2>LED Matrix & Main LED Control</h2>
+            <div class="matrix-panel">
+                <div class="control-section">
+                    <h3>Main LED Control</h3>
+                    <div class="color-controls">
+                        <div class="color-input">
+                            <label>Red: <span id="led-red-val">0</span></label>
+                            <input type="range" id="led-red" min="0" max="255" value="0" oninput="updateLedColorPreview()">
+                        </div>
+                        <div class="color-input">
+                            <label>Green: <span id="led-green-val">255</span></label>
+                            <input type="range" id="led-green" min="0" max="255" value="255" oninput="updateLedColorPreview()">
+                        </div>
+                        <div class="color-input">
+                            <label>Blue: <span id="led-blue-val">0</span></label>
+                            <input type="range" id="led-blue" min="0" max="255" value="0" oninput="updateLedColorPreview()">
+                        </div>
+                        <div class="color-preview" id="led-color-preview"></div>
+                    </div>
+                    <button class="btn btn-primary" onclick="sendLed()">Set LED Color</button>
+                </div>
+
+                <div class="control-section">
+                    <h3>LED Matrix Patterns (Sphero BOLT only)</h3>
+                    <div class="form-group">
+                        <label>Select Pattern:</label>
+                        <div class="pattern-grid">
+                            <button class="pattern-btn" onclick="sendMatrix('smile')">😊 Smile</button>
+                            <button class="pattern-btn" onclick="sendMatrix('frown')">☹ Frown</button>
+                            <button class="pattern-btn" onclick="sendMatrix('heart')">❤️ Heart</button>
+                            <button class="pattern-btn" onclick="sendMatrix('star')">⭐ Star</button>
+                            <button class="pattern-btn" onclick="sendMatrix('arrow_up')">⬆️ Up</button>
+                            <button class="pattern-btn" onclick="sendMatrix('arrow_down')">⬇️ Down</button>
+                            <button class="pattern-btn" onclick="sendMatrix('arrow_left')">⬅️ Left</button>
+                            <button class="pattern-btn" onclick="sendMatrix('arrow_right')">➡️ Right</button>
+                            <button class="pattern-btn" onclick="sendMatrix('circle')">⭕ Circle</button>
+                            <button class="pattern-btn" onclick="sendMatrix('square')">⬜ Square</button>
+                            <button class="pattern-btn" onclick="sendMatrix('checkmark')">✓ Check</button>
+                            <button class="pattern-btn" onclick="sendMatrix('cross')">✗ Cross</button>
+                            <button class="pattern-btn" onclick="sendMatrix('plus')">➕ Plus</button>
+                            <button class="pattern-btn" onclick="sendMatrix('exclamation')">❗ Alert</button>
+                            <button class="pattern-btn" onclick="sendMatrix('question')">❓ Question</button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Matrix Color:</label>
+                        <div class="color-controls">
+                            <div class="color-input">
+                                <label>Red: <span id="matrix-red-val">255</span></label>
+                                <input type="range" id="matrix-red" min="0" max="255" value="255" oninput="updateMatrixColorPreview()">
+                            </div>
+                            <div class="color-input">
+                                <label>Green: <span id="matrix-green-val">255</span></label>
+                                <input type="range" id="matrix-green" min="0" max="255" value="255" oninput="updateMatrixColorPreview()">
+                            </div>
+                            <div class="color-input">
+                                <label>Blue: <span id="matrix-blue-val">255</span></label>
+                                <input type="range" id="matrix-blue" min="0" max="255" value="255" oninput="updateMatrixColorPreview()">
+                            </div>
+                            <div class="color-preview" id="matrix-color-preview"></div>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger" onclick="clearMatrix()">Clear Matrix</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Motion Tab -->
+        <div id="motion" class="tab-content">
+            <h2>Motion Control</h2>
+            <div class="motion-panel">
+                <div class="control-section">
+                    <h3>Heading Control</h3>
+                    <div class="heading-control">
+                        <div class="compass">
+                            <div class="compass-arrow" id="compass-arrow"></div>
+                            <div class="compass-label">N</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Heading: <span id="heading-val">0</span>°</label>
+                            <input type="range" id="heading" min="0" max="359" value="0" oninput="updateHeading()">
+                        </div>
+                        <button class="btn btn-primary" onclick="sendHeading()">Set Heading</button>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Speed Control</h3>
+                    <div class="form-group">
+                        <label>Speed: <span id="speed-val">100</span> (0-255)</label>
+                        <input type="range" id="speed" min="0" max="255" value="100" oninput="updateSpeedVal()">
+                    </div>
+                    <button class="btn btn-primary" onclick="sendSpeed()">Set Speed</button>
+                    <button class="btn btn-danger" onclick="sendStop()">STOP</button>
+                </div>
+
+                <div class="control-section">
+                    <h3>Quick Move</h3>
+                    <div class="direction-pad">
+                        <button class="dir-btn" onclick="quickMove(0)">↑</button>
+                        <button class="dir-btn" onclick="quickMove(270)">←</button>
+                        <button class="dir-btn center" onclick="sendStop()">STOP</button>
+                        <button class="dir-btn" onclick="quickMove(90)">→</button>
+                        <button class="dir-btn" onclick="quickMove(180)">↓</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
