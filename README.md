@@ -374,3 +374,4 @@ Check individual package directories for specific license information.
 **Last Updated**: November 2025
 **ROS2 Distribution**: Rolling
 **Maintained by**: Siddharth Vaghela (siddharth.vaghela@tufts.edu)
+**Disclaimer: All the code in this repository has been written with the help of Claude Code. While the maintainer is trying their best to iron out mistakes in the implementation, some errors might still exist in the code. The maintainer takes no responsibility for the errors in the code and the users assume the risk of using AI-generated code.
