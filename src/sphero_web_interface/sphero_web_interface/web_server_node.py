@@ -13,7 +13,7 @@ import time
 import subprocess
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import rclpy
 from rclpy.node import Node
@@ -45,6 +45,8 @@ class SpheroWebServerNode(Node):
         # Controller process tracking
         self.controller_process: Optional[subprocess.Popen] = None
         self.task_controller_process: Optional[subprocess.Popen] = None
+        self.state_machine_process: Optional[subprocess.Popen] = None
+        self.task_executor_process: Optional[subprocess.Popen] = None
         self.sphero_name: Optional[str] = None
         self.controller_ready = False
 
@@ -54,6 +56,8 @@ class SpheroWebServerNode(Node):
         self.latest_battery: Dict[str, Any] = {}
         self.latest_status: Dict[str, Any] = {}
         self.latest_task_status: Dict[str, Any] = {}
+        self.latest_sm_status: Dict[str, Any] = {}
+        self.latest_sm_events: List[Dict[str, Any]] = []
 
         # Error tracking
         self.last_message_time = time.time()
@@ -97,6 +101,21 @@ class SpheroWebServerNode(Node):
             10
         )
 
+        # State machine subscribers
+        self.sm_status_sub = self.create_subscription(
+            String,
+            '/state_machine/status',
+            self.sm_status_callback,
+            10
+        )
+
+        self.sm_events_sub = self.create_subscription(
+            String,
+            '/state_machine/events',
+            self.sm_events_callback,
+            10
+        )
+
         # Create publishers for Sphero commands
         self.led_pub = self.create_publisher(String, 'sphero/led', 10)
         self.roll_pub = self.create_publisher(String, 'sphero/roll', 10)
@@ -106,6 +125,7 @@ class SpheroWebServerNode(Node):
         self.stop_pub = self.create_publisher(String, 'sphero/stop', 10)
         self.matrix_pub = self.create_publisher(String, 'sphero/matrix', 10)
         self.task_pub = self.create_publisher(String, 'sphero/task', 10)
+        self.sm_config_pub = self.create_publisher(String, '/state_machine/config', 10)
 
         self.get_logger().info('Sphero Web Server Node initialized')
         self.get_logger().info('Web interface will be available at http://localhost:5000')
@@ -171,6 +191,29 @@ class SpheroWebServerNode(Node):
                 self.socketio.emit('task_status_update', self.latest_task_status)
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Failed to parse task status JSON: {e}')
+
+    def sm_status_callback(self, msg: String):
+        """Handle incoming state machine status messages."""
+        try:
+            self.latest_sm_status = json.loads(msg.data)
+            if hasattr(self, 'socketio'):
+                self.socketio.emit('sm_status_update', self.latest_sm_status)
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Failed to parse state machine status JSON: {e}')
+
+    def sm_events_callback(self, msg: String):
+        """Handle incoming state machine event messages."""
+        try:
+            event = json.loads(msg.data)
+            # Keep last 50 events
+            self.latest_sm_events.append(event)
+            if len(self.latest_sm_events) > 50:
+                self.latest_sm_events.pop(0)
+
+            if hasattr(self, 'socketio'):
+                self.socketio.emit('sm_event', event)
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Failed to parse state machine event JSON: {e}')
 
     def handle_error(self, error_message: str):
         """Handle errors and emit to web clients."""
@@ -350,35 +393,35 @@ class SpheroWebServerNode(Node):
         msg = String()
         msg.data = json.dumps({'red': red, 'green': green, 'blue': blue})
         self.led_pub.publish(msg)
-        self.get_logger().info(f'LED command sent: RGB({red}, {green}, {blue})')
+        self.get_logger().debug(f'LED command sent: RGB({red}, {green}, {blue})')
 
     def send_roll_command(self, heading: int, speed: int, duration: float = 0.0):
         """Send roll command."""
         msg = String()
         msg.data = json.dumps({'heading': heading, 'speed': speed, 'duration': duration})
         self.roll_pub.publish(msg)
-        self.get_logger().info(f'Roll command sent: heading={heading}, speed={speed}')
+        self.get_logger().debug(f'Roll command sent: heading={heading}, speed={speed}')
 
     def send_heading_command(self, heading: int):
         """Send heading command."""
         msg = String()
         msg.data = json.dumps({'heading': heading})
         self.heading_pub.publish(msg)
-        self.get_logger().info(f'Heading command sent: {heading}')
+        self.get_logger().debug(f'Heading command sent: {heading}')
 
     def send_speed_command(self, speed: int, duration: float = 0.0):
         """Send speed command."""
         msg = String()
         msg.data = json.dumps({'speed': speed, 'duration': duration})
         self.speed_pub.publish(msg)
-        self.get_logger().info(f'Speed command sent: {speed}')
+        self.get_logger().debug(f'Speed command sent: {speed}')
 
     def send_stop_command(self):
         """Send stop command."""
         msg = String()
         msg.data = json.dumps({})
         self.stop_pub.publish(msg)
-        self.get_logger().info('Stop command sent')
+        self.get_logger().debug('Stop command sent')
 
     def send_matrix_command(self, pattern: str, red: int = 255, green: int = 255, blue: int = 255):
         """Send matrix display command."""
@@ -391,7 +434,7 @@ class SpheroWebServerNode(Node):
             'duration': 0
         })
         self.matrix_pub.publish(msg)
-        self.get_logger().info(f'Matrix command sent: {pattern}')
+        self.get_logger().debug(f'Matrix command sent: {pattern}')
 
     def start_task_controller(self) -> Dict[str, Any]:
         """
@@ -488,7 +531,7 @@ class SpheroWebServerNode(Node):
         msg = String()
         msg.data = json.dumps(task_data)
         self.task_pub.publish(msg)
-        self.get_logger().info(f'Task command sent: {task_data.get("task_type", "unknown")}')
+        self.get_logger().debug(f'Task command sent: {task_data.get("task_type", "unknown")}')
 
     def clear_matrix(self):
         """Clear the LED matrix."""
@@ -503,7 +546,146 @@ class SpheroWebServerNode(Node):
             'duration': 0
         })
         self.matrix_pub.publish(msg)
-        self.get_logger().info('Matrix cleared')
+        self.get_logger().debug('Matrix cleared')
+
+    def start_state_machine(self) -> Dict[str, Any]:
+        """
+        Start the state machine controller node and task executor.
+
+        Returns:
+            Dict with status and message
+        """
+        if self.state_machine_process is not None:
+            return {
+                'success': False,
+                'message': 'State machine already running'
+            }
+
+        try:
+            # Start the state machine controller
+            cmd = ['ros2', 'run', 'sphero_statemachine', 'state_machine_controller']
+
+            self.get_logger().info(f'Starting state machine controller with command: {" ".join(cmd)}')
+
+            self.state_machine_process = subprocess.Popen(
+                cmd,
+                stdout=None,
+                stderr=None,
+                text=True
+            )
+
+            self.get_logger().info(f'State machine process started with PID: {self.state_machine_process.pid}')
+
+            time.sleep(1)
+
+            poll_result = self.state_machine_process.poll()
+            if poll_result is not None:
+                self.get_logger().error(f'State machine process exited with code: {poll_result}')
+                self.state_machine_process = None
+                return {
+                    'success': False,
+                    'message': f'State machine failed to start (exit code {poll_result})'
+                }
+
+            # Start the task executor
+            executor_cmd = ['ros2', 'run', 'sphero_statemachine', 'task_executor']
+
+            self.get_logger().info(f'Starting task executor with command: {" ".join(executor_cmd)}')
+
+            self.task_executor_process = subprocess.Popen(
+                executor_cmd,
+                stdout=None,
+                stderr=None,
+                text=True
+            )
+
+            self.get_logger().info(f'Task executor process started with PID: {self.task_executor_process.pid}')
+
+            time.sleep(0.5)
+
+            poll_result = self.task_executor_process.poll()
+            if poll_result is not None:
+                self.get_logger().error(f'Task executor process exited with code: {poll_result}')
+                # Stop state machine since executor failed
+                if self.state_machine_process:
+                    self.state_machine_process.terminate()
+                    self.state_machine_process = None
+                self.task_executor_process = None
+                return {
+                    'success': False,
+                    'message': f'Task executor failed to start (exit code {poll_result})'
+                }
+
+            return {
+                'success': True,
+                'message': 'State machine controller and task executor started successfully'
+            }
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to start state machine: {e}')
+            return {
+                'success': False,
+                'message': f'Error starting state machine: {str(e)}'
+            }
+
+    def stop_state_machine(self) -> Dict[str, Any]:
+        """
+        Stop the running state machine controller and task executor.
+
+        Returns:
+            Dict with status and message
+        """
+        if self.state_machine_process is None:
+            return {
+                'success': False,
+                'message': 'No state machine is running'
+            }
+
+        try:
+            # Stop task executor first
+            if self.task_executor_process is not None:
+                self.get_logger().info('Stopping task executor...')
+                try:
+                    self.task_executor_process.terminate()
+                    self.task_executor_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.task_executor_process.kill()
+                self.task_executor_process = None
+
+            # Stop state machine controller
+            self.get_logger().info('Stopping state machine controller...')
+            self.state_machine_process.terminate()
+            self.state_machine_process.wait(timeout=5)
+
+            self.state_machine_process = None
+            self.latest_sm_status = {}
+            self.latest_sm_events = []
+
+            return {
+                'success': True,
+                'message': 'State machine controller and task executor stopped successfully'
+            }
+
+        except subprocess.TimeoutExpired:
+            self.state_machine_process.kill()
+            self.state_machine_process = None
+            return {
+                'success': True,
+                'message': 'State machine controller forcefully stopped'
+            }
+        except Exception as e:
+            self.get_logger().error(f'Failed to stop state machine: {e}')
+            return {
+                'success': False,
+                'message': f'Error stopping state machine: {str(e)}'
+            }
+
+    def send_state_machine_config(self, config: Dict[str, Any]):
+        """Send state machine configuration."""
+        msg = String()
+        msg.data = json.dumps(config)
+        self.sm_config_pub.publish(msg)
+        self.get_logger().debug(f'State machine config sent: {config.get("name", "unnamed")}')
 
 
 def create_flask_app(ros_node: SpheroWebServerNode):
@@ -526,7 +708,13 @@ def create_flask_app(ros_node: SpheroWebServerNode):
         app = Flask(__name__)
 
     app.config['SECRET_KEY'] = 'sphero_web_interface_secret_key'
-    socketio = SocketIO(app, cors_allowed_origins="*")
+
+    # Disable Flask development server warnings and logs
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+
+    socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False)
 
     # Store socketio reference in node for callbacks
     ros_node.socketio = socketio
@@ -535,6 +723,11 @@ def create_flask_app(ros_node: SpheroWebServerNode):
     def index():
         """Serve the main web interface."""
         return render_template('index.html')
+
+    @app.route('/state_machine')
+    def state_machine():
+        """Serve the state machine configuration interface."""
+        return render_template('state_machine.html')
 
     @app.route('/api/connect', methods=['POST'])
     def connect():
@@ -661,16 +854,44 @@ def create_flask_app(ros_node: SpheroWebServerNode):
         ros_node.send_task_command(data)
         return jsonify({'success': True, 'message': 'Task submitted'})
 
+    @app.route('/api/state_machine/start', methods=['POST'])
+    def start_state_machine():
+        """Start the state machine controller."""
+        result = ros_node.start_state_machine()
+        return jsonify(result)
+
+    @app.route('/api/state_machine/stop', methods=['POST'])
+    def stop_state_machine():
+        """Stop the state machine controller."""
+        result = ros_node.stop_state_machine()
+        return jsonify(result)
+
+    @app.route('/api/state_machine/config', methods=['POST'])
+    def configure_state_machine():
+        """Send configuration to the state machine."""
+        data = request.get_json()
+        ros_node.send_state_machine_config(data)
+        return jsonify({'success': True, 'message': 'Configuration sent'})
+
+    @app.route('/api/state_machine/status', methods=['GET'])
+    def state_machine_status():
+        """Get state machine status."""
+        return jsonify({
+            'running': ros_node.state_machine_process is not None,
+            'latest_status': ros_node.latest_sm_status,
+            'recent_events': ros_node.latest_sm_events[-10:] if ros_node.latest_sm_events else []
+        })
+
     @socketio.on('connect')
     def handle_connect():
         """Handle WebSocket connection."""
-        ros_node.get_logger().info('Web client connected')
+        ros_node.get_logger().debug('Web client connected')
         emit('connected', {'message': 'Connected to Sphero Web Interface'})
 
     @socketio.on('disconnect')
     def handle_disconnect():
         """Handle WebSocket disconnection."""
-        ros_node.get_logger().info('Web client disconnected')
+        ros_node.get_logger().debug('Web client disconnected')
 
     return app, socketio
 

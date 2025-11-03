@@ -24,7 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'sphero_node = sphero_statemachine.sphero_node:main'
+            'sphero_node = sphero_statemachine.sphero_node:main',
+            'state_machine_controller = sphero_statemachine.state_machine_controller:main',
+            'task_executor = sphero_statemachine.task_executor:main'
         ],
     },
 )

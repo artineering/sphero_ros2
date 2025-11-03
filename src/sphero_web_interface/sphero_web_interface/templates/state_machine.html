@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sphero State Machine Controller</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .control-panel {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+        }
+
+        .btn-danger {
+            background: #f56565;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #e53e3e;
+            transform: translateY(-2px);
+        }
+
+        .btn-success {
+            background: #48bb78;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #38a169;
+            transform: translateY(-2px);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+
+        .status-running {
+            background: #48bb78;
+            color: white;
+        }
+
+        .status-stopped {
+            background: #cbd5e0;
+            color: #4a5568;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .card h2 {
+            margin-bottom: 15px;
+            color: #2d3748;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .state-info {
+            background: #f7fafc;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+
+        .state-info-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .state-info-item:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .state-info-label {
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .state-info-value {
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .config-editor {
+            width: 100%;
+            min-height: 400px;
+            font-family: 'Courier New', monospace;
+            padding: 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 5px;
+            font-size: 14px;
+            resize: vertical;
+        }
+
+        .config-editor:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .event-log {
+            max-height: 300px;
+            overflow-y: auto;
+            background: #f7fafc;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+
+        .event-item {
+            padding: 8px;
+            margin-bottom: 5px;
+            border-left: 3px solid #667eea;
+            background: white;
+            border-radius: 3px;
+        }
+
+        .event-time {
+            color: #718096;
+            font-size: 11px;
+        }
+
+        .event-type {
+            font-weight: 600;
+            color: #667eea;
+            margin-right: 10px;
+        }
+
+        .template-selector {
+            margin-bottom: 15px;
+        }
+
+        .template-selector select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e2e8f0;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            font-weight: 500;
+        }
+
+        .alert-info {
+            background: #bee3f8;
+            color: #2c5282;
+            border-left: 4px solid #3182ce;
+        }
+
+        .alert-success {
+            background: #c6f6d5;
+            color: #22543d;
+            border-left: 4px solid #38a169;
+        }
+
+        .alert-warning {
+            background: #feebc8;
+            color: #744210;
+            border-left: 4px solid #dd6b20;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Sphero State Machine Controller</h1>
+
+        <div class="control-panel">
+            <h2>Controller Management
+                <span id="controller-status" class="status-badge status-stopped">Stopped</span>
+            </h2>
+            <div class="button-group">
+                <button id="start-controller" class="btn-success">Start Controller</button>
+                <button id="stop-controller" class="btn-danger">Stop Controller</button>
+                <button id="refresh-status" class="btn-primary">Refresh Status</button>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>State Machine Configuration</h2>
+
+                <div class="template-selector">
+                    <label for="config-template"><strong>Load Template:</strong></label>
+                    <select id="config-template">
+                        <option value="">-- Select a template --</option>
+                        <option value="simple">Simple Two-State</option>
+                        <option value="patrol">Patrol Pattern</option>
+                        <option value="timed">Timed Sequence</option>
+                        <option value="sensor">Sensor-Based</option>
+                    </select>
+                </div>
+
+                <textarea id="config-editor" class="config-editor" placeholder="Enter state machine configuration JSON here..."></textarea>
+
+                <div class="button-group" style="margin-top: 15px;">
+                    <button id="send-config" class="btn-primary">Send Configuration</button>
+                    <button id="validate-config" class="btn-success">Validate JSON</button>
+                    <button id="clear-config" class="btn-danger">Clear</button>
+                </div>
+
+                <div id="config-status"></div>
+            </div>
+
+            <div class="card">
+                <h2>Current State</h2>
+                <div id="state-display" class="state-info">
+                    <div class="alert alert-info">
+                        No state machine configured yet. Start the controller and send a configuration.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Event Log</h2>
+            <div id="event-log" class="event-log">
+                <div class="alert alert-info">Waiting for events...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Connect to SocketIO
+        const socket = io();
+
+        // State
+        let controllerRunning = false;
+        let currentStatus = null;
+        let events = [];
+
+        // Configuration templates
+        const templates = {
+            simple: {
+                name: "Simple Two-State Machine",
+                initial_state: "idle",
+                states: [
+                    {
+                        name: "idle",
+                        description: "Robot is idle with blue LED",
+                        entry_condition: {
+                            type: "timer",
+                            params: {duration: 3.0}
+                        },
+                        task: {
+                            type: "set_led",
+                            params: {color: "blue"}
+                        }
+                    },
+                    {
+                        name: "active",
+                        description: "Robot is active with green LED",
+                        entry_condition: {
+                            type: "timer",
+                            params: {duration: 3.0}
+                        },
+                        task: {
+                            type: "set_led",
+                            params: {color: "green"}
+                        }
+                    }
+                ],
+                transitions: [
+                    {
+                        source: "idle",
+                        destination: "active",
+                        trigger: "auto"
+                    },
+                    {
+                        source: "active",
+                        destination: "idle",
+                        trigger: "auto"
+                    }
+                ]
+            },
+            patrol: {
+                name: "Patrol Pattern",
+                initial_state: "north",
+                states: [
+                    {
+                        name: "north",
+                        description: "Moving north",
+                        entry_condition: {type: "always", params: {}},
+                        task: {type: "roll", params: {heading: 0, speed: 80}},
+                        timeout: 3.0
+                    },
+                    {
+                        name: "east",
+                        description: "Moving east",
+                        entry_condition: {type: "timer", params: {duration: 3.0}},
+                        task: {type: "roll", params: {heading: 90, speed: 80}},
+                        timeout: 3.0
+                    },
+                    {
+                        name: "south",
+                        description: "Moving south",
+                        entry_condition: {type: "timer", params: {duration: 3.0}},
+                        task: {type: "roll", params: {heading: 180, speed: 80}},
+                        timeout: 3.0
+                    },
+                    {
+                        name: "west",
+                        description: "Moving west",
+                        entry_condition: {type: "timer", params: {duration: 3.0}},
+                        task: {type: "roll", params: {heading: 270, speed: 80}},
+                        timeout: 3.0
+                    }
+                ],
+                transitions: [
+                    {source: "north", destination: "east", trigger: "auto"},
+                    {source: "east", destination: "south", trigger: "auto"},
+                    {source: "south", destination: "west", trigger: "auto"},
+                    {source: "west", destination: "north", trigger: "auto"}
+                ]
+            },
+            timed: {
+                name: "Timed Sequence",
+                initial_state: "red",
+                states: [
+                    {
+                        name: "red",
+                        description: "Red LED for 2 seconds",
+                        entry_condition: {type: "always", params: {}},
+                        task: {type: "set_led", params: {color: "red"}},
+                        timeout: 2.0
+                    },
+                    {
+                        name: "green",
+                        description: "Green LED for 2 seconds",
+                        entry_condition: {type: "timer", params: {duration: 2.0}},
+                        task: {type: "set_led", params: {color: "green"}},
+                        timeout: 2.0
+                    },
+                    {
+                        name: "blue",
+                        description: "Blue LED for 2 seconds",
+                        entry_condition: {type: "timer", params: {duration: 2.0}},
+                        task: {type: "set_led", params: {color: "blue"}},
+                        timeout: 2.0
+                    }
+                ],
+                transitions: [
+                    {source: "red", destination: "green", trigger: "auto"},
+                    {source: "green", destination: "blue", trigger: "auto"},
+                    {source: "blue", destination: "red", trigger: "auto"}
+                ]
+            },
+            sensor: {
+                name: "Sensor-Based State Machine",
+                initial_state: "monitoring",
+                states: [
+                    {
+                        name: "monitoring",
+                        description: "Monitoring sensor values",
+                        entry_condition: {type: "always", params: {}},
+                        task: {type: "set_led", params: {color: "yellow"}}
+                    },
+                    {
+                        name: "alert",
+                        description: "Alert state when threshold exceeded",
+                        entry_condition: {
+                            type: "topic_value",
+                            params: {key: "battery_low", operator: "==", value: true}
+                        },
+                        task: {type: "set_led", params: {color: "red"}},
+                        timeout: 5.0
+                    },
+                    {
+                        name: "normal",
+                        description: "Normal operation",
+                        entry_condition: {
+                            type: "topic_value",
+                            params: {key: "battery_low", operator: "==", value: false}
+                        },
+                        task: {type: "set_led", params: {color: "green"}}
+                    }
+                ],
+                transitions: [
+                    {source: "monitoring", destination: "alert", trigger: "auto"},
+                    {source: "alert", destination: "normal", trigger: "auto"},
+                    {source: "normal", destination: "monitoring", trigger: "auto"}
+                ]
+            }
+        };
+
+        // UI Elements
+        const startBtn = document.getElementById('start-controller');
+        const stopBtn = document.getElementById('stop-controller');
+        const refreshBtn = document.getElementById('refresh-status');
+        const sendConfigBtn = document.getElementById('send-config');
+        const validateBtn = document.getElementById('validate-config');
+        const clearBtn = document.getElementById('clear-config');
+        const templateSelect = document.getElementById('config-template');
+        const configEditor = document.getElementById('config-editor');
+        const stateDisplay = document.getElementById('state-display');
+        const eventLog = document.getElementById('event-log');
+        const configStatus = document.getElementById('config-status');
+        const controllerStatus = document.getElementById('controller-status');
+
+        // Event Handlers
+        startBtn.addEventListener('click', startController);
+        stopBtn.addEventListener('click', stopController);
+        refreshBtn.addEventListener('click', refreshStatus);
+        sendConfigBtn.addEventListener('click', sendConfiguration);
+        validateBtn.addEventListener('click', validateConfiguration);
+        clearBtn.addEventListener('click', () => configEditor.value = '');
+        templateSelect.addEventListener('change', loadTemplate);
+
+        // SocketIO Event Handlers
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            refreshStatus();
+        });
+
+        socket.on('sm_status_update', (status) => {
+            currentStatus = status;
+            updateStateDisplay(status);
+        });
+
+        socket.on('sm_event', (event) => {
+            events.unshift(event);
+            if (events.length > 50) events.pop();
+            updateEventLog();
+        });
+
+        // Functions
+        async function startController() {
+            try {
+                const response = await fetch('/api/state_machine/start', {method: 'POST'});
+                const result = await response.json();
+                if (result.success) {
+                    showAlert(configStatus, result.message, 'success');
+                    controllerRunning = true;
+                    updateControllerStatus();
+                    setTimeout(refreshStatus, 1000);
+                } else {
+                    showAlert(configStatus, result.message, 'warning');
+                }
+            } catch (error) {
+                showAlert(configStatus, 'Error starting controller: ' + error.message, 'warning');
+            }
+        }
+
+        async function stopController() {
+            try {
+                const response = await fetch('/api/state_machine/stop', {method: 'POST'});
+                const result = await response.json();
+                if (result.success) {
+                    showAlert(configStatus, result.message, 'success');
+                    controllerRunning = false;
+                    updateControllerStatus();
+                    currentStatus = null;
+                    updateStateDisplay(null);
+                } else {
+                    showAlert(configStatus, result.message, 'warning');
+                }
+            } catch (error) {
+                showAlert(configStatus, 'Error stopping controller: ' + error.message, 'warning');
+            }
+        }
+
+        async function refreshStatus() {
+            try {
+                const response = await fetch('/api/state_machine/status');
+                const status = await response.json();
+                controllerRunning = status.running;
+                updateControllerStatus();
+
+                if (status.latest_status) {
+                    currentStatus = status.latest_status;
+                    updateStateDisplay(status.latest_status);
+                }
+
+                if (status.recent_events) {
+                    events = status.recent_events.reverse();
+                    updateEventLog();
+                }
+            } catch (error) {
+                console.error('Error refreshing status:', error);
+            }
+        }
+
+        async function sendConfiguration() {
+            try {
+                const config = JSON.parse(configEditor.value);
+                const response = await fetch('/api/state_machine/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                const result = await response.json();
+                if (result.success) {
+                    showAlert(configStatus, 'Configuration sent successfully!', 'success');
+                    setTimeout(refreshStatus, 500);
+                } else {
+                    showAlert(configStatus, result.message, 'warning');
+                }
+            } catch (error) {
+                showAlert(configStatus, 'Invalid JSON: ' + error.message, 'warning');
+            }
+        }
+
+        function validateConfiguration() {
+            try {
+                const config = JSON.parse(configEditor.value);
+
+                // Basic validation
+                if (!config.states || !Array.isArray(config.states) || config.states.length === 0) {
+                    showAlert(configStatus, 'Configuration must have at least one state', 'warning');
+                    return;
+                }
+
+                if (!config.initial_state) {
+                    showAlert(configStatus, 'Configuration must specify initial_state', 'warning');
+                    return;
+                }
+
+                showAlert(configStatus, 'Configuration is valid!', 'success');
+            } catch (error) {
+                showAlert(configStatus, 'Invalid JSON: ' + error.message, 'warning');
+            }
+        }
+
+        function loadTemplate() {
+            const template = templateSelect.value;
+            if (template && templates[template]) {
+                configEditor.value = JSON.stringify(templates[template], null, 2);
+                showAlert(configStatus, 'Template loaded: ' + templates[template].name, 'info');
+            }
+        }
+
+        function updateControllerStatus() {
+            if (controllerRunning) {
+                controllerStatus.textContent = 'Running';
+                controllerStatus.className = 'status-badge status-running';
+            } else {
+                controllerStatus.textContent = 'Stopped';
+                controllerStatus.className = 'status-badge status-stopped';
+            }
+        }
+
+        function updateStateDisplay(status) {
+            if (!status || !status.configured) {
+                stateDisplay.innerHTML = '<div class="alert alert-info">No state machine configured yet.</div>';
+                return;
+            }
+
+            stateDisplay.innerHTML = `
+                <div class="state-info-item">
+                    <span class="state-info-label">State Machine:</span>
+                    <span class="state-info-value">${status.name || 'Unnamed'}</span>
+                </div>
+                <div class="state-info-item">
+                    <span class="state-info-label">Current State:</span>
+                    <span class="state-info-value">${status.current_state}</span>
+                </div>
+                <div class="state-info-item">
+                    <span class="state-info-label">Description:</span>
+                    <span class="state-info-value">${status.state_description || 'N/A'}</span>
+                </div>
+                <div class="state-info-item">
+                    <span class="state-info-label">Time in State:</span>
+                    <span class="state-info-value">${status.time_in_state ? status.time_in_state.toFixed(1) + 's' : 'N/A'}</span>
+                </div>
+                <div class="state-info-item">
+                    <span class="state-info-label">Task Completed:</span>
+                    <span class="state-info-value">${status.task_completed ? 'Yes' : 'No'}</span>
+                </div>
+                <div class="state-info-item">
+                    <span class="state-info-label">Total States:</span>
+                    <span class="state-info-value">${status.num_states}</span>
+                </div>
+                <div class="state-info-item">
+                    <span class="state-info-label">Total Transitions:</span>
+                    <span class="state-info-value">${status.num_transitions}</span>
+                </div>
+            `;
+        }
+
+        function updateEventLog() {
+            if (events.length === 0) {
+                eventLog.innerHTML = '<div class="alert alert-info">No events yet...</div>';
+                return;
+            }
+
+            eventLog.innerHTML = events.map(event => {
+                const time = new Date(event.timestamp * 1000).toLocaleTimeString();
+                const dataStr = JSON.stringify(event.data);
+                return `
+                    <div class="event-item">
+                        <div class="event-time">${time}</div>
+                        <span class="event-type">${event.event_type}</span>
+                        <span>${dataStr}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function showAlert(container, message, type) {
+            container.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 5000);
+        }
+
+        // Initial load
+        refreshStatus();
+        setInterval(refreshStatus, 2000); // Refresh every 2 seconds
+    </script>
+</body>
+</html>

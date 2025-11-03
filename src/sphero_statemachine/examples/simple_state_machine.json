@@ -1,0 +1,50 @@
+{
+  "name": "Simple Demo State Machine",
+  "initial_state": "idle",
+  "states": [
+    {
+      "name": "idle",
+      "description": "Robot is idle with blue LED",
+      "entry_condition": {
+        "type": "timer",
+        "params": {
+          "duration": 3.0
+        }
+      },
+      "task": {
+        "type": "set_led",
+        "params": {
+          "color": "blue"
+        }
+      }
+    },
+    {
+      "name": "moving",
+      "description": "Robot is moving forward with green LED",
+      "entry_condition": {
+        "type": "timer",
+        "params": {
+          "duration": 3.0
+        }
+      },
+      "task": {
+        "type": "set_led",
+        "params": {
+          "color": "green"
+        }
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "source": "idle",
+      "destination": "moving",
+      "trigger": "auto"
+    },
+    {
+      "source": "moving",
+      "destination": "idle",
+      "trigger": "auto"
+    }
+  ]
+}

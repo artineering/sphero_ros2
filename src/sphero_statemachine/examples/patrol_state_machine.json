@@ -1,0 +1,98 @@
+{
+  "name": "Patrol Pattern State Machine",
+  "initial_state": "north",
+  "states": [
+    {
+      "name": "north",
+      "description": "Moving north (heading 0)",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "task": {
+        "type": "roll",
+        "params": {
+          "heading": 0,
+          "speed": 80
+        }
+      },
+      "timeout": 3.0
+    },
+    {
+      "name": "east",
+      "description": "Moving east (heading 90)",
+      "entry_condition": {
+        "type": "timer",
+        "params": {
+          "duration": 3.0
+        }
+      },
+      "task": {
+        "type": "roll",
+        "params": {
+          "heading": 90,
+          "speed": 80
+        }
+      },
+      "timeout": 3.0
+    },
+    {
+      "name": "south",
+      "description": "Moving south (heading 180)",
+      "entry_condition": {
+        "type": "timer",
+        "params": {
+          "duration": 3.0
+        }
+      },
+      "task": {
+        "type": "roll",
+        "params": {
+          "heading": 180,
+          "speed": 80
+        }
+      },
+      "timeout": 3.0
+    },
+    {
+      "name": "west",
+      "description": "Moving west (heading 270)",
+      "entry_condition": {
+        "type": "timer",
+        "params": {
+          "duration": 3.0
+        }
+      },
+      "task": {
+        "type": "roll",
+        "params": {
+          "heading": 270,
+          "speed": 80
+        }
+      },
+      "timeout": 3.0
+    }
+  ],
+  "transitions": [
+    {
+      "source": "north",
+      "destination": "east",
+      "trigger": "auto"
+    },
+    {
+      "source": "east",
+      "destination": "south",
+      "trigger": "auto"
+    },
+    {
+      "source": "south",
+      "destination": "west",
+      "trigger": "auto"
+    },
+    {
+      "source": "west",
+      "destination": "north",
+      "trigger": "auto"
+    }
+  ]
+}
