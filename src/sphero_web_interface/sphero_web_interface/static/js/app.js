@@ -1,11 +1,18 @@
 // WebSocket connection
 let socket;
 
+// XY Plot variables
+let xyChart = null;
+let plotData = [];
+let maxPlotPoints = 100;
+let autoScale = true;
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     initializeWebSocket();
     updateLedColorPreview();
     updateMatrixColorPreview();
+    initializeXYPlot();
     checkStatus();
 
     // Poll status every 2 seconds
@@ -178,6 +185,7 @@ function showMessage(message, type) {
 function enableTabs() {
     document.getElementById('state-tab').disabled = false;
     document.getElementById('sensors-tab').disabled = false;
+    document.getElementById('plot-tab').disabled = false;
     document.getElementById('matrix-tab').disabled = false;
     document.getElementById('motion-tab').disabled = false;
 }
@@ -185,6 +193,7 @@ function enableTabs() {
 function disableTabs() {
     document.getElementById('state-tab').disabled = true;
     document.getElementById('sensors-tab').disabled = true;
+    document.getElementById('plot-tab').disabled = true;
     document.getElementById('matrix-tab').disabled = true;
     document.getElementById('motion-tab').disabled = true;
 
@@ -283,12 +292,35 @@ function updateSensorDisplayFromState(sensors) {
             sensors.velocity.y ? sensors.velocity.y.toFixed(2) : '--';
     }
 
-    // Location
-    if (sensors.location) {
+    // Location (stored in 'position' in the state data)
+    if (sensors.position) {
+        const locX = sensors.position.x;
+        const locY = sensors.position.y;
+
         document.getElementById('sensor-loc-x').textContent =
-            sensors.location.x ? sensors.location.x.toFixed(2) : '--';
+            locX !== undefined && locX !== null ? locX.toFixed(2) : '--';
         document.getElementById('sensor-loc-y').textContent =
-            sensors.location.y ? sensors.location.y.toFixed(2) : '--';
+            locY !== undefined && locY !== null ? locY.toFixed(2) : '--';
+
+        // Update plot with location data
+        if (locX !== undefined && locX !== null && locY !== undefined && locY !== null) {
+            updatePlot(locX, locY);
+        }
+    }
+    // Fallback to 'location' if that's what's being used
+    else if (sensors.location) {
+        const locX = sensors.location.x;
+        const locY = sensors.location.y;
+
+        document.getElementById('sensor-loc-x').textContent =
+            locX !== undefined && locX !== null ? locX.toFixed(2) : '--';
+        document.getElementById('sensor-loc-y').textContent =
+            locY !== undefined && locY !== null ? locY.toFixed(2) : '--';
+
+        // Update plot with location data
+        if (locX !== undefined && locX !== null && locY !== undefined && locY !== null) {
+            updatePlot(locX, locY);
+        }
     }
 }
 
@@ -520,4 +552,190 @@ function handleForceDisconnect(data) {
 
     // Switch to connection tab
     document.querySelector('.tab-button').click();
+}
+
+// XY Plot Functions
+function initializeXYPlot() {
+    const ctx = document.getElementById('xy-plot').getContext('2d');
+
+    xyChart = new Chart(ctx, {
+        type: 'scatter',
+        data: {
+            datasets: [{
+                label: 'Sphero Path',
+                data: [],
+                backgroundColor: 'rgba(102, 126, 234, 0.6)',
+                borderColor: 'rgba(102, 126, 234, 1)',
+                borderWidth: 2,
+                showLine: true,
+                pointRadius: 3,
+                pointHoverRadius: 5
+            }, {
+                label: 'Current Position',
+                data: [],
+                backgroundColor: 'rgba(239, 68, 68, 1)',
+                borderColor: 'rgba(239, 68, 68, 1)',
+                borderWidth: 2,
+                pointRadius: 8,
+                pointHoverRadius: 10,
+                showLine: false
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            aspectRatio: 1,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Sphero XY Position (cm)',
+                    font: {
+                        size: 16
+                    }
+                },
+                legend: {
+                    display: true,
+                    position: 'top'
+                },
+                zoom: {
+                    zoom: {
+                        wheel: {
+                            enabled: true
+                        },
+                        pinch: {
+                            enabled: true
+                        },
+                        mode: 'xy'
+                    },
+                    pan: {
+                        enabled: true,
+                        mode: 'xy'
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'linear',
+                    position: 'bottom',
+                    title: {
+                        display: true,
+                        text: 'X Position (cm)'
+                    },
+                    grid: {
+                        color: 'rgba(0, 0, 0, 0.1)'
+                    }
+                },
+                y: {
+                    type: 'linear',
+                    title: {
+                        display: true,
+                        text: 'Y Position (cm)'
+                    },
+                    grid: {
+                        color: 'rgba(0, 0, 0, 0.1)'
+                    }
+                }
+            }
+        }
+    });
+}
+
+function updatePlot(x, y) {
+    if (!xyChart) return;
+
+    // Add new point to the dataset
+    plotData.push({ x: x, y: y });
+
+    // Limit the number of points
+    if (plotData.length > maxPlotPoints) {
+        plotData.shift();
+    }
+
+    // Update chart data
+    xyChart.data.datasets[0].data = plotData;
+    xyChart.data.datasets[1].data = [{ x: x, y: y }]; // Current position marker
+
+    // Update the chart
+    xyChart.update('none'); // 'none' for no animation, faster updates
+
+    // Update info display
+    document.getElementById('plot-current-x').textContent = x.toFixed(2);
+    document.getElementById('plot-current-y').textContent = y.toFixed(2);
+    document.getElementById('plot-point-count').textContent = plotData.length;
+
+    // Auto-scale if enabled
+    if (autoScale) {
+        updateChartScale();
+    }
+}
+
+function updateChartScale() {
+    if (!xyChart || plotData.length === 0) return;
+
+    const xValues = plotData.map(p => p.x);
+    const yValues = plotData.map(p => p.y);
+
+    const xMin = Math.min(...xValues);
+    const xMax = Math.max(...xValues);
+    const yMin = Math.min(...yValues);
+    const yMax = Math.max(...yValues);
+
+    const xPadding = (xMax - xMin) * 0.1 || 10;
+    const yPadding = (yMax - yMin) * 0.1 || 10;
+
+    xyChart.options.scales.x.min = xMin - xPadding;
+    xyChart.options.scales.x.max = xMax + xPadding;
+    xyChart.options.scales.y.min = yMin - yPadding;
+    xyChart.options.scales.y.max = yMax + yPadding;
+}
+
+function clearPlot() {
+    plotData = [];
+    if (xyChart) {
+        xyChart.data.datasets[0].data = [];
+        xyChart.data.datasets[1].data = [];
+        xyChart.update();
+    }
+    document.getElementById('plot-current-x').textContent = '--';
+    document.getElementById('plot-current-y').textContent = '--';
+    document.getElementById('plot-point-count').textContent = '0';
+}
+
+function resetZoom() {
+    if (xyChart) {
+        xyChart.options.scales.x.min = undefined;
+        xyChart.options.scales.x.max = undefined;
+        xyChart.options.scales.y.min = undefined;
+        xyChart.options.scales.y.max = undefined;
+        xyChart.update();
+        if (autoScale) {
+            updateChartScale();
+            xyChart.update();
+        }
+    }
+}
+
+function toggleAutoScale() {
+    autoScale = document.getElementById('auto-scale').checked;
+    if (autoScale) {
+        updateChartScale();
+        if (xyChart) {
+            xyChart.update();
+        }
+    }
+}
+
+function updateMaxPoints() {
+    const newMax = parseInt(document.getElementById('max-points').value);
+    if (newMax > 0) {
+        maxPlotPoints = newMax;
+        // Trim existing data if necessary
+        while (plotData.length > maxPlotPoints) {
+            plotData.shift();
+        }
+        if (xyChart) {
+            xyChart.data.datasets[0].data = plotData;
+            xyChart.update();
+        }
+    }
 }

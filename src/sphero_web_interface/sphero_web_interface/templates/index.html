@@ -6,6 +6,7 @@
     <title>Sphero Web Interface</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -21,6 +22,7 @@
             <button class="tab-button active" onclick="openTab(event, 'connection')">Connection</button>
             <button class="tab-button" onclick="openTab(event, 'state')" id="state-tab" disabled>State</button>
             <button class="tab-button" onclick="openTab(event, 'sensors')" id="sensors-tab" disabled>Sensors</button>
+            <button class="tab-button" onclick="openTab(event, 'plot')" id="plot-tab" disabled>Plot</button>
             <button class="tab-button" onclick="openTab(event, 'matrix')" id="matrix-tab" disabled>Matrix</button>
             <button class="tab-button" onclick="openTab(event, 'motion')" id="motion-tab" disabled>Motion</button>
         </div>
@@ -104,6 +106,32 @@
                         <p><strong>X:</strong> <span id="sensor-loc-x">--</span> cm</p>
                         <p><strong>Y:</strong> <span id="sensor-loc-y">--</span> cm</p>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Plot Tab -->
+        <div id="plot" class="tab-content">
+            <h2>XY Position Plot</h2>
+            <div class="plot-panel">
+                <div class="plot-controls">
+                    <button class="btn btn-secondary" onclick="clearPlot()">Clear Plot</button>
+                    <button class="btn btn-secondary" onclick="resetZoom()">Reset Zoom</button>
+                    <label>
+                        <input type="checkbox" id="auto-scale" checked onchange="toggleAutoScale()">
+                        Auto-scale
+                    </label>
+                    <label>
+                        Max Points:
+                        <input type="number" id="max-points" value="100" min="10" max="1000" step="10" onchange="updateMaxPoints()">
+                    </label>
+                </div>
+                <div class="plot-container">
+                    <canvas id="xy-plot"></canvas>
+                </div>
+                <div class="plot-info">
+                    <p><strong>Current Position:</strong> X: <span id="plot-current-x">--</span> cm, Y: <span id="plot-current-y">--</span> cm</p>
+                    <p><strong>Total Points:</strong> <span id="plot-point-count">0</span></p>
                 </div>
             </div>
         </div>

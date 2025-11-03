@@ -325,6 +325,10 @@ class SpheroState:
     # API handle (optional, for updating from device)
     _api: Optional[object] = field(default=None, repr=False)
 
+    # Position change tracking (for noise reduction)
+    _last_published_position: Optional[Tuple[float, float]] = field(default=None, repr=False)
+    _position_change_threshold: float = field(default=1.0, repr=False)  # cm
+
     def set_api(self, api):
         """Set the Sphero API handle for device queries."""
         self._api = api
@@ -332,6 +336,28 @@ class SpheroState:
     def update_timestamp(self):
         """Update the last_update timestamp to current time."""
         self.last_update = time.time()
+
+    def _should_update_position(self, new_x: float, new_y: float) -> bool:
+        """
+        Check if position should be updated based on change threshold.
+
+        Args:
+            new_x: New X position
+            new_y: New Y position
+
+        Returns:
+            bool: True if position should be updated, False otherwise
+        """
+        # Always update if no previous position
+        if self._last_published_position is None:
+            return True
+
+        # Calculate distance from last published position
+        last_x, last_y = self._last_published_position
+        distance = ((new_x - last_x) ** 2 + (new_y - last_y) ** 2) ** 0.5
+
+        # Update if distance exceeds threshold
+        return distance >= self._position_change_threshold
 
     def _get_orientation(self, subproperty: Optional[str] = None):
         """Get orientation property or sub-property."""
@@ -598,8 +624,14 @@ class SpheroState:
         # Query location from device
         try:
             location = self._api.get_location()
-            self.set('position', location.get('x', 0.0), 'x')
-            self.set('position', location.get('y', 0.0), 'y')
+            new_x = location.get('x', 0.0)
+            new_y = location.get('y', 0.0)
+
+            # Only update position if change exceeds threshold (reduces noise)
+            if self._should_update_position(new_x, new_y):
+                self.set('position', new_x, 'x')
+                self.set('position', new_y, 'y')
+                self._last_published_position = (new_x, new_y)
         except Exception:
             pass
 
