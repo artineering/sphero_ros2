@@ -44,6 +44,7 @@ class SpheroWebServerNode(Node):
 
         # Controller process tracking
         self.controller_process: Optional[subprocess.Popen] = None
+        self.task_controller_process: Optional[subprocess.Popen] = None
         self.sphero_name: Optional[str] = None
         self.controller_ready = False
 
@@ -52,6 +53,7 @@ class SpheroWebServerNode(Node):
         self.latest_sensors: Dict[str, Any] = {}
         self.latest_battery: Dict[str, Any] = {}
         self.latest_status: Dict[str, Any] = {}
+        self.latest_task_status: Dict[str, Any] = {}
 
         # Error tracking
         self.last_message_time = time.time()
@@ -88,6 +90,13 @@ class SpheroWebServerNode(Node):
             10
         )
 
+        self.task_status_sub = self.create_subscription(
+            String,
+            'sphero/task/status',
+            self.task_status_callback,
+            10
+        )
+
         # Create publishers for Sphero commands
         self.led_pub = self.create_publisher(String, 'sphero/led', 10)
         self.roll_pub = self.create_publisher(String, 'sphero/roll', 10)
@@ -96,6 +105,7 @@ class SpheroWebServerNode(Node):
         self.speed_pub = self.create_publisher(String, 'sphero/speed', 10)
         self.stop_pub = self.create_publisher(String, 'sphero/stop', 10)
         self.matrix_pub = self.create_publisher(String, 'sphero/matrix', 10)
+        self.task_pub = self.create_publisher(String, 'sphero/task', 10)
 
         self.get_logger().info('Sphero Web Server Node initialized')
         self.get_logger().info('Web interface will be available at http://localhost:5000')
@@ -152,6 +162,15 @@ class SpheroWebServerNode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Failed to parse status JSON: {e}')
             self.handle_error('Failed to parse status message')
+
+    def task_status_callback(self, msg: String):
+        """Handle incoming task status messages."""
+        try:
+            self.latest_task_status = json.loads(msg.data)
+            if hasattr(self, 'socketio'):
+                self.socketio.emit('task_status_update', self.latest_task_status)
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Failed to parse task status JSON: {e}')
 
     def handle_error(self, error_message: str):
         """Handle errors and emit to web clients."""
@@ -374,6 +393,103 @@ class SpheroWebServerNode(Node):
         self.matrix_pub.publish(msg)
         self.get_logger().info(f'Matrix command sent: {pattern}')
 
+    def start_task_controller(self) -> Dict[str, Any]:
+        """
+        Start the sphero_task_controller_node.
+
+        Returns:
+            Dict with status and message
+        """
+        if self.task_controller_process is not None:
+            return {
+                'success': False,
+                'message': 'Task controller already running'
+            }
+
+        try:
+            cmd = ['ros2', 'run', 'sphero_task_controller', 'task_controller']
+
+            self.get_logger().info(f'Starting task controller with command: {" ".join(cmd)}')
+
+            self.task_controller_process = subprocess.Popen(
+                cmd,
+                stdout=None,
+                stderr=None,
+                text=True
+            )
+
+            self.get_logger().info(f'Task controller process started with PID: {self.task_controller_process.pid}')
+
+            time.sleep(1)
+
+            poll_result = self.task_controller_process.poll()
+            if poll_result is not None:
+                self.get_logger().error(f'Task controller process exited with code: {poll_result}')
+                self.task_controller_process = None
+                return {
+                    'success': False,
+                    'message': f'Task controller failed to start (exit code {poll_result})'
+                }
+
+            return {
+                'success': True,
+                'message': 'Task controller started successfully'
+            }
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to start task controller: {e}')
+            return {
+                'success': False,
+                'message': f'Error starting task controller: {str(e)}'
+            }
+
+    def stop_task_controller(self) -> Dict[str, Any]:
+        """
+        Stop the running sphero_task_controller_node.
+
+        Returns:
+            Dict with status and message
+        """
+        if self.task_controller_process is None:
+            return {
+                'success': False,
+                'message': 'No task controller is running'
+            }
+
+        try:
+            self.get_logger().info('Stopping task controller...')
+            self.task_controller_process.terminate()
+            self.task_controller_process.wait(timeout=5)
+
+            self.task_controller_process = None
+            self.latest_task_status = {}
+
+            return {
+                'success': True,
+                'message': 'Task controller stopped successfully'
+            }
+
+        except subprocess.TimeoutExpired:
+            self.task_controller_process.kill()
+            self.task_controller_process = None
+            return {
+                'success': True,
+                'message': 'Task controller forcefully stopped'
+            }
+        except Exception as e:
+            self.get_logger().error(f'Failed to stop task controller: {e}')
+            return {
+                'success': False,
+                'message': f'Error stopping task controller: {str(e)}'
+            }
+
+    def send_task_command(self, task_data: Dict[str, Any]):
+        """Send task command to task controller."""
+        msg = String()
+        msg.data = json.dumps(task_data)
+        self.task_pub.publish(msg)
+        self.get_logger().info(f'Task command sent: {task_data.get("task_type", "unknown")}')
+
     def clear_matrix(self):
         """Clear the LED matrix."""
         msg = String()
@@ -518,6 +634,33 @@ def create_flask_app(ros_node: SpheroWebServerNode):
         ros_node.clear_matrix()
         return jsonify({'success': True})
 
+    @app.route('/api/task_controller/start', methods=['POST'])
+    def start_task_controller():
+        """Start the task controller."""
+        result = ros_node.start_task_controller()
+        return jsonify(result)
+
+    @app.route('/api/task_controller/stop', methods=['POST'])
+    def stop_task_controller():
+        """Stop the task controller."""
+        result = ros_node.stop_task_controller()
+        return jsonify(result)
+
+    @app.route('/api/task_controller/status', methods=['GET'])
+    def task_controller_status():
+        """Get task controller status."""
+        return jsonify({
+            'running': ros_node.task_controller_process is not None,
+            'latest_task_status': ros_node.latest_task_status
+        })
+
+    @app.route('/api/task', methods=['POST'])
+    def submit_task():
+        """Submit a task to the task controller."""
+        data = request.get_json()
+        ros_node.send_task_command(data)
+        return jsonify({'success': True, 'message': 'Task submitted'})
+
     @socketio.on('connect')
     def handle_connect():
         """Handle WebSocket connection."""
@@ -560,6 +703,8 @@ def main(args=None):
         # Cleanup
         if node.controller_process is not None:
             node.stop_controller()
+        if node.task_controller_process is not None:
+            node.stop_task_controller()
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()

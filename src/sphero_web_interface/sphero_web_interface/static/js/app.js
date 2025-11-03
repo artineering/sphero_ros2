@@ -54,6 +54,10 @@ function initializeWebSocket() {
     socket.on('force_disconnect', function(data) {
         handleForceDisconnect(data);
     });
+
+    socket.on('task_status_update', function(data) {
+        updateTaskStatusDisplay(data);
+    });
 }
 
 // Tab switching
@@ -186,6 +190,7 @@ function enableTabs() {
     document.getElementById('state-tab').disabled = false;
     document.getElementById('sensors-tab').disabled = false;
     document.getElementById('plot-tab').disabled = false;
+    document.getElementById('tasks-tab').disabled = false;
     document.getElementById('matrix-tab').disabled = false;
     document.getElementById('motion-tab').disabled = false;
 }
@@ -194,6 +199,7 @@ function disableTabs() {
     document.getElementById('state-tab').disabled = true;
     document.getElementById('sensors-tab').disabled = true;
     document.getElementById('plot-tab').disabled = true;
+    document.getElementById('tasks-tab').disabled = true;
     document.getElementById('matrix-tab').disabled = true;
     document.getElementById('motion-tab').disabled = true;
 
@@ -738,4 +744,240 @@ function updateMaxPoints() {
             xyChart.update();
         }
     }
+}
+
+// Task Controller Functions
+let currentTaskType = null;
+let currentTaskParams = {};
+
+async function startTaskController() {
+    try {
+        const response = await fetch('/api/task_controller/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            document.getElementById('start-task-controller-btn').disabled = true;
+            document.getElementById('stop-task-controller-btn').disabled = false;
+            showTaskMessage(data.message, 'success');
+        } else {
+            showTaskMessage(data.message, 'error');
+        }
+    } catch (error) {
+        showTaskMessage('Failed to start task controller: ' + error.message, 'error');
+    }
+}
+
+async function stopTaskController() {
+    try {
+        const response = await fetch('/api/task_controller/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            document.getElementById('start-task-controller-btn').disabled = false;
+            document.getElementById('stop-task-controller-btn').disabled = true;
+            showTaskMessage(data.message, 'success');
+        } else {
+            showTaskMessage(data.message, 'error');
+        }
+    } catch (error) {
+        showTaskMessage('Failed to stop task controller: ' + error.message, 'error');
+    }
+}
+
+function showTaskMessage(message, type) {
+    const messageDiv = document.getElementById('task-controller-status');
+    messageDiv.textContent = message;
+    messageDiv.className = `message ${type}`;
+    messageDiv.style.display = 'block';
+
+    setTimeout(() => {
+        messageDiv.style.display = 'none';
+    }, 5000);
+}
+
+function showTaskForm(taskType) {
+    currentTaskType = taskType;
+    currentTaskParams = {};
+
+    document.getElementById('task-form-title').textContent = taskType.replace('_', ' ').toUpperCase();
+    const formFields = document.getElementById('task-form-fields');
+    formFields.innerHTML = '';
+
+    // Generate form fields based on task type
+    if (taskType === 'move_to') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Target X (cm):</label>
+                <input type="number" id="task-x" value="100" step="10">
+            </div>
+            <div class="form-group">
+                <label>Target Y (cm):</label>
+                <input type="number" id="task-y" value="100" step="10">
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="100" min="0" max="255">
+            </div>
+        `;
+    } else if (taskType === 'patrol') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Waypoints (JSON array of {x, y} objects):</label>
+                <textarea id="task-waypoints" rows="4">[{"x": 50, "y": 50}, {"x": 100, "y": 50}, {"x": 100, "y": 100}]</textarea>
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="100" min="0" max="255">
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" id="task-loop"> Loop</label>
+            </div>
+        `;
+    } else if (taskType === 'circle') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Radius (cm):</label>
+                <input type="number" id="task-radius" value="50" step="10">
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="100" min="0" max="255">
+            </div>
+            <div class="form-group">
+                <label>Duration (seconds):</label>
+                <input type="number" id="task-duration" value="10" step="1">
+            </div>
+        `;
+    } else if (taskType === 'square') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Side Length (cm):</label>
+                <input type="number" id="task-side-length" value="100" step="10">
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="100" min="0" max="255">
+            </div>
+        `;
+    } else if (taskType === 'spin') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Rotations:</label>
+                <input type="number" id="task-rotations" value="2" step="0.5">
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="100" min="0" max="255">
+            </div>
+        `;
+    }
+
+    document.getElementById('task-form-container').style.display = 'block';
+}
+
+function cancelTaskForm() {
+    document.getElementById('task-form-container').style.display = 'none';
+    currentTaskType = null;
+    currentTaskParams = {};
+}
+
+async function submitCurrentTask() {
+    if (!currentTaskType) return;
+
+    const parameters = {};
+
+    // Collect parameters based on task type
+    if (currentTaskType === 'move_to') {
+        parameters.x = parseFloat(document.getElementById('task-x').value);
+        parameters.y = parseFloat(document.getElementById('task-y').value);
+        parameters.speed = parseInt(document.getElementById('task-speed').value);
+    } else if (currentTaskType === 'patrol') {
+        try {
+            parameters.waypoints = JSON.parse(document.getElementById('task-waypoints').value);
+            parameters.speed = parseInt(document.getElementById('task-speed').value);
+            parameters.loop = document.getElementById('task-loop').checked;
+        } catch (e) {
+            showTaskMessage('Invalid waypoints JSON: ' + e.message, 'error');
+            return;
+        }
+    } else if (currentTaskType === 'circle') {
+        parameters.radius = parseFloat(document.getElementById('task-radius').value);
+        parameters.speed = parseInt(document.getElementById('task-speed').value);
+        parameters.duration = parseFloat(document.getElementById('task-duration').value);
+    } else if (currentTaskType === 'square') {
+        parameters.side_length = parseFloat(document.getElementById('task-side-length').value);
+        parameters.speed = parseInt(document.getElementById('task-speed').value);
+    } else if (currentTaskType === 'spin') {
+        parameters.rotations = parseFloat(document.getElementById('task-rotations').value);
+        parameters.speed = parseInt(document.getElementById('task-speed').value);
+    }
+
+    const taskData = {
+        task_type: currentTaskType,
+        parameters: parameters
+    };
+
+    try {
+        const response = await fetch('/api/task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(taskData)
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            showTaskMessage(data.message, 'success');
+            cancelTaskForm();
+        } else {
+            showTaskMessage('Failed to submit task', 'error');
+        }
+    } catch (error) {
+        showTaskMessage('Failed to submit task: ' + error.message, 'error');
+    }
+}
+
+async function submitStopTask() {
+    const taskData = {
+        task_type: 'stop',
+        parameters: {}
+    };
+
+    try {
+        const response = await fetch('/api/task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(taskData)
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            showTaskMessage('Stop task submitted', 'success');
+        }
+    } catch (error) {
+        showTaskMessage('Failed to submit stop task: ' + error.message, 'error');
+    }
+}
+
+function updateTaskStatusDisplay(taskStatus) {
+    document.getElementById('current-task-id').textContent = taskStatus.task_id || '--';
+    document.getElementById('current-task-type').textContent = taskStatus.task_type || '--';
+    document.getElementById('current-task-status').textContent = taskStatus.status || '--';
+
+    if (taskStatus.started_at && taskStatus.status === 'running') {
+        const duration = Date.now() / 1000 - taskStatus.started_at;
+        document.getElementById('current-task-duration').textContent = duration.toFixed(1);
+    } else if (taskStatus.started_at && taskStatus.completed_at) {
+        const duration = taskStatus.completed_at - taskStatus.started_at;
+        document.getElementById('current-task-duration').textContent = duration.toFixed(1);
+    } else {
+        document.getElementById('current-task-duration').textContent = '--';
+    }
+
+    document.getElementById('task-status-data').textContent = JSON.stringify(taskStatus, null, 2);
 }

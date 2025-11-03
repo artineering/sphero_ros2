@@ -23,6 +23,7 @@
             <button class="tab-button" onclick="openTab(event, 'state')" id="state-tab" disabled>State</button>
             <button class="tab-button" onclick="openTab(event, 'sensors')" id="sensors-tab" disabled>Sensors</button>
             <button class="tab-button" onclick="openTab(event, 'plot')" id="plot-tab" disabled>Plot</button>
+            <button class="tab-button" onclick="openTab(event, 'tasks')" id="tasks-tab" disabled>Tasks</button>
             <button class="tab-button" onclick="openTab(event, 'matrix')" id="matrix-tab" disabled>Matrix</button>
             <button class="tab-button" onclick="openTab(event, 'motion')" id="motion-tab" disabled>Motion</button>
         </div>
@@ -132,6 +133,60 @@
                 <div class="plot-info">
                     <p><strong>Current Position:</strong> X: <span id="plot-current-x">--</span> cm, Y: <span id="plot-current-y">--</span> cm</p>
                     <p><strong>Total Points:</strong> <span id="plot-point-count">0</span></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tasks Tab -->
+        <div id="tasks" class="tab-content">
+            <h2>Task Controller</h2>
+            <div class="tasks-panel">
+                <!-- Task Controller Status -->
+                <div class="control-section">
+                    <h3>Task Controller</h3>
+                    <div class="button-group">
+                        <button id="start-task-controller-btn" class="btn btn-primary" onclick="startTaskController()">Start Task Controller</button>
+                        <button id="stop-task-controller-btn" class="btn btn-secondary" onclick="stopTaskController()" disabled>Stop Task Controller</button>
+                    </div>
+                    <div id="task-controller-status" class="message"></div>
+                </div>
+
+                <!-- Pre-canned Tasks -->
+                <div class="control-section">
+                    <h3>Quick Tasks</h3>
+                    <div class="task-quick-grid">
+                        <button class="task-btn" onclick="showTaskForm('move_to')">Move To</button>
+                        <button class="task-btn" onclick="showTaskForm('patrol')">Patrol</button>
+                        <button class="task-btn" onclick="showTaskForm('circle')">Circle</button>
+                        <button class="task-btn" onclick="showTaskForm('square')">Square</button>
+                        <button class="task-btn" onclick="showTaskForm('spin')">Spin</button>
+                        <button class="task-btn btn-danger" onclick="submitStopTask()">Stop All</button>
+                    </div>
+                </div>
+
+                <!-- Task Form -->
+                <div id="task-form-container" class="control-section" style="display: none;">
+                    <h3>Task Parameters: <span id="task-form-title">Task</span></h3>
+                    <div id="task-form-fields"></div>
+                    <div class="button-group">
+                        <button class="btn btn-primary" onclick="submitCurrentTask()">Submit Task</button>
+                        <button class="btn btn-secondary" onclick="cancelTaskForm()">Cancel</button>
+                    </div>
+                </div>
+
+                <!-- Task Status Display -->
+                <div class="control-section">
+                    <h3>Current Task Status</h3>
+                    <div class="info-card">
+                        <p><strong>Task ID:</strong> <span id="current-task-id">--</span></p>
+                        <p><strong>Type:</strong> <span id="current-task-type">--</span></p>
+                        <p><strong>Status:</strong> <span id="current-task-status">--</span></p>
+                        <p><strong>Duration:</strong> <span id="current-task-duration">--</span>s</p>
+                    </div>
+                    <div class="raw-data">
+                        <h4>Task Details</h4>
+                        <pre id="task-status-data">{}</pre>
+                    </div>
                 </div>
             </div>
         </div>
