@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sphero State Machine Controller</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -246,6 +247,32 @@
             color: #744210;
             border-left: 4px solid #dd6b20;
         }
+
+        .diagram-preview {
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            min-height: 300px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: auto;
+        }
+
+        .diagram-preview svg {
+            max-width: 100%;
+            height: auto;
+        }
+
+        .preview-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        #mermaid-diagram {
+            width: 100%;
+        }
     </style>
 </head>
 <body>
@@ -283,6 +310,7 @@
                 <div class="button-group" style="margin-top: 15px;">
                     <button id="send-config" class="btn-primary">Send Configuration</button>
                     <button id="validate-config" class="btn-success">Validate JSON</button>
+                    <button id="preview-diagram" class="btn-success">Preview Diagram</button>
                     <button id="clear-config" class="btn-danger">Clear</button>
                 </div>
 
@@ -290,11 +318,21 @@
             </div>
 
             <div class="card">
-                <h2>Current State</h2>
-                <div id="state-display" class="state-info">
-                    <div class="alert alert-info">
-                        No state machine configured yet. Start the controller and send a configuration.
-                    </div>
+                <h2>Visual Preview</h2>
+                <div class="preview-controls">
+                    <button id="auto-preview-toggle" class="btn-primary">Auto-Preview: ON</button>
+                </div>
+                <div id="diagram-container" class="diagram-preview">
+                    <div class="alert alert-info">Load a template or enter configuration to see diagram</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Current State</h2>
+            <div id="state-display" class="state-info">
+                <div class="alert alert-info">
+                    No state machine configured yet. Start the controller and send a configuration.
                 </div>
             </div>
         </div>
@@ -315,6 +353,8 @@
         let controllerRunning = false;
         let currentStatus = null;
         let events = [];
+        let autoPreview = true;
+        let diagramCounter = 0;
 
         // Configuration templates
         const templates = {
@@ -477,12 +517,15 @@
         const sendConfigBtn = document.getElementById('send-config');
         const validateBtn = document.getElementById('validate-config');
         const clearBtn = document.getElementById('clear-config');
+        const previewBtn = document.getElementById('preview-diagram');
+        const autoPreviewBtn = document.getElementById('auto-preview-toggle');
         const templateSelect = document.getElementById('config-template');
         const configEditor = document.getElementById('config-editor');
         const stateDisplay = document.getElementById('state-display');
         const eventLog = document.getElementById('event-log');
         const configStatus = document.getElementById('config-status');
         const controllerStatus = document.getElementById('controller-status');
+        const diagramContainer = document.getElementById('diagram-container');
 
         // Event Handlers
         startBtn.addEventListener('click', startController);
@@ -490,8 +533,17 @@
         refreshBtn.addEventListener('click', refreshStatus);
         sendConfigBtn.addEventListener('click', sendConfiguration);
         validateBtn.addEventListener('click', validateConfiguration);
+        previewBtn.addEventListener('click', () => renderDiagram());
+        autoPreviewBtn.addEventListener('click', toggleAutoPreview);
         clearBtn.addEventListener('click', () => configEditor.value = '');
         templateSelect.addEventListener('change', loadTemplate);
+
+        // Auto-preview on config change
+        configEditor.addEventListener('input', () => {
+            if (autoPreview) {
+                debounceRender();
+            }
+        });
 
         // SocketIO Event Handlers
         socket.on('connect', () => {
@@ -509,6 +561,105 @@
             if (events.length > 50) events.pop();
             updateEventLog();
         });
+
+        // Diagram rendering functions
+        function convertConfigToMermaid(config) {
+            try {
+                if (!config || !config.states || !Array.isArray(config.states)) {
+                    return null;
+                }
+
+                let mermaidCode = 'stateDiagram-v2\n';
+
+                // Add initial state marker
+                if (config.initial_state) {
+                    mermaidCode += `    [*] --> ${config.initial_state}\n`;
+                }
+
+                // Add states with descriptions
+                config.states.forEach(state => {
+                    const name = state.name;
+                    const desc = state.description || '';
+                    const condition = state.entry_condition?.type || 'always';
+                    const conditionParams = state.entry_condition?.params || {};
+                    const taskType = state.task?.type || 'none';
+
+                    // Add state with description if available
+                    if (desc) {
+                        mermaidCode += `    ${name} : ${desc}\n`;
+                    }
+
+                    // Add note with metadata
+                    let noteText = `Entry: ${condition}`;
+                    if (condition === 'timer' && conditionParams.duration) {
+                        noteText += ` (${conditionParams.duration}s)`;
+                    }
+                    noteText += `<br/>Task: ${taskType}`;
+
+                    mermaidCode += `    note right of ${name}\n`;
+                    mermaidCode += `        ${noteText}\n`;
+                    mermaidCode += `    end note\n`;
+                });
+
+                // Add transitions
+                if (config.transitions && Array.isArray(config.transitions)) {
+                    config.transitions.forEach(trans => {
+                        const trigger = trans.trigger || 'auto';
+                        mermaidCode += `    ${trans.source} --> ${trans.destination} : ${trigger}\n`;
+                    });
+                }
+
+                return mermaidCode;
+            } catch (error) {
+                console.error('Error converting config to Mermaid:', error);
+                return null;
+            }
+        }
+
+        let renderTimeout;
+        function debounceRender() {
+            clearTimeout(renderTimeout);
+            renderTimeout = setTimeout(() => renderDiagram(), 500);
+        }
+
+        async function renderDiagram() {
+            try {
+                const configText = configEditor.value.trim();
+                if (!configText) {
+                    diagramContainer.innerHTML = '<div class="alert alert-info">Enter configuration to see diagram</div>';
+                    return;
+                }
+
+                const config = JSON.parse(configText);
+                const mermaidCode = convertConfigToMermaid(config);
+
+                if (!mermaidCode) {
+                    diagramContainer.innerHTML = '<div class="alert alert-warning">Invalid configuration format</div>';
+                    return;
+                }
+
+                // Create unique ID for this diagram
+                const diagramId = `mermaid-diagram-${++diagramCounter}`;
+
+                // Render with Mermaid (v10 API)
+                const { svg } = await mermaid.render(diagramId, mermaidCode);
+                diagramContainer.innerHTML = svg;
+
+            } catch (error) {
+                console.error('Error rendering diagram:', error);
+                console.error('Mermaid code:', error.str || 'N/A');
+                diagramContainer.innerHTML = `<div class="alert alert-warning">Error rendering diagram: ${error.message}<br><small>${error.str || ''}</small></div>`;
+            }
+        }
+
+        function toggleAutoPreview() {
+            autoPreview = !autoPreview;
+            autoPreviewBtn.textContent = `Auto-Preview: ${autoPreview ? 'ON' : 'OFF'}`;
+            autoPreviewBtn.className = autoPreview ? 'btn-success' : 'btn-primary';
+            if (autoPreview) {
+                renderDiagram();
+            }
+        }
 
         // Functions
         async function startController() {
@@ -613,6 +764,10 @@
             if (template && templates[template]) {
                 configEditor.value = JSON.stringify(templates[template], null, 2);
                 showAlert(configStatus, 'Template loaded: ' + templates[template].name, 'info');
+                // Render diagram for the template
+                if (autoPreview) {
+                    renderDiagram();
+                }
             }
         }
 
@@ -689,6 +844,13 @@
                 container.innerHTML = '';
             }, 5000);
         }
+
+        // Initialize Mermaid
+        mermaid.initialize({
+            startOnLoad: false,
+            theme: 'default',
+            securityLevel: 'loose'
+        });
 
         // Initial load
         refreshStatus();
