@@ -123,6 +123,7 @@ class SpheroWebServerNode(Node):
         self.heading_pub = self.create_publisher(String, 'sphero/heading', 10)
         self.speed_pub = self.create_publisher(String, 'sphero/speed', 10)
         self.stop_pub = self.create_publisher(String, 'sphero/stop', 10)
+        self.reset_aim_pub = self.create_publisher(String, 'sphero/reset_aim', 10)
         self.matrix_pub = self.create_publisher(String, 'sphero/matrix', 10)
         self.task_pub = self.create_publisher(String, 'sphero/task', 10)
         self.sm_config_pub = self.create_publisher(String, '/state_machine/config', 10)
@@ -422,6 +423,13 @@ class SpheroWebServerNode(Node):
         msg.data = json.dumps({})
         self.stop_pub.publish(msg)
         self.get_logger().debug('Stop command sent')
+
+    def send_reset_aim_command(self):
+        """Send reset aim (reset to origin) command."""
+        msg = String()
+        msg.data = json.dumps({})
+        self.reset_aim_pub.publish(msg)
+        self.get_logger().info('Reset to origin command sent')
 
     def send_matrix_command(self, pattern: str, red: int = 255, green: int = 255, blue: int = 255):
         """Send matrix display command."""
@@ -808,6 +816,12 @@ def create_flask_app(ros_node: SpheroWebServerNode):
         """Stop the Sphero."""
         ros_node.send_stop_command()
         return jsonify({'success': True})
+
+    @app.route('/api/motion/reset', methods=['POST'])
+    def reset_origin():
+        """Reset Sphero to origin (heading=0, position=0,0)."""
+        ros_node.send_reset_aim_command()
+        return jsonify({'success': True, 'message': 'Sphero reset to origin'})
 
     @app.route('/api/matrix', methods=['POST'])
     def matrix():

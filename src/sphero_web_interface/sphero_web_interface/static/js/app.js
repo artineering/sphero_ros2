@@ -492,6 +492,25 @@ async function sendStop() {
     }
 }
 
+// Reset to Origin
+async function resetToOrigin() {
+    try {
+        const response = await fetch('/api/motion/reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const result = await response.json();
+        if (result.success) {
+            console.log('Sphero reset to origin: heading=0°, position=(0,0)');
+            // Optionally show a notification to the user
+            alert('Sphero reset to origin!\nHeading: 0°\nPosition: (0, 0)');
+        }
+    } catch (error) {
+        console.error('Failed to reset to origin:', error);
+        alert('Failed to reset Sphero to origin');
+    }
+}
+
 // Quick Move
 async function quickMove(heading) {
     const speed = 100;

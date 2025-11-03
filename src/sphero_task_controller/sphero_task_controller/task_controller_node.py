@@ -88,6 +88,7 @@ class SpheroTaskController(Node):
     Subscribes to:
         - /sphero/task (std_msgs/String): Task commands in JSON format
         - /sphero/state (std_msgs/String): Sphero state feedback
+        - /sphero/reset_aim (std_msgs/String): Reset position and heading to origin
 
     Publishes to:
         - /sphero/led (std_msgs/String): LED commands
@@ -140,6 +141,14 @@ class SpheroTaskController(Node):
             String,
             'sphero/state',
             self.state_callback,
+            10,
+            callback_group=self.callback_group
+        )
+
+        self.reset_aim_sub = self.create_subscription(
+            String,
+            'sphero/reset_aim',
+            self.reset_aim_callback,
             10,
             callback_group=self.callback_group
         )
@@ -222,6 +231,12 @@ class SpheroTaskController(Node):
 
         except json.JSONDecodeError:
             pass
+
+    def reset_aim_callback(self, msg: String):
+        """Reset position and heading to origin when reset_aim command is received."""
+        self.current_position = {'x': 0.0, 'y': 0.0}
+        self.current_heading = 0
+        self.get_logger().info('Task controller reset to origin: heading=0°, position=(0, 0)')
 
     def task_execution_loop(self):
         """Main task execution loop."""

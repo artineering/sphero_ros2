@@ -7,8 +7,9 @@
   <maintainer email="siddharth.vaghela@tufts.edu">Siddharth</maintainer>
   <license>TODO: License declaration</license>
 
-  <depend>spherov2,</depend>
-  <depend>rclpy,</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>sphero_package</depend>
   <depend>statemachine</depend>
 
   <test_depend>ament_copyright</test_depend>

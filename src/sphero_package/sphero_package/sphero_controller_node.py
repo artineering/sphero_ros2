@@ -126,6 +126,13 @@ class SpheroControllerNode(Node):
             10
         )
 
+        self.reset_aim_sub = self.create_subscription(
+            String,
+            'sphero/reset_aim',
+            self.reset_aim_callback,
+            10
+        )
+
         self.matrix_sub = self.create_subscription(
             String,
             'sphero/matrix',
@@ -133,10 +140,10 @@ class SpheroControllerNode(Node):
             10
         )
 
-        self.command_sub = self.create_subscription(
+        self.collision_sub = self.create_subscription(
             String,
-            'sphero/command',
-            self.command_callback,
+            'sphero/collision',
+            self.collision_callback,
             10
         )
 
@@ -194,8 +201,9 @@ class SpheroControllerNode(Node):
         self.get_logger().info('  - sphero/heading')
         self.get_logger().info('  - sphero/speed')
         self.get_logger().info('  - sphero/stop')
+        self.get_logger().info('  - sphero/reset_aim')
         self.get_logger().info('  - sphero/matrix')
-        self.get_logger().info('  - sphero/command')
+        self.get_logger().info('  - sphero/collision')
         self.get_logger().info('Publishing to:')
         self.get_logger().info(f'  - sphero/sensors (battleship_game/SpheroSensor, {self.sensor_rate} Hz)')
         self.get_logger().info(f'  - sphero/state (complete state JSON, {self.sensor_rate} Hz)')
@@ -390,6 +398,31 @@ class SpheroControllerNode(Node):
 
         except Exception as e:
             self.get_logger().error(f'Error in stop callback: {str(e)}')
+
+    def reset_aim_callback(self, msg: String):
+        """
+        Handle reset aim (reset to origin) commands.
+
+        This resets:
+        - The Sphero's heading to 0 degrees (recalibrates orientation)
+        - The position coordinates to (0, 0)
+
+        Expected JSON format:
+        {} (empty or any data)
+        """
+        try:
+            # Reset the physical heading
+            self.api.reset_aim()
+            self._current_heading = 0
+
+            # Reset the tracked position coordinates to origin
+            self.sphero_state.position.x = 0.0
+            self.sphero_state.position.y = 0.0
+
+            self.get_logger().info('Sphero reset to origin: heading=0°, position=(0, 0)')
+
+        except Exception as e:
+            self.get_logger().error(f'Error in reset_aim callback: {str(e)}')
 
     def matrix_callback(self, msg: String):
         """
@@ -589,74 +622,6 @@ class SpheroControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error flashing LED: {str(e)}')
 
-    def command_callback(self, msg: String):
-        """
-        Handle generic command messages.
-
-        Expected JSON format:
-        {
-            "command_type": "led" | "roll" | "spin" | "stop" | etc.,
-            "parameters": { ... }
-        }
-        """
-        try:
-            data = json.loads(msg.data)
-            command_type = data.get('command_type', '')
-            parameters = data.get('parameters', {})
-
-            # Route to appropriate handler
-            if command_type == 'led':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.led_callback(param_msg)
-
-            elif command_type == 'roll':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.roll_callback(param_msg)
-
-            elif command_type == 'spin':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.spin_callback(param_msg)
-
-            elif command_type == 'heading':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.heading_callback(param_msg)
-
-            elif command_type == 'speed':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.speed_callback(param_msg)
-
-            elif command_type == 'stop':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.stop_callback(param_msg)
-
-            elif command_type == 'matrix':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.matrix_callback(param_msg)
-
-            elif command_type == 'collision':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.collision_callback(param_msg)
-
-            elif command_type == 'ir':
-                param_msg = String()
-                param_msg.data = json.dumps(parameters)
-                self.ir_callback(param_msg)
-
-            else:
-                self.get_logger().warning(f'Unknown command type: {command_type}')
-
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f'Invalid JSON in command: {str(e)}')
-        except Exception as e:
-            self.get_logger().error(f'Error in command callback: {str(e)}')
 
     def publish_sensors(self):
         """

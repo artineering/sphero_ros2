@@ -15,6 +15,7 @@ from enum import Enum
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from sphero_package.msg import SpheroSensor
 
 from statemachine import StateMachine, State
 from statemachine.exceptions import TransitionNotAllowed
@@ -96,10 +97,10 @@ class DynamicStateMachineController(Node):
             10
         )
 
-        # Subscriber for sensor/state data used in conditions
+        # Subscriber for Sphero sensor data used in conditions
         self.sensor_sub = self.create_subscription(
-            String,
-            '/state_machine/sensor_data',
+            SpheroSensor,
+            '/sphero/sensors',
             self.sensor_data_callback,
             10
         )
@@ -127,6 +128,9 @@ class DynamicStateMachineController(Node):
         self.update_timer = self.create_timer(0.1, self.update_callback)
 
         self.get_logger().info('Dynamic State Machine Controller initialized')
+        self.get_logger().info('Subscribed to:')
+        self.get_logger().info('  - /state_machine/config (configuration)')
+        self.get_logger().info('  - /sphero/sensors (sensor data for conditions)')
         self.get_logger().info('Waiting for configuration on /state_machine/config')
 
         # Publish initial status
@@ -258,13 +262,39 @@ class DynamicStateMachineController(Node):
         # Execute initial state task
         self.execute_state_task(self.sm_current_state)
 
-    def sensor_data_callback(self, msg: String):
-        """Handle incoming sensor data for condition evaluation."""
+    def sensor_data_callback(self, msg: SpheroSensor):
+        """
+        Handle incoming Sphero sensor data for condition evaluation.
+
+        Converts SpheroSensor message to a dictionary for easy condition checking.
+        Available sensor keys:
+        - orientation: pitch, roll, yaw
+        - accelerometer: accel_x, accel_y, accel_z
+        - gyroscope: gyro_x, gyro_y, gyro_z
+        - position: x, y
+        - velocity: velocity_x, velocity_y
+        - battery: battery_percentage
+        """
         try:
-            data = json.loads(msg.data)
-            self.sensor_topic_values.update(data)
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f'Failed to parse sensor data: {e}')
+            # Convert SpheroSensor message to dictionary for condition evaluation
+            self.sensor_topic_values = {
+                'pitch': msg.pitch,
+                'roll': msg.roll,
+                'yaw': msg.yaw,
+                'accel_x': msg.accel_x,
+                'accel_y': msg.accel_y,
+                'accel_z': msg.accel_z,
+                'gyro_x': msg.gyro_x,
+                'gyro_y': msg.gyro_y,
+                'gyro_z': msg.gyro_z,
+                'x': msg.x,
+                'y': msg.y,
+                'velocity_x': msg.velocity_x,
+                'velocity_y': msg.velocity_y,
+                'battery_percentage': msg.battery_percentage
+            }
+        except Exception as e:
+            self.get_logger().error(f'Failed to process sensor data: {e}')
 
     def update_callback(self):
         """Periodic update to check conditions and transitions."""
