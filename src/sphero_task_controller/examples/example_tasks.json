@@ -1,0 +1,115 @@
+{
+  "description": "Example tasks for Sphero Task Controller",
+  "tasks": {
+    "move_to_origin": {
+      "task_type": "move_to",
+      "parameters": {
+        "x": 0,
+        "y": 0,
+        "speed": 100
+      }
+    },
+    "square_patrol": {
+      "task_type": "patrol",
+      "parameters": {
+        "waypoints": [
+          {"x": 0, "y": 0},
+          {"x": 100, "y": 0},
+          {"x": 100, "y": 100},
+          {"x": 0, "y": 100}
+        ],
+        "speed": 80,
+        "loop": true
+      }
+    },
+    "circle_dance": {
+      "task_type": "circle",
+      "parameters": {
+        "radius": 50,
+        "speed": 100,
+        "duration": 10.0
+      }
+    },
+    "rainbow_led": {
+      "task_type": "led_sequence",
+      "parameters": {
+        "sequence": [
+          {"red": 255, "green": 0, "blue": 0},
+          {"red": 255, "green": 127, "blue": 0},
+          {"red": 255, "green": 255, "blue": 0},
+          {"red": 0, "green": 255, "blue": 0},
+          {"red": 0, "green": 0, "blue": 255},
+          {"red": 75, "green": 0, "blue": 130},
+          {"red": 148, "green": 0, "blue": 211}
+        ],
+        "interval": 0.5,
+        "loop": true
+      }
+    },
+    "emoji_show": {
+      "task_type": "matrix_sequence",
+      "parameters": {
+        "sequence": [
+          {"pattern": "smile", "red": 255, "green": 255, "blue": 0},
+          {"pattern": "heart", "red": 255, "green": 0, "blue": 0},
+          {"pattern": "star", "red": 0, "green": 255, "blue": 255},
+          {"pattern": "checkmark", "red": 0, "green": 255, "blue": 0}
+        ],
+        "interval": 2.0,
+        "loop": false
+      }
+    },
+    "spin_twice": {
+      "task_type": "spin",
+      "parameters": {
+        "rotations": 2,
+        "speed": 100
+      }
+    },
+    "custom_demo": {
+      "task_type": "custom",
+      "parameters": {
+        "commands": [
+          {
+            "type": "led",
+            "red": 255,
+            "green": 0,
+            "blue": 0,
+            "duration": 1.0
+          },
+          {
+            "type": "roll",
+            "heading": 0,
+            "speed": 100,
+            "duration": 2.0
+          },
+          {
+            "type": "led",
+            "red": 0,
+            "green": 255,
+            "blue": 0,
+            "duration": 1.0
+          },
+          {
+            "type": "roll",
+            "heading": 90,
+            "speed": 100,
+            "duration": 2.0
+          },
+          {
+            "type": "matrix",
+            "pattern": "smile",
+            "red": 255,
+            "green": 255,
+            "blue": 0,
+            "duration": 2.0
+          },
+          {
+            "type": "stop",
+            "duration": 0.5
+          }
+        ]
+      }
+    }
+  }
+}

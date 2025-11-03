@@ -105,7 +105,67 @@ ros2 run sphero_web_interface web_server
 
 ---
 
-### 3. **sphero_statemachine**
+### 3. **sphero_task_controller**
+High-level task-based controller for Sphero robots.
+
+**Purpose**: Accepts complex, high-level tasks via a ROS2 topic and executes them by publishing appropriate commands to sphero_controller_node. Provides a task queue system for sequential task execution.
+
+**Key Features**:
+- **Task Queue System**: Queue multiple tasks for automatic sequential execution
+- **9 Built-in Task Types**:
+  - `move_to`: Navigate to specific coordinates
+  - `patrol`: Follow waypoints with optional looping
+  - `circle`: Circular motion patterns
+  - `square`: Automated square path
+  - `led_sequence`: Timed LED color sequences
+  - `matrix_sequence`: Matrix pattern sequences
+  - `spin`: Rotation in place
+  - `stop`: Immediate stop
+  - `custom`: User-defined command sequences
+- **State Feedback**: Closed-loop control using Sphero state
+- **Task Status Publishing**: Real-time task execution status
+- **JSON-based API**: Easy integration with other systems
+
+**Main Node**:
+- `task_controller`: Task queue manager and executor
+  - Subscribes to `/sphero/task` for task commands
+  - Publishes commands to sphero_controller
+  - Publishes status to `/sphero/task/status`
+
+**Example Tasks**:
+```bash
+# Move to position
+ros2 topic pub --once /sphero/task std_msgs/String "{data: '{
+    \"task_type\": \"move_to\",
+    \"parameters\": {\"x\": 100, \"y\": 50, \"speed\": 100}
+}'}"
+
+# LED rainbow sequence
+ros2 topic pub --once /sphero/task std_msgs/String "{data: '{
+    \"task_type\": \"led_sequence\",
+    \"parameters\": {
+        \"sequence\": [{\"red\": 255, \"green\": 0, \"blue\": 0}, ...],
+        \"interval\": 0.5
+    }
+}'}"
+```
+
+**Use Cases**:
+- Autonomous navigation missions
+- Choreographed performances
+- Automated testing sequences
+- Interactive demonstrations
+- Educational programming
+
+**Dependencies**:
+- sphero_package (controller node)
+- ROS2 (rclpy, std_msgs)
+
+**Documentation**: See [sphero_task_controller/README.md](src/sphero_task_controller/README.md)
+
+---
+
+### 4. **sphero_statemachine**
 State machine implementation for Sphero robot behaviors.
 
 **Purpose**: Provides structured state-based control for complex Sphero behaviors and task sequences.
@@ -374,4 +434,7 @@ Check individual package directories for specific license information.
 **Last Updated**: November 2025
 **ROS2 Distribution**: Rolling
 **Maintained by**: Siddharth Vaghela (siddharth.vaghela@tufts.edu)
-**Disclaimer: All the code in this repository has been written with the help of Claude Code. While the maintainer is trying their best to iron out mistakes in the implementation, some errors might still exist in the code. The maintainer takes no responsibility for the errors in the code and the users assume the risk of using AI-generated code.
+
+**Created with assistance from Claude Code (Anthropic)**
+
+**Disclaimer**: All the code in this repository has been written with the help of Claude Code. While the maintainer is trying their best to iron out mistakes in the implementation, some errors might still exist in the code. The maintainer takes no responsibility for the errors in the code and the users assume the risk of using AI-generated code.

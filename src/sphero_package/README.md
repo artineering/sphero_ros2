@@ -2,6 +2,8 @@
 
 ROS2 package for controlling Sphero robots (BOLT, Mini, etc.) using the spherov2 API.
 
+**Created with assistance from Claude Code (Anthropic)**
+
 ## Overview
 
 This package provides a ROS2 interface for Sphero robots, enabling topic-based control and sensor data publishing. It includes comprehensive state management, LED/matrix control, and configurable sensor publishing rates.

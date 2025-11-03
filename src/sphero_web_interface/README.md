@@ -2,6 +2,8 @@
 
 A comprehensive web-based interface for controlling and monitoring Sphero robots through ROS2.
 
+**Created with assistance from Claude Code (Anthropic)**
+
 ## Features
 
 - **Connection Management**: Connect to Sphero robots by entering their name
