@@ -197,6 +197,7 @@ class SpheroTaskController(Node):
                 f'Added task {task.task_id} ({task.task_type}) to queue. '
                 f'Queue length: {len(self.task_queue)}'
             )
+            self.get_logger().info(f'Task parameters: {json.dumps(task.parameters, indent=2)}')
 
             # Publish status
             self.publish_task_status(task)
@@ -244,7 +245,18 @@ class SpheroTaskController(Node):
             self.current_task = self.task_queue.pop(0)
             self.current_task.status = TaskStatus.RUNNING
             self.current_task.started_at = time.time()
-            self.get_logger().info(f'Starting task {self.current_task.task_id}')
+
+            # Update current position from state before starting task
+            if 'position' in self.current_state:
+                self.current_position = self.current_state['position'].copy()
+                self.get_logger().info(
+                    f'Starting task {self.current_task.task_id} at position: '
+                    f'x={self.current_position.get("x", 0.0):.2f}, '
+                    f'y={self.current_position.get("y", 0.0):.2f}'
+                )
+            else:
+                self.get_logger().info(f'Starting task {self.current_task.task_id}')
+
             self.publish_task_status(self.current_task)
 
         # Execute current task
@@ -281,6 +293,14 @@ class SpheroTaskController(Node):
         """
         task_type = task.task_type.lower()
 
+        # Log first execution of task
+        if 'first_execution_logged' not in task.parameters:
+            task.parameters['first_execution_logged'] = True
+            self.get_logger().info(
+                f'EXECUTE_TASK: {task.task_id} type={task_type}, '
+                f'parameters={json.dumps(task.parameters, default=str)}'
+            )
+
         if task_type == TaskType.MOVE_TO.value:
             return self.execute_move_to(task)
         elif task_type == TaskType.PATROL.value:
@@ -313,8 +333,16 @@ class SpheroTaskController(Node):
         dy = target_y - self.current_position['y']
         distance = math.sqrt(dx**2 + dy**2)
 
+        # Debug logging
+        self.get_logger().debug(
+            f'MOVE_TO: target=({target_x}, {target_y}), '
+            f'current=({self.current_position["x"]:.2f}, {self.current_position["y"]:.2f}), '
+            f'distance={distance:.2f}cm, speed={speed}'
+        )
+
         # Check if we've reached the target
         if distance < self.position_tolerance:
+            self.get_logger().info(f'Reached target position (within {self.position_tolerance}cm)')
             self.send_stop()
             return True
 
@@ -333,14 +361,17 @@ class SpheroTaskController(Node):
 
         if 'current_waypoint_index' not in task.parameters:
             task.parameters['current_waypoint_index'] = 0
+            self.get_logger().info(f'PATROL: Starting patrol with {len(waypoints)} waypoints, speed={speed}, loop={loop}')
 
         current_idx = task.parameters['current_waypoint_index']
 
         if current_idx >= len(waypoints):
             if loop:
+                self.get_logger().info('PATROL: Completed loop, restarting')
                 task.parameters['current_waypoint_index'] = 0
                 return False
             else:
+                self.get_logger().info('PATROL: All waypoints reached, stopping')
                 self.send_stop()
                 return True
 
@@ -350,8 +381,16 @@ class SpheroTaskController(Node):
         dy = waypoint['y'] - self.current_position['y']
         distance = math.sqrt(dx**2 + dy**2)
 
+        # Debug logging
+        self.get_logger().debug(
+            f'PATROL: waypoint[{current_idx}]=({waypoint["x"]}, {waypoint["y"]}), '
+            f'current=({self.current_position["x"]:.2f}, {self.current_position["y"]:.2f}), '
+            f'distance={distance:.2f}cm, speed={speed}'
+        )
+
         if distance < self.position_tolerance:
             # Reached waypoint, move to next
+            self.get_logger().info(f'PATROL: Reached waypoint {current_idx}, moving to next')
             task.parameters['current_waypoint_index'] += 1
             return False
 
@@ -367,15 +406,18 @@ class SpheroTaskController(Node):
 
         if 'start_time' not in task.parameters:
             task.parameters['start_time'] = time.time()
+            self.get_logger().info(f'CIRCLE: Starting circle, radius={radius}cm, speed={speed}, duration={duration}s')
 
         elapsed = time.time() - task.parameters['start_time']
 
         if elapsed >= duration:
+            self.get_logger().info(f'CIRCLE: Completed after {elapsed:.2f}s')
             self.send_stop()
             return True
 
         # Rotate heading continuously
         heading = int((elapsed * 36) % 360)  # 10 degrees per second
+        self.get_logger().debug(f'CIRCLE: elapsed={elapsed:.2f}s, heading={heading}°, speed={speed}')
         self.send_roll(heading, speed)
         return False
 
@@ -388,13 +430,19 @@ class SpheroTaskController(Node):
             # Generate square waypoints
             start_x = self.current_position['x']
             start_y = self.current_position['y']
-            task.parameters['waypoints'] = [
+            waypoints = [
                 {'x': start_x + side_length, 'y': start_y},
                 {'x': start_x + side_length, 'y': start_y + side_length},
                 {'x': start_x, 'y': start_y + side_length},
                 {'x': start_x, 'y': start_y}
             ]
+            task.parameters['waypoints'] = waypoints
             task.parameters['current_waypoint_index'] = 0
+            self.get_logger().info(
+                f'SQUARE: Generated square from ({start_x:.2f}, {start_y:.2f}), '
+                f'side_length={side_length}cm, speed={speed}'
+            )
+            self.get_logger().info(f'SQUARE: Waypoints: {waypoints}')
 
         # Use patrol logic for square
         return self.execute_patrol(task)
@@ -530,10 +578,27 @@ class SpheroTaskController(Node):
         self.led_pub.publish(msg)
 
     def send_roll(self, heading: int, speed: int, duration: float = 0.0):
-        """Send roll command."""
+        """
+        Send roll command to Sphero.
+
+        Args:
+            heading: Direction to move (0-359 degrees)
+            speed: Speed to move (0-255)
+            duration: Duration in seconds (0.0 = continuous/indefinite movement)
+
+        Note: When duration=0.0, the Sphero will continue moving at the specified
+        heading and speed until a new command is received. This is the correct
+        behavior for navigation tasks like move_to and patrol.
+        """
         msg = String()
-        msg.data = json.dumps({'heading': heading % 360, 'speed': speed, 'duration': duration})
+        cmd_data = {'heading': heading % 360, 'speed': speed, 'duration': duration}
+        msg.data = json.dumps(cmd_data)
         self.roll_pub.publish(msg)
+
+        # Debug logging
+        self.get_logger().debug(
+            f'ROLL CMD: heading={heading % 360}°, speed={speed}, duration={duration}s'
+        )
 
     def send_heading(self, heading: int):
         """Send heading command."""
