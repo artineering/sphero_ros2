@@ -221,22 +221,52 @@ class SpheroControllerNode(Node):
         {
             "red": 255,
             "green": 0,
-            "blue": 0
+            "blue": 0,
+            "led": "main"  # Optional: "main", "front", "back". Default: "main"
         }
+
+        Available LEDs:
+        - "main": Main LED (dome/body)
+        - "front": Front LED
+        - "back": Back LED
         """
         try:
             data = json.loads(msg.data)
             red = data.get('red', 0)
             green = data.get('green', 0)
             blue = data.get('blue', 0)
+            led_type = data.get('led', 'main').lower()
 
             # Validate RGB values
             red = max(0, min(255, int(red)))
             green = max(0, min(255, int(green)))
             blue = max(0, min(255, int(blue)))
 
-            self.api.set_main_led(Color(r=red, g=green, b=blue))
-            self.get_logger().info(f'LED set to RGB({red}, {green}, {blue})')
+            color = Color(r=red, g=green, b=blue)
+
+            # Set LED based on type
+            if led_type == 'main':
+                self.api.set_main_led(color)
+                self.get_logger().info(f'Main LED set to RGB({red}, {green}, {blue})')
+            elif led_type == 'front':
+                if hasattr(self.api, 'set_front_led'):
+                    self.api.set_front_led(color)
+                    self.get_logger().info(f'Front LED set to RGB({red}, {green}, {blue})')
+                else:
+                    self.get_logger().warning('Front LED not supported on this Sphero model')
+            elif led_type == 'back':
+                if hasattr(self.api, 'set_back_led'):
+                    self.api.set_back_led(color)
+                    self.get_logger().info(f'Back LED set to RGB({red}, {green}, {blue})')
+                else:
+                    self.get_logger().warning('Back LED not supported on this Sphero model')
+            else:
+                self.get_logger().warning(
+                    f'Unknown LED type: {led_type}. Supported types: main, front, back. '
+                    f'Defaulting to main LED.'
+                )
+                self.api.set_main_led(color)
+                self.get_logger().info(f'Main LED set to RGB({red}, {green}, {blue})')
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON in LED command: {str(e)}')
@@ -406,20 +436,37 @@ class SpheroControllerNode(Node):
         This resets:
         - The Sphero's heading to 0 degrees (recalibrates orientation)
         - The position coordinates to (0, 0)
+        - Position offset in SpheroState (device location will be subtracted by this offset going forward)
 
         Expected JSON format:
         {} (empty or any data)
         """
         try:
+            # Query current location from device BEFORE resetting
+            current_location = self.api.get_location()
+            device_x = current_location.get('x', 0.0)
+            device_y = current_location.get('y', 0.0)
+
             # Reset the physical heading
             self.api.reset_aim()
             self._current_heading = 0
+
+            # Set position offset in SpheroState - future position will be (device - offset)
+            # This makes the current device location become (0, 0) in our coordinate system
+            self.sphero_state._position_offset_x = device_x
+            self.sphero_state._position_offset_y = device_y
 
             # Reset the tracked position coordinates to origin
             self.sphero_state.position.x = 0.0
             self.sphero_state.position.y = 0.0
 
-            self.get_logger().info('Sphero reset to origin: heading=0°, position=(0, 0)')
+            # Reset position tracking for noise reduction
+            self.sphero_state._last_published_position = (0.0, 0.0)
+
+            self.get_logger().info(
+                f'Sphero reset to origin: heading=0°, position=(0, 0). '
+                f'Device offset: ({device_x:.2f}, {device_y:.2f})'
+            )
 
         except Exception as e:
             self.get_logger().error(f'Error in reset_aim callback: {str(e)}')

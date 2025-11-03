@@ -389,12 +389,12 @@ class SpheroWebServerNode(Node):
                 'message': f'Error stopping controller: {str(e)}'
             }
 
-    def send_led_command(self, red: int, green: int, blue: int):
+    def send_led_command(self, red: int, green: int, blue: int, led: str = 'main'):
         """Send LED color command."""
         msg = String()
-        msg.data = json.dumps({'red': red, 'green': green, 'blue': blue})
+        msg.data = json.dumps({'red': red, 'green': green, 'blue': blue, 'led': led})
         self.led_pub.publish(msg)
-        self.get_logger().debug(f'LED command sent: RGB({red}, {green}, {blue})')
+        self.get_logger().debug(f'{led.capitalize()} LED command sent: RGB({red}, {green}, {blue})')
 
     def send_roll_command(self, heading: int, speed: int, duration: float = 0.0):
         """Send roll command."""
@@ -779,7 +779,8 @@ def create_flask_app(ros_node: SpheroWebServerNode):
         ros_node.send_led_command(
             data.get('red', 0),
             data.get('green', 0),
-            data.get('blue', 0)
+            data.get('blue', 0),
+            data.get('led', 'main')
         )
         return jsonify({'success': True})
 

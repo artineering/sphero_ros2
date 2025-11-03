@@ -329,6 +329,10 @@ class SpheroState:
     _last_published_position: Optional[Tuple[float, float]] = field(default=None, repr=False)
     _position_change_threshold: float = field(default=1.0, repr=False)  # cm
 
+    # Position offset (for reset_aim functionality)
+    _position_offset_x: float = field(default=0.0, repr=False)
+    _position_offset_y: float = field(default=0.0, repr=False)
+
     def set_api(self, api):
         """Set the Sphero API handle for device queries."""
         self._api = api
@@ -624,8 +628,13 @@ class SpheroState:
         # Query location from device
         try:
             location = self._api.get_location()
-            new_x = location.get('x', 0.0)
-            new_y = location.get('y', 0.0)
+            device_x = location.get('x', 0.0)
+            device_y = location.get('y', 0.0)
+
+            # Apply position offset (for reset_aim functionality)
+            # This makes position relative to our coordinate system origin
+            new_x = device_x - self._position_offset_x
+            new_y = device_y - self._position_offset_y
 
             # Only update position if change exceeds threshold (reduces noise)
             if self._should_update_position(new_x, new_y):

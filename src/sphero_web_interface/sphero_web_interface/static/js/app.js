@@ -379,12 +379,13 @@ async function sendLed() {
     const r = parseInt(document.getElementById('led-red').value);
     const g = parseInt(document.getElementById('led-green').value);
     const b = parseInt(document.getElementById('led-blue').value);
+    const ledType = document.getElementById('led-type').value;
 
     try {
         await fetch('/api/led', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ red: r, green: g, blue: b })
+            body: JSON.stringify({ red: r, green: g, blue: b, led: ledType })
         });
     } catch (error) {
         console.error('Failed to send LED command:', error);
