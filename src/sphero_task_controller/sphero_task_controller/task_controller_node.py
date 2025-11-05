@@ -44,6 +44,7 @@ class TaskStatus(Enum):
 
 class TaskType(Enum):
     """Supported task types."""
+    # High-level tasks
     MOVE_TO = "move_to"
     PATROL = "patrol"
     CIRCLE = "circle"
@@ -53,6 +54,12 @@ class TaskType(Enum):
     SPIN = "spin"
     STOP = "stop"
     CUSTOM = "custom"
+    # Basic/immediate commands
+    SET_LED = "set_led"
+    ROLL = "roll"
+    HEADING = "heading"
+    SPEED = "speed"
+    MATRIX = "matrix"
 
 
 @dataclass
@@ -316,6 +323,7 @@ class SpheroTaskController(Node):
                 f'parameters={json.dumps(task.parameters, default=str)}'
             )
 
+        # High-level tasks
         if task_type == TaskType.MOVE_TO.value:
             return self.execute_move_to(task)
         elif task_type == TaskType.PATROL.value:
@@ -334,6 +342,17 @@ class SpheroTaskController(Node):
             return self.execute_stop(task)
         elif task_type == TaskType.CUSTOM.value:
             return self.execute_custom(task)
+        # Basic/immediate commands
+        elif task_type == TaskType.SET_LED.value:
+            return self.execute_basic_set_led(task)
+        elif task_type == TaskType.ROLL.value:
+            return self.execute_basic_roll(task)
+        elif task_type == TaskType.HEADING.value:
+            return self.execute_basic_heading(task)
+        elif task_type == TaskType.SPEED.value:
+            return self.execute_basic_speed(task)
+        elif task_type == TaskType.MATRIX.value:
+            return self.execute_basic_matrix(task)
         else:
             raise ValueError(f'Unknown task type: {task_type}')
 
@@ -644,6 +663,77 @@ class SpheroTaskController(Node):
             'duration': 0
         })
         self.matrix_pub.publish(msg)
+
+    # Basic/immediate command execution methods
+    def execute_basic_set_led(self, task: Task) -> bool:
+        """Execute basic LED command - completes immediately."""
+        params = task.parameters
+        color = params.get('color', 'white').lower()
+
+        # Color name to RGB mapping
+        color_map = {
+            'red': (255, 0, 0), 'green': (0, 255, 0), 'blue': (0, 0, 255),
+            'yellow': (255, 255, 0), 'cyan': (0, 255, 255), 'magenta': (255, 0, 255),
+            'white': (255, 255, 255), 'orange': (255, 165, 0), 'purple': (128, 0, 128),
+            'pink': (255, 192, 203), 'off': (0, 0, 0)
+        }
+
+        if 'red' in params and 'green' in params and 'blue' in params:
+            red, green, blue = params['red'], params['green'], params['blue']
+        elif color in color_map:
+            red, green, blue = color_map[color]
+        else:
+            red, green, blue = 255, 255, 255
+
+        self.send_led(red, green, blue)
+        self.get_logger().info(f'SET_LED: RGB({red}, {green}, {blue})')
+        return True  # Immediate completion
+
+    def execute_basic_roll(self, task: Task) -> bool:
+        """Execute basic roll command."""
+        params = task.parameters
+        heading = params.get('heading', 0)
+        speed = params.get('speed', 100)
+        duration = params.get('duration', 0.0)
+
+        self.send_roll(heading, speed, duration)
+        self.get_logger().info(f'ROLL: heading={heading}, speed={speed}, duration={duration}')
+
+        # If duration specified, wait for it
+        if duration > 0 and 'start_time' not in params:
+            task.parameters['start_time'] = time.time()
+            return False
+        elif duration > 0:
+            elapsed = time.time() - task.parameters['start_time']
+            return elapsed >= duration
+        else:
+            return True  # Immediate completion for indefinite roll
+
+    def execute_basic_heading(self, task: Task) -> bool:
+        """Execute basic heading command - completes immediately."""
+        heading = task.parameters.get('heading', 0)
+        self.send_heading(heading)
+        self.get_logger().info(f'HEADING: {heading}')
+        return True
+
+    def execute_basic_speed(self, task: Task) -> bool:
+        """Execute basic speed command - completes immediately."""
+        speed = task.parameters.get('speed', 0)
+        self.send_speed(speed)
+        self.get_logger().info(f'SPEED: {speed}')
+        return True
+
+    def execute_basic_matrix(self, task: Task) -> bool:
+        """Execute basic matrix command - completes immediately."""
+        params = task.parameters
+        pattern = params.get('pattern', 'smile')
+        red = params.get('red', 255)
+        green = params.get('green', 255)
+        blue = params.get('blue', 255)
+
+        self.send_matrix(pattern, red, green, blue)
+        self.get_logger().info(f'MATRIX: pattern={pattern}, RGB({red}, {green}, {blue})')
+        return True
 
     def publish_task_status(self, task: Task):
         """Publish task status update."""
