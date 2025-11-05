@@ -11,28 +11,51 @@
           "duration": 3.0
         }
       },
-      "task": {
-        "type": "set_led",
-        "params": {
-          "color": "blue"
+      "tasks": [
+        {
+          "type": "set_led",
+          "params": {
+            "color": "blue",
+            "led": "main"
+          }
         }
-      }
+      ]
     },
     {
       "name": "moving",
-      "description": "Robot is moving forward with green LED",
+      "description": "Robot moves with green LED and shows smile",
       "entry_condition": {
         "type": "timer",
         "params": {
           "duration": 3.0
         }
       },
-      "task": {
-        "type": "set_led",
-        "params": {
-          "color": "green"
+      "tasks": [
+        {
+          "type": "set_led",
+          "params": {
+            "color": "green",
+            "led": "main"
+          }
+        },
+        {
+          "type": "roll",
+          "params": {
+            "heading": 0,
+            "speed": 80,
+            "duration": 2.0
+          }
+        },
+        {
+          "type": "matrix",
+          "params": {
+            "pattern": "smile",
+            "red": 0,
+            "green": 255,
+            "blue": 0
+          }
         }
-      }
+      ]
     }
   ],
   "transitions": [

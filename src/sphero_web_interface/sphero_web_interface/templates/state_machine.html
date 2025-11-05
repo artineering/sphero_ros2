@@ -305,6 +305,40 @@
                     </select>
                 </div>
 
+                <details style="margin: 15px 0;">
+                    <summary style="cursor: pointer; font-weight: 600; color: #667eea; padding: 10px; background: #f7fafc; border-radius: 5px;">
+                        Quick Reference: Available Tasks & Conditions
+                    </summary>
+                    <div style="margin-top: 10px; padding: 15px; background: #f7fafc; border-radius: 5px; font-size: 14px;">
+                        <div style="margin-bottom: 15px;">
+                            <strong style="color: #667eea;">Entry Condition Types:</strong>
+                            <ul style="margin: 5px 0 0 20px;">
+                                <li><code>always</code> - Always allow entry (no params needed)</li>
+                                <li><code>timer</code> - Wait for duration: <code>{"type": "timer", "params": {"duration": 5.0}}</code></li>
+                                <li><code>topic_value</code> - Check sensor value: <code>{"type": "topic_value", "params": {"key": "battery_percentage", "operator": "<", "value": 20}}</code></li>
+                            </ul>
+                            <div style="margin-top: 8px; font-size: 12px; color: #666;">
+                                Operators: <code>==</code>, <code>!=</code>, <code>&gt;</code>, <code>&lt;</code>, <code>&gt;=</code>, <code>&lt;=</code><br>
+                                Available sensor keys: pitch, roll, yaw, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, x, y, velocity_x, velocity_y, battery_percentage
+                            </div>
+                        </div>
+                        <div>
+                            <strong style="color: #667eea;">Task Types (use in "tasks" array):</strong>
+                            <ul style="margin: 5px 0 0 20px;">
+                                <li><code>set_led</code> - Set LED color: <code>{"type": "set_led", "params": {"color": "red", "led": "main"}}</code></li>
+                                <li><code>roll</code> - Move robot: <code>{"type": "roll", "params": {"heading": 0, "speed": 100, "duration": 2.0}}</code></li>
+                                <li><code>stop</code> - Stop robot: <code>{"type": "stop", "params": {}}</code></li>
+                                <li><code>matrix</code> - Show LED pattern: <code>{"type": "matrix", "params": {"pattern": "smile", "red": 255, "green": 255, "blue": 255}}</code></li>
+                                <li><code>heading</code> - Set heading: <code>{"type": "heading", "params": {"heading": 90}}</code></li>
+                                <li><code>speed</code> - Set speed: <code>{"type": "speed", "params": {"speed": 128, "duration": 3.0}}</code></li>
+                            </ul>
+                            <div style="margin-top: 8px; font-size: 12px; color: #666;">
+                                LED types: main, front, back | Colors: red, green, blue, yellow, cyan, magenta, white, orange, purple, pink, off
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
                 <textarea id="config-editor" class="config-editor" placeholder="Enter state machine configuration JSON here..."></textarea>
 
                 <div class="button-group" style="margin-top: 15px;">
@@ -369,22 +403,30 @@
                             type: "timer",
                             params: {duration: 3.0}
                         },
-                        task: {
-                            type: "set_led",
-                            params: {color: "blue"}
-                        }
+                        tasks: [
+                            {
+                                type: "set_led",
+                                params: {color: "blue", led: "main"}
+                            }
+                        ]
                     },
                     {
                         name: "active",
-                        description: "Robot is active with green LED",
+                        description: "Robot is active with green LED and matrix",
                         entry_condition: {
                             type: "timer",
                             params: {duration: 3.0}
                         },
-                        task: {
-                            type: "set_led",
-                            params: {color: "green"}
-                        }
+                        tasks: [
+                            {
+                                type: "set_led",
+                                params: {color: "green", led: "main"}
+                            },
+                            {
+                                type: "matrix",
+                                params: {pattern: "smile", red: 0, green: 255, blue: 0}
+                            }
+                        ]
                     }
                 ],
                 transitions: [
@@ -582,7 +624,14 @@
                     const desc = state.description || '';
                     const condition = state.entry_condition?.type || 'always';
                     const conditionParams = state.entry_condition?.params || {};
-                    const taskType = state.task?.type || 'none';
+
+                    // Support both old format (single task) and new format (tasks array)
+                    let tasks = [];
+                    if (state.tasks && Array.isArray(state.tasks)) {
+                        tasks = state.tasks;
+                    } else if (state.task) {
+                        tasks = [state.task];
+                    }
 
                     // Add state with description if available
                     if (desc) {
@@ -594,7 +643,12 @@
                     if (condition === 'timer' && conditionParams.duration) {
                         noteText += ` (${conditionParams.duration}s)`;
                     }
-                    noteText += `<br/>Task: ${taskType}`;
+
+                    // Show tasks
+                    if (tasks.length > 0) {
+                        const taskTypes = tasks.map(t => t.type || 'none').join(', ');
+                        noteText += `<br/>Tasks: ${taskTypes}`;
+                    }
 
                     mermaidCode += `    note right of ${name}\n`;
                     mermaidCode += `        ${noteText}\n`;

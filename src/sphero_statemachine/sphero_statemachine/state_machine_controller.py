@@ -37,8 +37,7 @@ class DynamicState:
         name: Unique identifier for the state
         entry_condition: Condition that must be met before entering state
         entry_condition_params: Parameters for the entry condition
-        task: Task to execute when state is active
-        task_params: Parameters for the task
+        tasks: List of tasks to execute when state is active
     """
 
     def __init__(self, name: str, config: Dict[str, Any]):
@@ -49,9 +48,16 @@ class DynamicState:
         self.entry_condition_type = config.get('entry_condition', {}).get('type', 'always')
         self.entry_condition_params = config.get('entry_condition', {}).get('params', {})
 
-        # Task configuration
-        self.task_type = config.get('task', {}).get('type', 'none')
-        self.task_params = config.get('task', {}).get('params', {})
+        # Task configuration - support both single task (backward compatibility) and task array
+        if 'tasks' in config:
+            # New format: array of tasks
+            self.tasks = config['tasks']
+        elif 'task' in config:
+            # Old format: single task - convert to array
+            self.tasks = [config['task']]
+        else:
+            # No tasks
+            self.tasks = []
 
         # State metadata
         self.description = config.get('description', '')
@@ -441,34 +447,46 @@ class DynamicStateMachineController(Node):
 
     def execute_state_task(self, state_name: str):
         """
-        Execute the task associated with a state.
+        Execute all tasks associated with a state.
 
         Args:
-            state_name: Name of the state whose task to execute
+            state_name: Name of the state whose tasks to execute
         """
         if state_name not in self.sm_states:
             return
 
         state = self.sm_states[state_name]
-        task_type = state.task_type
-        task_params = state.task_params
 
-        self.get_logger().info(f'Executing task for state {state_name}: {task_type}')
+        if not state.tasks:
+            self.get_logger().info(f'No tasks to execute for state {state_name}')
+            state.task_completed = True
+            return
 
-        # Publish task command
-        task_command = {
-            'state': state_name,
-            'task_type': task_type,
-            'params': task_params,
-            'timestamp': time.time()
-        }
+        self.get_logger().info(f'Executing {len(state.tasks)} task(s) for state {state_name}')
 
-        msg = String()
-        msg.data = json.dumps(task_command)
-        self.task_pub.publish(msg)
+        # Execute each task in the array
+        for idx, task in enumerate(state.tasks):
+            task_type = task.get('type', 'none')
+            task_params = task.get('params', {})
 
-        # Publish task execution event
-        self.publish_event('task_executed', task_command)
+            self.get_logger().info(f'  Task {idx + 1}/{len(state.tasks)}: {task_type}')
+
+            # Publish task command
+            task_command = {
+                'state': state_name,
+                'task_type': task_type,
+                'params': task_params,
+                'task_index': idx,
+                'total_tasks': len(state.tasks),
+                'timestamp': time.time()
+            }
+
+            msg = String()
+            msg.data = json.dumps(task_command)
+            self.task_pub.publish(msg)
+
+            # Publish task execution event
+            self.publish_event('task_executed', task_command)
 
         state.task_completed = True
 
