@@ -1,0 +1,159 @@
+{
+  "name": "Collision Avoidance State Machine",
+  "initial_state": "idle",
+  "states": [
+    {
+      "name": "idle",
+      "description": "Robot is idle with green LED, waiting for commands",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "stop",
+          "params": {}
+        },
+        {
+          "type": "set_led",
+          "params": {
+            "color": "green",
+            "led": "main"
+          }
+        }
+      ]
+    },
+    {
+      "name": "moving",
+      "description": "Robot is moving forward with green matrix display and collision detection enabled",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "collision",
+          "params": {
+            "action": "start",
+            "mode": "obstacle"
+          }
+        },
+        {
+          "type": "matrix",
+          "params": {
+            "pattern": "fill",
+            "red": 0,
+            "green": 255,
+            "blue": 0
+          }
+        },
+        {
+          "type": "roll",
+          "params": {
+            "heading": 0,
+            "speed": 80
+          }
+        }
+      ]
+    },
+    {
+      "name": "collision",
+      "description": "Collision detected - show warning, stop, reflect direction, and resume",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "stop",
+          "params": {}
+        },
+        {
+          "type": "set_led",
+          "params": {
+            "color": "red",
+            "led": "main"
+          }
+        },
+        {
+          "type": "matrix",
+          "params": {
+            "pattern": "x",
+            "red": 255,
+            "green": 255,
+            "blue": 0
+          }
+        },
+        {
+          "type": "reflect",
+          "params": {
+            "speed": 80,
+            "offset_min": -45,
+            "offset_max": 45
+          }
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "source": "idle",
+      "destination": "moving",
+      "trigger": "forward_command",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "forward"
+      }
+    },
+    {
+      "source": "moving",
+      "destination": "collision",
+      "trigger": "obstacle_detected",
+      "condition": {
+        "type": "topic_message",
+        "topic": "/sphero/obstacle",
+        "msg_type": "std_msgs/String",
+        "timeout": 0.5
+      }
+    },
+    {
+      "source": "collision",
+      "destination": "moving",
+      "trigger": "resume_forward",
+      "condition": {
+        "type": "timer",
+        "duration": 2.0
+      }
+    },
+    {
+      "source": "moving",
+      "destination": "idle",
+      "trigger": "stop_from_moving",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "stop"
+      }
+    },
+    {
+      "source": "collision",
+      "destination": "idle",
+      "trigger": "stop_from_collision",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "stop"
+      }
+    }
+  ]
+}

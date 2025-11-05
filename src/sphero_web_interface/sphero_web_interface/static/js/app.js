@@ -39,9 +39,8 @@ function initializeWebSocket() {
         updateSensorDisplay(data);
     });
 
-    socket.on('battery_update', function(data) {
-        updateBatteryDisplay(data);
-    });
+    // Battery updates come from status_update (heartbeat) only
+    // Removed battery_update listener to prevent high-frequency updates
 
     socket.on('status_update', function(data) {
         updateStatusDisplay(data);
@@ -162,8 +161,8 @@ async function checkStatus() {
             }
 
             if (data.latest_battery && data.latest_battery.percentage !== undefined) {
-                document.getElementById('battery-status').textContent =
-                    `Battery: ${data.latest_battery.percentage.toFixed(0)}%`;
+                // Use unified battery display function
+                setBatteryDisplay(data.latest_battery.percentage);
             }
         } else {
             document.getElementById('connection-status').textContent = 'Disconnected';
@@ -223,7 +222,7 @@ function updateStateDisplay(state) {
         document.getElementById('connection-status').className = 'status-connected';
     }
 
-    // Battery info
+    // Battery info (display in state tab, but NOT in header - that's updated by heartbeat only)
     if (state.battery) {
         const batteryPct = state.battery.percentage !== undefined ? state.battery.percentage : null;
         const batteryVolt = state.battery.voltage !== undefined ? state.battery.voltage : null;
@@ -235,11 +234,8 @@ function updateStateDisplay(state) {
         document.getElementById('state-bat-health').textContent =
             batteryPct && batteryPct > 20 ? 'Good' : (batteryPct !== null ? 'Low' : '--');
 
-        // Update battery in header
-        if (batteryPct !== null) {
-            document.getElementById('battery-status').textContent =
-                `Battery: ${typeof batteryPct === 'number' ? batteryPct.toFixed(0) : batteryPct}%`;
-        }
+        // DO NOT update battery header here - it's updated only by status_update (heartbeat)
+        // This prevents flickering from high-frequency state updates
     }
 
     // Motion info
@@ -336,28 +332,65 @@ function updateSensorDisplay(data) {
 }
 
 // Battery display update
-function updateBatteryDisplay(data) {
-    if (data.percentage !== undefined) {
-        document.getElementById('battery-status').textContent =
-            `Battery: ${data.percentage.toFixed(0)}%`;
+// Helper function to get battery background color based on percentage
+function getBatteryColor(percentage) {
+    // Use 6 discrete color levels based on battery percentage
+    if (percentage >= 80) {
+        return '#28a745'; // Green - Excellent
+    } else if (percentage >= 60) {
+        return '#5cb85c'; // Light Green - Good
+    } else if (percentage >= 40) {
+        return '#ffc107'; // Yellow/Amber - Fair
+    } else if (percentage >= 20) {
+        return '#fd7e14'; // Orange - Low
+    } else if (percentage >= 10) {
+        return '#dc3545'; // Red - Critical
+    } else {
+        return '#a71d2a'; // Dark Red - Emergency
+    }
+}
+
+// Track last valid battery percentage to prevent flickering
+let lastValidBatteryPct = null;
+
+// Unified battery update function
+function setBatteryDisplay(percentage) {
+    const batteryElement = document.getElementById('battery-status');
+    if (batteryElement && percentage !== undefined && percentage !== null) {
+        const pct = typeof percentage === 'number' ? percentage : parseFloat(percentage);
+
+        // Only update if we have a valid percentage
+        if (!isNaN(pct) && pct >= 0 && pct <= 100) {
+            // Skip suspicious 0% readings if we previously had a higher value
+            // (unless we've seen consistently low values)
+            if (pct === 0 && lastValidBatteryPct !== null && lastValidBatteryPct > 5) {
+                console.warn(`Ignoring suspicious 0% battery reading (last valid: ${lastValidBatteryPct}%)`);
+                return; // Don't update
+            }
+
+            // Update display
+            lastValidBatteryPct = pct;
+            batteryElement.textContent = `Battery: ${pct.toFixed(0)}%`;
+            batteryElement.style.backgroundColor = getBatteryColor(pct);
+            batteryElement.style.color = '#ffffff'; // White text for readability
+            batteryElement.style.padding = '4px 8px';
+            batteryElement.style.borderRadius = '4px';
+            batteryElement.style.fontWeight = 'bold';
+        }
     }
 }
 
 // Status display update
 function updateStatusDisplay(data) {
-    console.log('Status update:', data);
-
     // Update connection status when we receive heartbeat (lowercase 'connected')
     if (data.connection_state === 'connected') {
         document.getElementById('connection-status').textContent = 'Connected';
         document.getElementById('connection-status').className = 'status-connected';
     }
 
-    // Update battery from status
+    // Update battery from status using unified function
     if (data.battery && data.battery.percentage !== undefined) {
-        const batteryPct = data.battery.percentage;
-        document.getElementById('battery-status').textContent =
-            `Battery: ${typeof batteryPct === 'number' ? batteryPct.toFixed(0) : batteryPct}%`;
+        setBatteryDisplay(data.battery.percentage);
     }
 }
 
@@ -896,6 +929,25 @@ function showTaskForm(taskType) {
                 <input type="number" id="task-speed" value="100" min="0" max="255">
             </div>
         `;
+    } else if (taskType === 'collision_start') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Detection Mode:</label>
+                <select id="task-collision-mode">
+                    <option value="obstacle" selected>Obstacle (while moving)</option>
+                    <option value="tap">Tap (while stationary)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Threshold (Gs):</label>
+                <input type="number" id="task-collision-threshold" value="1.5" step="0.1" min="0.1" max="5.0">
+                <small>Lower values = more sensitive. Recommended: 0.5-2.0</small>
+            </div>
+        `;
+    } else if (taskType === 'collision_stop') {
+        formFields.innerHTML = `
+            <p>This will stop collision detection.</p>
+        `;
     }
 
     document.getElementById('task-form-container').style.display = 'block';
@@ -936,10 +988,23 @@ async function submitCurrentTask() {
     } else if (currentTaskType === 'spin') {
         parameters.rotations = parseFloat(document.getElementById('task-rotations').value);
         parameters.speed = parseInt(document.getElementById('task-speed').value);
+    } else if (currentTaskType === 'collision_start') {
+        parameters.action = 'start';
+        parameters.mode = document.getElementById('task-collision-mode').value;
+        parameters.threshold = parseFloat(document.getElementById('task-collision-threshold').value);
+    } else if (currentTaskType === 'collision_stop') {
+        parameters.action = 'stop';
+        parameters.mode = 'obstacle';  // mode doesn't matter for stop action
+    }
+
+    // Map collision task types to 'collision' for the backend
+    let taskType = currentTaskType;
+    if (currentTaskType === 'collision_start' || currentTaskType === 'collision_stop') {
+        taskType = 'collision';
     }
 
     const taskData = {
-        task_type: currentTaskType,
+        task_type: taskType,
         parameters: parameters
     };
 

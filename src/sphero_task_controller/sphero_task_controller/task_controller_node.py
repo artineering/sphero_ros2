@@ -60,6 +60,8 @@ class TaskType(Enum):
     HEADING = "heading"
     SPEED = "speed"
     MATRIX = "matrix"
+    COLLISION = "collision"
+    REFLECT = "reflect"
 
 
 @dataclass
@@ -131,6 +133,7 @@ class SpheroTaskController(Node):
         self.speed_pub = self.create_publisher(String, 'sphero/speed', 10)
         self.stop_pub = self.create_publisher(String, 'sphero/stop', 10)
         self.matrix_pub = self.create_publisher(String, 'sphero/matrix', 10)
+        self.collision_pub = self.create_publisher(String, 'sphero/collision', 10)
 
         # Publisher for task status
         self.task_status_pub = self.create_publisher(String, 'sphero/task/status', 10)
@@ -353,6 +356,10 @@ class SpheroTaskController(Node):
             return self.execute_basic_speed(task)
         elif task_type == TaskType.MATRIX.value:
             return self.execute_basic_matrix(task)
+        elif task_type == TaskType.COLLISION.value:
+            return self.execute_basic_collision(task)
+        elif task_type == TaskType.REFLECT.value:
+            return self.execute_basic_reflect(task)
         else:
             raise ValueError(f'Unknown task type: {task_type}')
 
@@ -664,6 +671,21 @@ class SpheroTaskController(Node):
         })
         self.matrix_pub.publish(msg)
 
+    def send_collision(self, action: str, mode: str = 'obstacle'):
+        """
+        Send collision detection command.
+
+        Args:
+            action: 'start' to enable collision detection, 'stop' to disable
+            mode: 'tap' for tap detection, 'obstacle' for obstacle detection
+        """
+        msg = String()
+        msg.data = json.dumps({
+            'action': action,
+            'mode': mode
+        })
+        self.collision_pub.publish(msg)
+
     # Basic/immediate command execution methods
     def execute_basic_set_led(self, task: Task) -> bool:
         """Execute basic LED command - completes immediately."""
@@ -736,6 +758,50 @@ class SpheroTaskController(Node):
 
         self.send_matrix(pattern, red, green, blue)
         self.get_logger().info(f'MATRIX: pattern={pattern}, RGB({red}, {green}, {blue})')
+        return True
+
+    def execute_basic_collision(self, task: Task) -> bool:
+        """Execute collision detection enable/disable command - completes immediately."""
+        params = task.parameters
+        action = params.get('action', 'start')  # 'start' or 'stop'
+        mode = params.get('mode', 'obstacle')  # 'tap' or 'obstacle'
+
+        self.send_collision(action, mode)
+        self.get_logger().info(f'COLLISION: action={action}, mode={mode}')
+        return True
+
+    def execute_basic_reflect(self, task: Task) -> bool:
+        """
+        Execute reflect command - reverses heading and adds random offset.
+        This simulates light reflection behavior for collision avoidance.
+        Completes immediately.
+        """
+        import random
+
+        params = task.parameters
+        offset_min = params.get('offset_min', -45)  # Minimum offset in degrees
+        offset_max = params.get('offset_max', 45)   # Maximum offset in degrees
+        speed = params.get('speed', 80)             # Speed for reflected movement
+
+        # Calculate reverse heading (180 degrees opposite)
+        current_heading = self.current_heading
+        reverse_heading = (current_heading + 180) % 360
+
+        # Add random offset to simulate reflection
+        offset = random.randint(offset_min, offset_max)
+        new_heading = (reverse_heading + offset) % 360
+
+        # Update current heading
+        self.current_heading = new_heading
+
+        # Send roll command with new heading
+        self.send_roll(new_heading, speed, duration=0.0)
+
+        self.get_logger().info(
+            f'REFLECT: current={current_heading}°, reverse={reverse_heading}°, '
+            f'offset={offset}°, new_heading={new_heading}°, speed={speed}'
+        )
+
         return True
 
     def publish_task_status(self, task: Task):

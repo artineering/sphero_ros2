@@ -158,9 +158,10 @@ class SpheroWebServerNode(Node):
     def battery_callback(self, msg: BatteryState):
         """Handle incoming battery messages."""
         try:
+            # ROS BatteryState.percentage is 0.0-1.0, convert to 0-100
             battery_data = {
                 'voltage': msg.voltage,
-                'percentage': msg.percentage,
+                'percentage': msg.percentage * 100.0,  # Convert from 0.0-1.0 to 0-100
                 'power_supply_status': msg.power_supply_status,
                 'power_supply_health': msg.power_supply_health,
                 'timestamp': time.time()

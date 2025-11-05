@@ -71,8 +71,9 @@ class SpheroControllerNode(Node):
             toy_name=toy_name,
             connection_state=SpheroConnectionState.CONNECTED
         )
-        # Set API handle so state can query device directly
+        # Set API handle and toy so state can query device directly
         self.sphero_state.set_api(api)
+        self.sphero_state.set_toy(robot)
 
         # Internal state (for backward compatibility)
         self._current_heading = 0
@@ -562,11 +563,11 @@ class SpheroControllerNode(Node):
                 if self._collision_timer is not None:
                     self._collision_timer.cancel()
 
-                self._collision_timer = self.create_timer(0.01, self._check_collision)
+                self._collision_timer = self.create_timer(0.02, self._check_collision)
 
                 self.get_logger().info(
                     f'Starting collision detection in "{self._collision_mode}" mode '
-                    f'(threshold: {self._accel_threshold} Gs)'
+                    f'(threshold: {self._accel_threshold} Gs, timer period: 0.02s)'
                 )
 
             elif action == 'stop':
@@ -597,6 +598,10 @@ class SpheroControllerNode(Node):
             # Query current z-axis acceleration
             current_accel_z = self.sphero_state.query_property('accelerometer', 'z')
             if current_accel_z is None:
+                self.get_logger().warning(
+                    'Collision check: Could not read accelerometer z-axis',
+                    throttle_duration_sec=5.0
+                )
                 return
 
             # Query current motion state
@@ -606,6 +611,14 @@ class SpheroControllerNode(Node):
 
             # Calculate the change in acceleration
             accel_change = abs(current_accel_z - self._prev_accel_z)
+
+            # Debug logging (throttled to avoid spam)
+            self.get_logger().debug(
+                f'Collision check: mode={self._collision_mode}, moving={is_moving}, '
+                f'accel_z={current_accel_z:.2f}, change={accel_change:.2f}, '
+                f'threshold={self._accel_threshold}',
+                throttle_duration_sec=2.0
+            )
 
             # Check if acceleration change exceeds threshold
             if accel_change > self._accel_threshold:

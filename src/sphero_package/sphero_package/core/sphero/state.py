@@ -325,6 +325,9 @@ class SpheroState:
     # API handle (optional, for updating from device)
     _api: Optional[object] = field(default=None, repr=False)
 
+    # Toy object (optional, for direct command access)
+    _toy: Optional[object] = field(default=None, repr=False)
+
     # Position change tracking (for noise reduction)
     _last_published_position: Optional[Tuple[float, float]] = field(default=None, repr=False)
     _position_change_threshold: float = field(default=1.0, repr=False)  # cm
@@ -336,6 +339,10 @@ class SpheroState:
     def set_api(self, api):
         """Set the Sphero API handle for device queries."""
         self._api = api
+
+    def set_toy(self, toy):
+        """Set the Sphero toy object for direct command access."""
+        self._toy = toy
 
     def update_timestamp(self):
         """Update the last_update timestamp to current time."""
@@ -678,12 +685,42 @@ class SpheroState:
 
         # Query battery state from device if available
         try:
-            if hasattr(self._api, 'get_battery_percentage'):
-                battery_pct = self._api.get_battery_percentage()
-                self.set('battery', int(battery_pct), 'percentage')
-            if hasattr(self._api, 'get_battery_voltage'):
-                battery_voltage = self._api.get_battery_voltage()
-                self.set('battery', float(battery_voltage), 'voltage')
+            if self._toy is not None:
+                # Use the Power command directly on the toy object
+                from spherov2.commands.power import Power
+
+                battery_voltage = None
+                battery_pct = None
+
+                # Try to get voltage first (more reliable)
+                try:
+                    battery_voltage = Power.get_battery_voltage(self._toy)
+                    # Only update if we got a valid voltage
+                    if battery_voltage is not None and battery_voltage > 0:
+                        self.set('battery', float(battery_voltage), 'voltage')
+                    else:
+                        battery_voltage = None  # Treat invalid voltage as None
+                except Exception:
+                    # Voltage query may not be supported on all models
+                    battery_voltage = None
+
+                # Try to get percentage directly
+                try:
+                    battery_pct = Power.get_battery_percentage(self._toy)
+                    # Only update if we got a valid percentage
+                    if battery_pct is not None and 0 <= battery_pct <= 100:
+                        self.set('battery', int(battery_pct), 'percentage')
+                except Exception:
+                    # Battery percentage query not supported on some models - calculate from voltage
+                    if battery_voltage is not None and battery_voltage > 0:
+                        # Calculate percentage from voltage
+                        # Typical Sphero battery: 3.6V nominal
+                        # Conservative range: 3.4V = 0%, 4.1V = 100%
+                        min_voltage = 3.4
+                        max_voltage = 4.1
+                        calculated_pct = ((battery_voltage - min_voltage) / (max_voltage - min_voltage)) * 100
+                        calculated_pct = max(0, min(100, int(calculated_pct)))
+                        self.set('battery', calculated_pct, 'percentage')
         except Exception:
             pass
 
@@ -788,21 +825,46 @@ class SpheroState:
                     return self.motion
 
             elif property_name == 'battery':
-                if subproperty == 'voltage':
-                    if hasattr(self._api, 'get_battery_voltage'):
-                        voltage = self._api.get_battery_voltage()
-                        value = float(voltage)
-                        self.set('battery', value, 'voltage')
-                        return value
-                    return None
-                else:  # percentage or None
-                    if hasattr(self._api, query_info['method']):
-                        battery_pct = self._api.get_battery_percentage()
-                        value = int(battery_pct)
-                        self.set('battery', value, 'percentage')
-                        if subproperty == 'percentage':
+                if self._toy is not None:
+                    from spherov2.commands.power import Power
+                    if subproperty == 'voltage':
+                        try:
+                            voltage = Power.get_battery_voltage(self._toy)
+                            value = float(voltage)
+                            self.set('battery', value, 'voltage')
                             return value
-                        return self.battery
+                        except Exception:
+                            return None
+                    else:  # percentage or None
+                        battery_voltage = None
+                        # Try to get voltage for fallback calculation
+                        try:
+                            battery_voltage = Power.get_battery_voltage(self._toy)
+                            self.set('battery', float(battery_voltage), 'voltage')
+                        except Exception:
+                            pass
+
+                        # Try to get percentage directly
+                        try:
+                            battery_pct = Power.get_battery_percentage(self._toy)
+                            value = int(battery_pct)
+                            self.set('battery', value, 'percentage')
+                            if subproperty == 'percentage':
+                                return value
+                            return self.battery
+                        except Exception:
+                            # Calculate from voltage if available
+                            if battery_voltage is not None:
+                                min_voltage = 3.4
+                                max_voltage = 4.1
+                                calculated_pct = ((battery_voltage - min_voltage) / (max_voltage - min_voltage)) * 100
+                                calculated_pct = max(0, min(100, int(calculated_pct)))
+                                self.set('battery', calculated_pct, 'percentage')
+                                if subproperty == 'percentage':
+                                    return calculated_pct
+                                return self.battery
+                            return None
+                return None
 
             else:
                 # Standard property query
