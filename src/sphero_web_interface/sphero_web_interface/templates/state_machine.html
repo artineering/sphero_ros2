@@ -302,6 +302,7 @@
                         <option value="patrol">Patrol Pattern</option>
                         <option value="timed">Timed Sequence</option>
                         <option value="sensor">Sensor-Based</option>
+                        <option value="topic_triggered">Topic-Triggered (NEW!)</option>
                     </select>
                 </div>
 
@@ -320,6 +321,18 @@
                             <div style="margin-top: 8px; font-size: 12px; color: #666;">
                                 Operators: <code>==</code>, <code>!=</code>, <code>&gt;</code>, <code>&lt;</code>, <code>&gt;=</code>, <code>&lt;=</code><br>
                                 Available sensor keys: pitch, roll, yaw, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, x, y, velocity_x, velocity_y, battery_percentage
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                            <strong style="color: #667eea;">Transition Condition Types (NEW!):</strong>
+                            <ul style="margin: 5px 0 0 20px;">
+                                <li><code>auto</code> - Uses destination state's entry condition (default)</li>
+                                <li><code>timer</code> - Time-based: <code>{"type": "timer", "duration": 3.0}</code></li>
+                                <li><code>topic_value</code> - Topic field comparison: <code>{"type": "topic_value", "topic": "/cmd", "msg_type": "std_msgs/String", "field_path": "data", "operator": "==", "value": "go"}</code></li>
+                                <li><code>topic_message</code> - Any message received: <code>{"type": "topic_message", "topic": "/trigger", "msg_type": "std_msgs/Bool", "timeout": 1.0}</code></li>
+                            </ul>
+                            <div style="margin-top: 8px; font-size: 12px; color: #666;">
+                                Add <code>"condition": {...}</code> to any transition to use topic-based triggering!
                             </div>
                         </div>
                         <div>
@@ -549,6 +562,156 @@
                     {source: "alert", destination: "normal", trigger: "auto"},
                     {source: "normal", destination: "monitoring", trigger: "auto"}
                 ]
+            },
+            topic_triggered: {
+                name: "Topic-Triggered State Machine",
+                initial_state: "idle",
+                states: [
+                    {
+                        name: "idle",
+                        description: "Robot is idle, waiting for command",
+                        entry_condition: {type: "always", params: {}},
+                        tasks: [
+                            {type: "set_led", params: {color: "blue", led: "main"}}
+                        ]
+                    },
+                    {
+                        name: "moving_forward",
+                        description: "Robot moves forward with green LED",
+                        entry_condition: {type: "always", params: {}},
+                        tasks: [
+                            {type: "set_led", params: {color: "green", led: "main"}},
+                            {type: "roll", params: {heading: 0, speed: 80}}
+                        ]
+                    },
+                    {
+                        name: "turning",
+                        description: "Robot is turning with yellow LED",
+                        entry_condition: {type: "always", params: {}},
+                        tasks: [
+                            {type: "set_led", params: {color: "yellow", led: "main"}},
+                            {type: "roll", params: {heading: 90, speed: 60}}
+                        ]
+                    },
+                    {
+                        name: "emergency_stop",
+                        description: "Emergency stop with red LED",
+                        entry_condition: {type: "always", params: {}},
+                        tasks: [
+                            {type: "set_led", params: {color: "red", led: "main"}},
+                            {type: "stop", params: {}}
+                        ]
+                    }
+                ],
+                transitions: [
+                    {
+                        source: "idle",
+                        destination: "moving_forward",
+                        trigger: "forward_cmd",
+                        condition: {
+                            type: "topic_value",
+                            topic: "/robot_command",
+                            msg_type: "std_msgs/String",
+                            field_path: "data",
+                            operator: "==",
+                            value: "forward"
+                        }
+                    },
+                    {
+                        source: "idle",
+                        destination: "turning",
+                        trigger: "turn_cmd",
+                        condition: {
+                            type: "topic_value",
+                            topic: "/robot_command",
+                            msg_type: "std_msgs/String",
+                            field_path: "data",
+                            operator: "==",
+                            value: "turn"
+                        }
+                    },
+                    {
+                        source: "moving_forward",
+                        destination: "idle",
+                        trigger: "stop_cmd",
+                        condition: {
+                            type: "topic_value",
+                            topic: "/robot_command",
+                            msg_type: "std_msgs/String",
+                            field_path: "data",
+                            operator: "==",
+                            value: "stop"
+                        }
+                    },
+                    {
+                        source: "moving_forward",
+                        destination: "turning",
+                        trigger: "turn_cmd",
+                        condition: {
+                            type: "topic_value",
+                            topic: "/robot_command",
+                            msg_type: "std_msgs/String",
+                            field_path: "data",
+                            operator: "==",
+                            value: "turn"
+                        }
+                    },
+                    {
+                        source: "turning",
+                        destination: "idle",
+                        trigger: "timer_return",
+                        condition: {
+                            type: "timer",
+                            duration: 3.0
+                        }
+                    },
+                    {
+                        source: "idle",
+                        destination: "emergency_stop",
+                        trigger: "emergency",
+                        condition: {
+                            type: "topic_message",
+                            topic: "/emergency_stop",
+                            msg_type: "std_msgs/Bool",
+                            timeout: 0.5
+                        }
+                    },
+                    {
+                        source: "moving_forward",
+                        destination: "emergency_stop",
+                        trigger: "emergency",
+                        condition: {
+                            type: "topic_message",
+                            topic: "/emergency_stop",
+                            msg_type: "std_msgs/Bool",
+                            timeout: 0.5
+                        }
+                    },
+                    {
+                        source: "turning",
+                        destination: "emergency_stop",
+                        trigger: "emergency",
+                        condition: {
+                            type: "topic_message",
+                            topic: "/emergency_stop",
+                            msg_type: "std_msgs/Bool",
+                            timeout: 0.5
+                        }
+                    },
+                    {
+                        source: "emergency_stop",
+                        destination: "idle",
+                        trigger: "reset_cmd",
+                        condition: {
+                            type: "topic_value",
+                            topic: "/robot_command",
+                            msg_type: "std_msgs/String",
+                            field_path: "data",
+                            operator: "==",
+                            value: "reset"
+                        }
+                    }
+                ]
             }
         };
 
@@ -658,8 +821,25 @@
                 // Add transitions
                 if (config.transitions && Array.isArray(config.transitions)) {
                     config.transitions.forEach(trans => {
-                        const trigger = trans.trigger || 'auto';
-                        mermaidCode += `    ${trans.source} --> ${trans.destination} : ${trigger}\n`;
+                        let label = trans.trigger || 'auto';
+
+                        // Add condition information to label if present
+                        if (trans.condition) {
+                            const condType = trans.condition.type;
+                            if (condType === 'timer') {
+                                label += ` [${trans.condition.duration}s]`;
+                            } else if (condType === 'topic_value') {
+                                const topic = trans.condition.topic?.split('/').pop() || 'topic';
+                                const op = trans.condition.operator || '==';
+                                const val = trans.condition.value;
+                                label += ` [${topic}${op}${val}]`;
+                            } else if (condType === 'topic_message') {
+                                const topic = trans.condition.topic?.split('/').pop() || 'topic';
+                                label += ` [on:${topic}]`;
+                            }
+                        }
+
+                        mermaidCode += `    ${trans.source} --> ${trans.destination} : ${label}\n`;
                     });
                 }
 
