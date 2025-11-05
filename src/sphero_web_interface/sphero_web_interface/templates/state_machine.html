@@ -827,17 +827,23 @@
                         if (trans.condition) {
                             const condType = trans.condition.type;
                             if (condType === 'timer') {
-                                label += ` [${trans.condition.duration}s]`;
+                                label += ` (${trans.condition.duration}s)`;
                             } else if (condType === 'topic_value') {
                                 const topic = trans.condition.topic?.split('/').pop() || 'topic';
                                 const op = trans.condition.operator || '==';
                                 const val = trans.condition.value;
-                                label += ` [${topic}${op}${val}]`;
+                                // Sanitize operator for Mermaid
+                                const opMap = {'==': 'eq', '!=': 'ne', '>': 'gt', '<': 'lt', '>=': 'ge', '<=': 'le'};
+                                const opText = opMap[op] || op;
+                                label += ` (${topic} ${opText} ${val})`;
                             } else if (condType === 'topic_message') {
                                 const topic = trans.condition.topic?.split('/').pop() || 'topic';
-                                label += ` [on:${topic}]`;
+                                label += ` (on ${topic})`;
                             }
                         }
+
+                        // Escape any remaining problematic characters for Mermaid
+                        label = label.replace(/:/g, ' ');
 
                         mermaidCode += `    ${trans.source} --> ${trans.destination} : ${label}\n`;
                     });
