@@ -11,6 +11,10 @@
       },
       "tasks": [
         {
+          "type": "stop",
+          "params": {}
+        },
+        {
           "type": "set_led",
           "params": {
             "color": "blue",

@@ -300,17 +300,20 @@ class SpheroControllerNode(Node):
             self._current_speed = speed
             self._is_moving = speed > 0
 
-            # Use the spherov2 roll() API which properly handles duration
-            # When duration=0, the Sphero moves continuously (indefinitely)
-            self.api.roll(heading, speed, duration)
-
+            # Handle duration-based vs indefinite rolling
             if duration > 0:
+                # Duration-based: use roll() with specified duration
+                self.api.roll(heading, speed, duration)
                 self.get_logger().info(
                     f'Rolling at heading {heading}deg with speed {speed} for {duration}s'
                 )
             else:
+                # Indefinite rolling: set heading and speed separately
+                # This keeps the Sphero moving continuously until another command
+                self.api.set_heading(heading)
+                self.api.set_speed(speed)
                 self.get_logger().info(
-                    f'Rolling continuously at heading {heading}deg with speed {speed} (duration=0, indefinite)'
+                    f'Rolling continuously at heading {heading}deg with speed {speed} (indefinite)'
                 )
 
         except json.JSONDecodeError as e:

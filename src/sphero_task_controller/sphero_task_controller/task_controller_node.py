@@ -696,18 +696,21 @@ class SpheroTaskController(Node):
         speed = params.get('speed', 100)
         duration = params.get('duration', 0.0)
 
-        self.send_roll(heading, speed, duration)
-        self.get_logger().info(f'ROLL: heading={heading}, speed={speed}, duration={duration}')
+        if duration > 0:
+            # Duration-based roll: wait for specified duration
+            if 'start_time' not in params:
+                self.send_roll(heading, speed, duration)
+                self.get_logger().info(f'ROLL: heading={heading}, speed={speed}, duration={duration}')
+                task.parameters['start_time'] = time.time()
+                return False  # Not complete yet
 
-        # If duration specified, wait for it
-        if duration > 0 and 'start_time' not in params:
-            task.parameters['start_time'] = time.time()
-            return False
-        elif duration > 0:
             elapsed = time.time() - task.parameters['start_time']
             return elapsed >= duration
         else:
-            return True  # Immediate completion for indefinite roll
+            # Indefinite roll (duration=0): "start rolling" - complete immediately
+            self.send_roll(heading, speed, duration)
+            self.get_logger().info(f'ROLL: heading={heading}, speed={speed}, duration={duration} (indefinite)')
+            return True
 
     def execute_basic_heading(self, task: Task) -> bool:
         """Execute basic heading command - completes immediately."""
