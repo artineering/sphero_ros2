@@ -1,0 +1,201 @@
+{
+  "name": "Topic-Triggered State Machine Example",
+  "initial_state": "idle",
+  "states": [
+    {
+      "name": "idle",
+      "description": "Robot is idle, waiting for command",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "set_led",
+          "params": {
+            "color": "blue",
+            "led": "main"
+          }
+        }
+      ]
+    },
+    {
+      "name": "moving_forward",
+      "description": "Robot moves forward with green LED",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "set_led",
+          "params": {
+            "color": "green",
+            "led": "main"
+          }
+        },
+        {
+          "type": "roll",
+          "params": {
+            "heading": 0,
+            "speed": 80
+          }
+        }
+      ]
+    },
+    {
+      "name": "turning",
+      "description": "Robot is turning with yellow LED",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "set_led",
+          "params": {
+            "color": "yellow",
+            "led": "main"
+          }
+        },
+        {
+          "type": "roll",
+          "params": {
+            "heading": 90,
+            "speed": 60
+          }
+        }
+      ]
+    },
+    {
+      "name": "emergency_stop",
+      "description": "Emergency stop with red LED",
+      "entry_condition": {
+        "type": "always",
+        "params": {}
+      },
+      "tasks": [
+        {
+          "type": "set_led",
+          "params": {
+            "color": "red",
+            "led": "main"
+          }
+        },
+        {
+          "type": "stop",
+          "params": {}
+        }
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "source": "idle",
+      "destination": "moving_forward",
+      "trigger": "command_received",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "forward"
+      }
+    },
+    {
+      "source": "idle",
+      "destination": "turning",
+      "trigger": "turn_command",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "turn"
+      }
+    },
+    {
+      "source": "moving_forward",
+      "destination": "idle",
+      "trigger": "stop_command",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "stop"
+      }
+    },
+    {
+      "source": "moving_forward",
+      "destination": "turning",
+      "trigger": "turn_command",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "turn"
+      }
+    },
+    {
+      "source": "turning",
+      "destination": "idle",
+      "trigger": "timer_return",
+      "condition": {
+        "type": "timer",
+        "duration": 3.0
+      }
+    },
+    {
+      "source": "idle",
+      "destination": "emergency_stop",
+      "trigger": "emergency",
+      "condition": {
+        "type": "topic_message",
+        "topic": "/emergency_stop",
+        "msg_type": "std_msgs/Bool",
+        "timeout": 0.5
+      }
+    },
+    {
+      "source": "moving_forward",
+      "destination": "emergency_stop",
+      "trigger": "emergency",
+      "condition": {
+        "type": "topic_message",
+        "topic": "/emergency_stop",
+        "msg_type": "std_msgs/Bool",
+        "timeout": 0.5
+      }
+    },
+    {
+      "source": "turning",
+      "destination": "emergency_stop",
+      "trigger": "emergency",
+      "condition": {
+        "type": "topic_message",
+        "topic": "/emergency_stop",
+        "msg_type": "std_msgs/Bool",
+        "timeout": 0.5
+      }
+    },
+    {
+      "source": "emergency_stop",
+      "destination": "idle",
+      "trigger": "reset_command",
+      "condition": {
+        "type": "topic_value",
+        "topic": "/robot_command",
+        "msg_type": "std_msgs/String",
+        "field_path": "data",
+        "operator": "==",
+        "value": "reset"
+      }
+    }
+  ]
+}

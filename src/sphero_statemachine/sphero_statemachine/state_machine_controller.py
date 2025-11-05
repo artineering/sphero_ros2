@@ -11,11 +11,13 @@ import json
 import time
 from typing import Dict, Any, List, Optional, Callable
 from enum import Enum
+import importlib
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from sphero_package.msg import SpheroSensor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from statemachine import StateMachine, State
 from statemachine.exceptions import TransitionNotAllowed
@@ -27,6 +29,14 @@ class ConditionType(Enum):
     TIMER = "timer"
     TOPIC_VALUE = "topic_value"
     CUSTOM = "custom"
+
+
+class TransitionConditionType(Enum):
+    """Types of transition conditions."""
+    AUTO = "auto"  # Automatic based on state entry conditions
+    TOPIC_VALUE = "topic_value"  # Based on a ROS topic value
+    TOPIC_MESSAGE = "topic_message"  # Based on receiving any message on a topic
+    TIMER = "timer"  # Time-based from source state
 
 
 class DynamicState:
@@ -94,6 +104,12 @@ class DynamicStateMachineController(Node):
         # Condition monitoring data
         self.sensor_topic_values: Dict[str, Any] = {}
         self.state_timers: Dict[str, float] = {}
+
+        # Dynamic topic monitoring for transitions
+        self.topic_subscriptions: Dict[str, Any] = {}  # topic_name -> subscription
+        self.topic_values: Dict[str, Any] = {}  # topic_name -> latest value
+        self.topic_message_types: Dict[str, Any] = {}  # topic_name -> message type class
+        self.topic_last_received: Dict[str, float] = {}  # topic_name -> timestamp
 
         # Subscribers for configuration and sensor data
         self.config_sub = self.create_subscription(
@@ -181,15 +197,44 @@ class DynamicStateMachineController(Node):
                 {
                     "source": "idle",
                     "destination": "moving",
-                    "trigger": "start_moving"
+                    "trigger": "timer_based",
+                    "condition": {
+                        "type": "timer",
+                        "duration": 5.0
+                    }
                 },
                 {
                     "source": "moving",
                     "destination": "idle",
-                    "trigger": "stop_moving"
+                    "trigger": "topic_trigger",
+                    "condition": {
+                        "type": "topic_value",
+                        "topic": "/user_command",
+                        "msg_type": "std_msgs/String",
+                        "field_path": "data",
+                        "operator": "==",
+                        "value": "stop"
+                    }
+                },
+                {
+                    "source": "idle",
+                    "destination": "alert",
+                    "trigger": "message_received",
+                    "condition": {
+                        "type": "topic_message",
+                        "topic": "/emergency",
+                        "msg_type": "std_msgs/Bool",
+                        "timeout": 1.0
+                    }
                 }
             ]
         }
+
+        Transition Condition Types:
+        - auto: Use destination state's entry condition (default, backward compatible)
+        - timer: Transition after duration in source state
+        - topic_value: Transition when topic value matches condition
+        - topic_message: Transition when message received on topic
         """
         try:
             config = json.loads(msg.data)
@@ -245,6 +290,63 @@ class DynamicStateMachineController(Node):
                     self.get_logger().error(f'Transition destination "{trans["destination"]}" not found')
                     return False
 
+                # Validate transition condition if present
+                if 'condition' in trans:
+                    if not self.validate_transition_condition(trans['condition']):
+                        self.get_logger().error(f'Invalid transition condition: {trans}')
+                        return False
+
+        return True
+
+    def validate_transition_condition(self, condition: Dict[str, Any]) -> bool:
+        """
+        Validate a transition condition configuration.
+
+        Args:
+            condition: Condition configuration dictionary
+
+        Returns:
+            True if valid, False otherwise
+        """
+        condition_type = condition.get('type', 'auto')
+
+        # Validate based on condition type
+        if condition_type in ['topic_value', 'topic_message']:
+            # These require topic and msg_type
+            if 'topic' not in condition:
+                self.get_logger().error(f'Condition type {condition_type} requires "topic" parameter')
+                return False
+            if 'msg_type' not in condition:
+                self.get_logger().error(f'Condition type {condition_type} requires "msg_type" parameter')
+                return False
+
+            # topic_value also requires operator and value
+            if condition_type == 'topic_value':
+                if 'operator' not in condition:
+                    self.get_logger().error('Condition type topic_value requires "operator" parameter')
+                    return False
+                if 'value' not in condition:
+                    self.get_logger().error('Condition type topic_value requires "value" parameter')
+                    return False
+
+                # Validate operator
+                valid_operators = ['==', '!=', '>', '<', '>=', '<=']
+                if condition['operator'] not in valid_operators:
+                    self.get_logger().error(
+                        f'Invalid operator "{condition["operator"]}". Must be one of: {valid_operators}'
+                    )
+                    return False
+
+        elif condition_type == 'timer':
+            # Timer condition requires duration
+            if 'duration' not in condition:
+                self.get_logger().error('Condition type timer requires "duration" parameter')
+                return False
+
+        elif condition_type != 'auto':
+            self.get_logger().warning(f'Unknown condition type: {condition_type}')
+            return False
+
         return True
 
     def build_state_machine(self, config: Dict[str, Any]):
@@ -253,11 +355,32 @@ class DynamicStateMachineController(Node):
         self.sm_states = {}
         self.sm_transitions = config.get('transitions', [])
 
+        # Clean up old topic subscriptions
+        for topic_name in list(self.topic_subscriptions.keys()):
+            self.unsubscribe_from_topic(topic_name)
+
         # Create state objects
         for state_config in config['states']:
             state_name = state_config['name']
             self.sm_states[state_name] = DynamicState(state_name, state_config)
             self.get_logger().info(f'Created state: {state_name}')
+
+        # Set up topic subscriptions for transition conditions
+        for transition in self.sm_transitions:
+            condition = transition.get('condition', {})
+            condition_type = condition.get('type', 'auto')
+
+            if condition_type in ['topic_value', 'topic_message']:
+                topic_name = condition.get('topic')
+                msg_type = condition.get('msg_type')
+                field_path = condition.get('field_path')
+
+                if topic_name and msg_type:
+                    self.subscribe_to_topic(topic_name, msg_type, field_path)
+                else:
+                    self.get_logger().warning(
+                        f'Transition condition {condition_type} missing required parameters: topic and msg_type'
+                    )
 
         # Set initial state
         self.sm_current_state = config['initial_state']
@@ -302,6 +425,103 @@ class DynamicStateMachineController(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to process sensor data: {e}')
 
+    def subscribe_to_topic(self, topic_name: str, msg_type: str, field_path: Optional[str] = None):
+        """
+        Dynamically subscribe to a ROS topic for transition monitoring.
+
+        Args:
+            topic_name: The topic to subscribe to
+            msg_type: Message type as string (e.g., 'std_msgs/String', 'geometry_msgs/Twist')
+            field_path: Optional dot-notation path to extract specific field (e.g., 'data', 'linear.x')
+        """
+        if topic_name in self.topic_subscriptions:
+            self.get_logger().info(f'Already subscribed to topic: {topic_name}')
+            return
+
+        try:
+            # Parse message type string (e.g., 'std_msgs/String' -> std_msgs.msg.String)
+            parts = msg_type.split('/')
+            if len(parts) != 2:
+                self.get_logger().error(f'Invalid message type format: {msg_type}. Expected "package/Type"')
+                return
+
+            package_name, type_name = parts
+            module_path = f'{package_name}.msg'
+
+            # Import the message type
+            try:
+                msg_module = importlib.import_module(module_path)
+                msg_class = getattr(msg_module, type_name)
+            except (ImportError, AttributeError) as e:
+                self.get_logger().error(f'Failed to import message type {msg_type}: {e}')
+                return
+
+            # Store message type information
+            self.topic_message_types[topic_name] = {
+                'class': msg_class,
+                'field_path': field_path
+            }
+
+            # Create callback that stores the received message
+            def topic_callback(msg):
+                self.topic_last_received[topic_name] = time.time()
+
+                # Extract specific field if specified
+                if field_path:
+                    try:
+                        value = msg
+                        for field in field_path.split('.'):
+                            value = getattr(value, field)
+                        self.topic_values[topic_name] = value
+                    except AttributeError as e:
+                        self.get_logger().error(f'Failed to extract field {field_path} from {topic_name}: {e}')
+                        self.topic_values[topic_name] = msg
+                else:
+                    # Store the entire message
+                    self.topic_values[topic_name] = msg
+
+                self.get_logger().debug(f'Received message on {topic_name}: {self.topic_values[topic_name]}')
+
+            # Create subscription with default QoS
+            qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10
+            )
+
+            subscription = self.create_subscription(
+                msg_class,
+                topic_name,
+                topic_callback,
+                qos
+            )
+
+            self.topic_subscriptions[topic_name] = subscription
+            self.get_logger().info(f'Subscribed to topic: {topic_name} (type: {msg_type})')
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to subscribe to topic {topic_name}: {e}')
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
+    def unsubscribe_from_topic(self, topic_name: str):
+        """
+        Unsubscribe from a dynamically created topic subscription.
+
+        Args:
+            topic_name: The topic to unsubscribe from
+        """
+        if topic_name in self.topic_subscriptions:
+            self.destroy_subscription(self.topic_subscriptions[topic_name])
+            del self.topic_subscriptions[topic_name]
+            if topic_name in self.topic_values:
+                del self.topic_values[topic_name]
+            if topic_name in self.topic_message_types:
+                del self.topic_message_types[topic_name]
+            if topic_name in self.topic_last_received:
+                del self.topic_last_received[topic_name]
+            self.get_logger().info(f'Unsubscribed from topic: {topic_name}')
+
     def update_callback(self):
         """Periodic update to check conditions and transitions."""
         if self.sm_current_state is None or not self.sm_states:
@@ -331,12 +551,124 @@ class DynamicStateMachineController(Node):
             if transition['source'] == self.sm_current_state:
                 dest_state = transition['destination']
 
-                # Check if destination state's entry condition is met
-                if self.check_entry_condition(dest_state):
+                # Check if this transition's condition is met
+                if self.check_transition_condition(transition):
                     trigger = transition.get('trigger', 'auto')
                     self.get_logger().info(f'Transition triggered: {self.sm_current_state} -> {dest_state} (trigger: {trigger})')
                     self.transition_to_state(dest_state)
                     break
+
+    def check_transition_condition(self, transition: Dict[str, Any]) -> bool:
+        """
+        Check if a transition's condition is satisfied.
+
+        Args:
+            transition: Transition configuration dictionary
+
+        Returns:
+            True if condition is met, False otherwise
+        """
+        condition = transition.get('condition', {})
+        condition_type = condition.get('type', 'auto')
+        dest_state = transition['destination']
+
+        # AUTO: Check destination state's entry condition (original behavior)
+        if condition_type == 'auto' or condition_type == TransitionConditionType.AUTO.value:
+            return self.check_entry_condition(dest_state)
+
+        # TIMER: Time-based from current state
+        elif condition_type == 'timer' or condition_type == TransitionConditionType.TIMER.value:
+            if self.sm_current_state is None:
+                return False
+
+            current = self.sm_states[self.sm_current_state]
+            if current.entry_time is None:
+                return False
+
+            duration = condition.get('duration', 0.0)
+            elapsed = time.time() - current.entry_time
+            result = elapsed >= duration
+
+            if result:
+                self.get_logger().debug(
+                    f'Timer transition condition met: {self.sm_current_state} -> {dest_state} '
+                    f'(elapsed={elapsed:.2f}s, duration={duration}s)'
+                )
+            return result
+
+        # TOPIC_VALUE: Check if topic value meets criteria
+        elif condition_type == 'topic_value' or condition_type == TransitionConditionType.TOPIC_VALUE.value:
+            topic_name = condition.get('topic')
+            operator = condition.get('operator', '==')
+            expected_value = condition.get('value')
+
+            if not topic_name:
+                self.get_logger().warning('TOPIC_VALUE condition missing topic name')
+                return False
+
+            if topic_name not in self.topic_values:
+                return False
+
+            actual_value = self.topic_values[topic_name]
+
+            try:
+                if operator == '==':
+                    result = actual_value == expected_value
+                elif operator == '!=':
+                    result = actual_value != expected_value
+                elif operator == '>':
+                    result = actual_value > expected_value
+                elif operator == '<':
+                    result = actual_value < expected_value
+                elif operator == '>=':
+                    result = actual_value >= expected_value
+                elif operator == '<=':
+                    result = actual_value <= expected_value
+                else:
+                    self.get_logger().warning(f'Unknown operator: {operator}')
+                    return False
+
+                if result:
+                    self.get_logger().debug(
+                        f'Topic value condition met: {topic_name} {operator} {expected_value} '
+                        f'(actual={actual_value})'
+                    )
+                return result
+
+            except Exception as e:
+                self.get_logger().error(f'Error comparing topic values: {e}')
+                return False
+
+        # TOPIC_MESSAGE: Check if message was received recently
+        elif condition_type == 'topic_message' or condition_type == TransitionConditionType.TOPIC_MESSAGE.value:
+            topic_name = condition.get('topic')
+            timeout = condition.get('timeout', None)  # Optional: message must be received within timeout
+
+            if not topic_name:
+                self.get_logger().warning('TOPIC_MESSAGE condition missing topic name')
+                return False
+
+            if topic_name not in self.topic_last_received:
+                return False
+
+            # If timeout specified, check if message was received recently enough
+            if timeout is not None:
+                elapsed = time.time() - self.topic_last_received[topic_name]
+                result = elapsed <= timeout
+                if result:
+                    self.get_logger().debug(
+                        f'Topic message condition met: {topic_name} received within {timeout}s '
+                        f'(elapsed={elapsed:.2f}s)'
+                    )
+                return result
+            else:
+                # No timeout, just check if we ever received a message
+                self.get_logger().debug(f'Topic message condition met: {topic_name} received')
+                return True
+
+        else:
+            self.get_logger().warning(f'Unknown transition condition type: {condition_type}')
+            return False
 
     def check_entry_condition(self, state_name: str, is_initial: bool = False) -> bool:
         """
