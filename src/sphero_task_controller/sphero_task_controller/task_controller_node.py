@@ -62,6 +62,7 @@ class TaskType(Enum):
     MATRIX = "matrix"
     COLLISION = "collision"
     REFLECT = "reflect"
+    JUMPING_BEAN = "jumping_bean"
 
 
 @dataclass
@@ -134,6 +135,7 @@ class SpheroTaskController(Node):
         self.stop_pub = self.create_publisher(String, 'sphero/stop', 10)
         self.matrix_pub = self.create_publisher(String, 'sphero/matrix', 10)
         self.collision_pub = self.create_publisher(String, 'sphero/collision', 10)
+        self.stabilization_pub = self.create_publisher(String, 'sphero/stabilization', 10)
 
         # Publisher for task status
         self.task_status_pub = self.create_publisher(String, 'sphero/task/status', 10)
@@ -360,6 +362,8 @@ class SpheroTaskController(Node):
             return self.execute_basic_collision(task)
         elif task_type == TaskType.REFLECT.value:
             return self.execute_basic_reflect(task)
+        elif task_type == TaskType.JUMPING_BEAN.value:
+            return self.execute_jumping_bean(task)
         else:
             raise ValueError(f'Unknown task type: {task_type}')
 
@@ -686,6 +690,18 @@ class SpheroTaskController(Node):
         })
         self.collision_pub.publish(msg)
 
+    def send_stabilization(self, enable: bool):
+        """
+        Send stabilization command to enable/disable gyroscopic stabilization.
+
+        Args:
+            enable: True to enable stabilization, False to disable
+        """
+        msg = String()
+        msg.data = json.dumps({'enable': enable})
+        self.stabilization_pub.publish(msg)
+        self.get_logger().debug(f'STABILIZATION CMD: {"enabled" if enable else "disabled"}')
+
     # Basic/immediate command execution methods
     def execute_basic_set_led(self, task: Task) -> bool:
         """Execute basic LED command - completes immediately."""
@@ -802,6 +818,62 @@ class SpheroTaskController(Node):
             f'offset={offset}°, new_heading={new_heading}°, speed={speed}'
         )
 
+        return True
+
+    def execute_jumping_bean(self, task: Task) -> bool:
+        """
+        Execute jumping bean behavior - rapid back-and-forth flipping motion.
+        Alternates speed between positive and negative to flip direction rapidly.
+        Disables stabilization for more erratic motion.
+        """
+        import random
+
+        params = task.parameters
+        duration = params.get('duration', 10.0)  # Total duration in seconds
+        flip_interval = params.get('flip_interval', 0.1)  # Time between flips (seconds)
+        speed = params.get('speed', 200)  # Speed for flipping motion
+
+        self.get_logger().info(
+            f'JUMPING_BEAN: Starting for {duration}s '
+            f'(speed: +/-{speed}, flip every {flip_interval}s)'
+        )
+
+        # Disable stabilization for erratic motion
+        self.send_stabilization(False)
+
+        # Calculate number of flips based on duration and interval
+        num_flips = int(duration / flip_interval)
+        current_heading = random.randint(0, 359)
+        current_speed = speed  # Start with positive speed
+        flip_count = 0
+
+        # Execute series of back-and-forth flips
+        for i in range(num_flips):
+            # Send roll command with current speed (positive or negative)
+            self.send_roll(current_heading, current_speed, flip_interval)
+            flip_count += 1
+
+            # Flip the speed sign for next iteration
+            current_speed = -current_speed
+
+            # Pick a new random heading every 10 flips for variety
+            if flip_count % 10 == 0:
+                current_heading = random.randint(0, 359)
+
+            # Sleep for the flip interval to let the command execute
+            time.sleep(flip_interval)
+
+        # Stop the Sphero
+        self.send_roll(0, 0, 0.0)
+
+        # Re-enable stabilization
+        self.send_stabilization(True)
+
+        self.get_logger().info(
+            f'JUMPING_BEAN: Completed after {flip_count} flips in {duration:.1f}s'
+        )
+
+        # Task is complete
         return True
 
     def publish_task_status(self, task: Task):

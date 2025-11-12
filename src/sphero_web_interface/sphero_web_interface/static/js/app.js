@@ -929,6 +929,22 @@ function showTaskForm(taskType) {
                 <input type="number" id="task-speed" value="100" min="0" max="255">
             </div>
         `;
+    } else if (taskType === 'jumping_bean') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Duration (seconds):</label>
+                <input type="number" id="task-duration" value="10" step="1" min="1" max="60">
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="200" min="0" max="255">
+            </div>
+            <div class="form-group">
+                <label>Flip Interval (seconds):</label>
+                <input type="number" id="task-flip-interval" value="0.1" step="0.05" min="0.05" max="1.0">
+            </div>
+            <small>Rapid back-and-forth flipping motion like a jumping bean!</small>
+        `;
     } else if (taskType === 'collision_start') {
         formFields.innerHTML = `
             <div class="form-group">
@@ -988,6 +1004,10 @@ async function submitCurrentTask() {
     } else if (currentTaskType === 'spin') {
         parameters.rotations = parseFloat(document.getElementById('task-rotations').value);
         parameters.speed = parseInt(document.getElementById('task-speed').value);
+    } else if (currentTaskType === 'jumping_bean') {
+        parameters.duration = parseFloat(document.getElementById('task-duration').value);
+        parameters.speed = parseInt(document.getElementById('task-speed').value);
+        parameters.flip_interval = parseFloat(document.getElementById('task-flip-interval').value);
     } else if (currentTaskType === 'collision_start') {
         parameters.action = 'start';
         parameters.mode = document.getElementById('task-collision-mode').value;

@@ -7,6 +7,11 @@ from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
 from spherov2.types import Color
 
+from sphero_package.spherov2_collision_patch import apply_collision_patch
+
+# Apply collision detection patch for 16-byte collision responses
+apply_collision_patch()
+
 
 class SpheroNode(Node):
     def __init__(self, robot, api):
