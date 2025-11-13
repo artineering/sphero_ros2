@@ -21,6 +21,7 @@ from sphero_package.msg import SpheroSensor
 from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI, EventType
 from spherov2.types import Color
+from spherov2.commands.sensor import Sensor, CollisionDetectionMethods
 
 from sphero_package.core.sphero.state import (
     SpheroState,
@@ -84,6 +85,7 @@ class SpheroControllerNode(Node):
         self._current_speed = 0
         self._is_moving = False
         self._collision_mode = None
+        self._collision_event_handler = None
 
         # Create subscribers for Sphero commands using JSON over String
         self.led_sub = self.create_subscription(
@@ -555,21 +557,74 @@ class SpheroControllerNode(Node):
             data = json.loads(msg.data)
             action = data.get('action', '')
 
+            # Debug: Log received data
+            self.get_logger().info(f'[DEBUG] Collision command received: {json.dumps(data)}')
+
             if action == 'start':
                 self._collision_mode = data.get('mode', 'obstacle')
 
-                # Register collision event handler with SpheroEduAPI
-                # Simple event notification - no collision data needed
-                self.api.register_event(EventType.on_collision, self._on_collision_detected)
+                # Get optional sensitivity parameter (default to HIGH)
+                # Map sensitivity levels to threshold values
+                # Lower threshold = more sensitive (detects lighter impacts)
+                sensitivity_str = data.get('sensitivity', 'HIGH').upper()
+                self.get_logger().info(f'[DEBUG] Sensitivity from data: {data.get("sensitivity")}')
+                self.get_logger().info(f'[DEBUG] Sensitivity after upper: {sensitivity_str}')
 
-                self.get_logger().info(
-                    f'Started collision detection in "{self._collision_mode}" mode'
-                )
+                threshold_map = {
+                    'SUPER_HIGH': 50,    # Most sensitive - very light touch
+                    'VERY_HIGH': 80,     # Very sensitive
+                    'HIGH': 100,         # High sensitivity (default)
+                    'MEDIUM': 130,       # Medium sensitivity
+                    'LOW': 160,          # Low sensitivity
+                    'VERY_LOW': 200      # Least sensitive - hard impact only
+                }
+                threshold = threshold_map.get(sensitivity_str, 100)
+                self.get_logger().info(f'[DEBUG] Mapped to threshold: {threshold}')
+
+                try:
+                    # Configure collision detection with threshold
+                    self.get_logger().info(f'Configuring collision detection with {sensitivity_str} sensitivity (threshold={threshold})...')
+                    self.robot.configure_collision_detection(
+                        CollisionDetectionMethods.ACCELEROMETER_BASED_DETECTION,
+                        x_threshold=threshold,  # X-axis threshold
+                        y_threshold=threshold,  # Y-axis threshold
+                        x_speed=100,            # X-axis speed threshold
+                        y_speed=100,            # Y-axis speed threshold
+                        dead_time=10            # Dead time between detections (in 10ms units)
+                    )
+                    self.get_logger().info('Collision detection configured')
+
+                    # Enable collision detection notifications
+                    self.get_logger().info('Enabling collision notifications...')
+                    self.robot.add_collision_detected_notify_listener(self._hardware_collision_callback)
+                    self.get_logger().info('Collision notifications enabled')
+
+                    # Store collision event handler reference so hardware callback can trigger it
+                    self.get_logger().info('Registering collision event handler...')
+                    self._collision_event_handler = self._on_collision_detected
+                    self.api.register_event(EventType.on_collision, self._collision_event_handler)
+                    self.get_logger().info('Collision event handler registered')
+
+                    self.get_logger().info(
+                        f'Started collision detection in "{self._collision_mode}" mode '
+                        f'with {sensitivity_str} sensitivity'
+                    )
+                except Exception as e:
+                    self.get_logger().error(f'Error starting collision detection: {e}')
+                    import traceback
+                    self.get_logger().error(f'Traceback: {traceback.format_exc()}')
 
             elif action == 'stop':
+                # Remove collision detection listener
+                try:
+                    self.robot.remove_collision_detected_notify_listener(self._hardware_collision_callback)
+                except Exception as e:
+                    self.get_logger().warning(f'Error removing collision listener: {e}')
+
                 # Unregister collision event handler
                 try:
                     self.api.register_event(EventType.on_collision, None)
+                    self._collision_event_handler = None
                 except Exception as e:
                     self.get_logger().warning(f'Error unregistering collision handler: {e}')
 
@@ -581,6 +636,26 @@ class SpheroControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f'Error in collision callback: {str(e)}')
 
+    def _hardware_collision_callback(self, collision_data):
+        """
+        Hardware-level callback invoked directly by spherov2 when collision packet arrives.
+        This triggers the SpheroEduAPI event system.
+
+        Args:
+            collision_data: CollisionDetected object with collision details
+        """
+        self.get_logger().info('[DEBUG] Hardware collision callback invoked!')
+        self.get_logger().info(f'[DEBUG] Collision data: {collision_data}')
+
+        # Trigger the SpheroEduAPI collision event
+        # This will call _on_collision_detected with the API object
+        try:
+            # Manually trigger the event by calling the registered handler
+            if hasattr(self, '_collision_event_handler') and self._collision_event_handler:
+                self._collision_event_handler(self.api)
+        except Exception as e:
+            self.get_logger().error(f'Error triggering collision event: {e}')
+
     def _on_collision_detected(self, api):
         """
         Callback invoked by spherov2 when a collision is detected.
@@ -588,8 +663,13 @@ class SpheroControllerNode(Node):
         Args:
             api: The SpheroEduAPI object (required signature for register_event)
         """
+        self.get_logger().info('[DEBUG] Collision callback invoked!')
+
         if self._collision_mode is None:
+            self.get_logger().warning('[DEBUG] Collision mode is None, ignoring')
             return
+
+        self.get_logger().info(f'[DEBUG] Processing collision in mode: {self._collision_mode}')
 
         try:
             # Query current motion state to determine if we're moving
@@ -780,12 +860,13 @@ class SpheroControllerNode(Node):
         """Clean up resources before shutdown."""
         self.get_logger().info('Cleaning up Sphero controller...')
         try:
-            # Unregister collision event handler
+            # Disable collision detection
             if self._collision_mode is not None:
                 try:
+                    Sensor.enable_collision_detected_notify(self.robot, False)
                     self.api.register_event(EventType.on_collision, None)
                 except Exception as e:
-                    self.get_logger().warning(f'Error unregistering collision handler: {e}')
+                    self.get_logger().warning(f'Error disabling collision detection: {e}')
 
             # Stop movement
             self.api.set_speed(0)

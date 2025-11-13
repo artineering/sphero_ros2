@@ -955,9 +955,16 @@ function showTaskForm(taskType) {
                 </select>
             </div>
             <div class="form-group">
-                <label>Threshold (Gs):</label>
-                <input type="number" id="task-collision-threshold" value="1.5" step="0.1" min="0.1" max="5.0">
-                <small>Lower values = more sensitive. Recommended: 0.5-2.0</small>
+                <label>Sensitivity:</label>
+                <select id="task-collision-sensitivity">
+                    <option value="SUPER_HIGH">Super High (most sensitive)</option>
+                    <option value="VERY_HIGH">Very High</option>
+                    <option value="HIGH" selected>High (default)</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                    <option value="VERY_LOW">Very Low (least sensitive)</option>
+                </select>
+                <small>Higher sensitivity detects lighter touches</small>
             </div>
         `;
     } else if (taskType === 'collision_stop') {
@@ -1011,10 +1018,15 @@ async function submitCurrentTask() {
     } else if (currentTaskType === 'collision_start') {
         parameters.action = 'start';
         parameters.mode = document.getElementById('task-collision-mode').value;
-        parameters.threshold = parseFloat(document.getElementById('task-collision-threshold').value);
+
+        // Get sensitivity - with debug logging
+        const sensitivityElement = document.getElementById('task-collision-sensitivity');
+        const sensitivityValue = sensitivityElement ? sensitivityElement.value : null;
+        console.log('[DEBUG] Sensitivity element:', sensitivityElement);
+        console.log('[DEBUG] Sensitivity value:', sensitivityValue);
+        parameters.sensitivity = sensitivityValue;
     } else if (currentTaskType === 'collision_stop') {
         parameters.action = 'stop';
-        parameters.mode = 'obstacle';  // mode doesn't matter for stop action
     }
 
     // Map collision task types to 'collision' for the backend

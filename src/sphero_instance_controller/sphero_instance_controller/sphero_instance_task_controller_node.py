@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Sphero Instance Task Controller Node.
+
+This node accepts high-level tasks from a dedicated topic and executes them
+using the TaskExecutor class. Designed for multi-robot setups with namespaced topics.
+
+All topics are namespaced under 'sphero/<sphero_name>/' to allow multiple
+instances to run simultaneously without cross-talk.
+"""
+
+import json
+import time
+import signal
+
+import rclpy
+from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+
+from std_msgs.msg import String
+
+from spherov2 import scanner
+from spherov2.sphero_edu import SpheroEduAPI
+
+from sphero_instance_controller.core.sphero import (
+    Sphero,
+    TaskExecutor,
+    TaskDescriptor,
+    TaskStatus
+)
+from sphero_instance_controller.spherov2_collision_patch import apply_collision_patch
+
+# Apply collision detection patch
+apply_collision_patch()
+
+
+class SpheroInstanceTaskController(Node):
+    """
+    ROS2 node for high-level task control of a single Sphero instance.
+
+    Uses namespaced topics for multi-robot support.
+    All topics are prefixed with 'sphero/<sphero_name>/'
+    """
+
+    def __init__(self, robot, api, sphero_name: str):
+        """
+        Initialize the task controller node.
+
+        Args:
+            robot: The Sphero robot object from scanner
+            api: The SpheroEduAPI object
+            sphero_name: Name of the Sphero (used for topic namespacing)
+        """
+        super().__init__('sphero_instance_task_controller_node')
+
+        self.sphero_name = sphero_name
+        self.topic_prefix = f'sphero/{sphero_name}'
+
+        # Initialize Sphero core class
+        self.sphero = Sphero(robot, api, sphero_name)
+
+        # Initialize task executor with callbacks
+        self.task_executor = TaskExecutor(
+            sphero=self.sphero,
+            position_callback=self.get_current_position,
+            heading_callback=self.get_current_heading
+        )
+
+        # State tracking
+        self.current_state = {}
+        self.current_position = {'x': 0.0, 'y': 0.0}
+        self.current_heading = 0
+
+        # Callback group for reentrant callbacks
+        self.callback_group = ReentrantCallbackGroup()
+
+        # Create subscribers
+        self._create_subscribers()
+
+        # Create publishers
+        self._create_publishers()
+
+        # Create timer for task execution (10 Hz)
+        self.task_timer = self.create_timer(
+            0.1,
+            self.task_execution_loop,
+            callback_group=self.callback_group
+        )
+
+        # Log initialization
+        self._log_initialization()
+
+        # Set ready LED (green)
+        self.sphero.set_led(0, 255, 0)
+
+    def _create_subscribers(self):
+        """Create all ROS subscribers."""
+        # Task command subscriber
+        self.task_sub = self.create_subscription(
+            String,
+            f'{self.topic_prefix}/task',
+            self.task_callback,
+            10,
+            callback_group=self.callback_group
+        )
+
+        # State feedback subscriber
+        self.state_sub = self.create_subscription(
+            String,
+            f'{self.topic_prefix}/state',
+            self.state_callback,
+            10,
+            callback_group=self.callback_group
+        )
+
+        # Reset aim subscriber
+        self.reset_aim_sub = self.create_subscription(
+            String,
+            f'{self.topic_prefix}/reset_aim',
+            self.reset_aim_callback,
+            10,
+            callback_group=self.callback_group
+        )
+
+    def _create_publishers(self):
+        """Create all ROS publishers."""
+        # Task status publisher
+        self.task_status_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/task/status',
+            10
+        )
+
+    def _log_initialization(self):
+        """Log initialization information."""
+        self.get_logger().info(f'Sphero Instance Task Controller initialized for {self.sphero_name}')
+        self.get_logger().info(f'  - Topic prefix: {self.topic_prefix}')
+        self.get_logger().info(f'  - Listening for tasks on {self.topic_prefix}/task')
+        self.get_logger().info(f'  - Publishing status to {self.topic_prefix}/task/status')
+
+    def get_current_position(self):
+        """Get current position for task executor."""
+        return self.current_position.copy()
+
+    def get_current_heading(self):
+        """Get current heading for task executor."""
+        return self.current_heading
+
+    # ===== Callbacks =====
+
+    def task_callback(self, msg: String):
+        """
+        Handle incoming task messages.
+
+        Expected JSON format:
+        {
+            "task_id": "unique_id",  // optional
+            "task_type": "move_to|patrol|circle|...",
+            "parameters": {
+                // Task-specific parameters
+            }
+        }
+        """
+        try:
+            task_data = json.loads(msg.data)
+
+            # Validate required fields
+            if 'task_type' not in task_data:
+                self.get_logger().error('Task missing required field: task_type')
+                return
+
+            # Generate task ID if not provided
+            if 'task_id' not in task_data:
+                task_data['task_id'] = f"task_{int(time.time() * 1000)}"
+
+            # Create task descriptor
+            task = TaskDescriptor(
+                task_id=task_data['task_id'],
+                task_type=task_data['task_type'],
+                parameters=task_data.get('parameters', {})
+            )
+
+            # Add to executor queue
+            self.task_executor.add_task(task)
+
+            self.get_logger().info(
+                f'Added task {task.task_id} ({task.task_type}) to queue. '
+                f'Queue length: {len(self.task_executor.task_queue)}'
+            )
+            self.get_logger().info(f'Task parameters: {json.dumps(task.parameters, indent=2)}')
+
+            # Publish status
+            self.publish_task_status(task)
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in task message: {e}')
+        except Exception as e:
+            self.get_logger().error(f'Error processing task: {e}')
+
+    def state_callback(self, msg: String):
+        """Handle Sphero state updates."""
+        try:
+            self.current_state = json.loads(msg.data)
+
+            # Update position
+            if 'position' in self.current_state:
+                self.current_position = self.current_state['position'].copy()
+
+            # Update heading
+            if 'motion' in self.current_state and 'heading' in self.current_state['motion']:
+                self.current_heading = self.current_state['motion']['heading']
+
+        except json.JSONDecodeError:
+            pass
+
+    def reset_aim_callback(self, msg: String):
+        """Reset position and heading to origin."""
+        self.current_position = {'x': 0.0, 'y': 0.0}
+        self.current_heading = 0
+        self.get_logger().info('Task controller reset to origin: heading=0°, position=(0, 0)')
+
+    # ===== Task Execution =====
+
+    def task_execution_loop(self):
+        """Main task execution loop - called periodically."""
+        # Get previous task state
+        previous_task = self.task_executor.current_task
+
+        # Process tasks
+        current_task = self.task_executor.process_tasks()
+
+        # Check if task changed
+        if previous_task != current_task:
+            # Task completed or new task started
+            if previous_task is not None:
+                # Previous task finished
+                self.publish_task_status(previous_task)
+
+                duration = previous_task.completed_at - previous_task.started_at
+                self.get_logger().info(
+                    f'Task {previous_task.task_id} {previous_task.status.value} in {duration:.2f}s'
+                )
+
+            if current_task is not None:
+                # New task started
+                self.publish_task_status(current_task)
+
+                # Update position from state before starting
+                if 'position' in self.current_state:
+                    self.current_position = self.current_state['position'].copy()
+                    self.get_logger().info(
+                        f'Starting task {current_task.task_id} at position: '
+                        f'x={self.current_position["x"]:.2f}, '
+                        f'y={self.current_position["y"]:.2f}'
+                    )
+                else:
+                    self.get_logger().info(f'Starting task {current_task.task_id}')
+
+    def publish_task_status(self, task: TaskDescriptor):
+        """Publish task status update."""
+        # Include queue information
+        status_dict = task.to_dict()
+        status_dict['queue_length'] = len(self.task_executor.task_queue)
+        status_dict['has_current_task'] = self.task_executor.current_task is not None
+        status_dict['total_pending'] = (
+            len(self.task_executor.task_queue) +
+            (1 if self.task_executor.current_task is not None else 0)
+        )
+
+        msg = String()
+        msg.data = json.dumps(status_dict)
+        self.task_status_pub.publish(msg)
+
+    def cleanup(self):
+        """Clean up resources before shutdown."""
+        self.get_logger().info('Cleaning up Sphero instance task controller...')
+        try:
+            self.sphero.cleanup()
+            self.get_logger().info('Sphero cleanup complete')
+        except Exception as e:
+            self.get_logger().error(f'Error during cleanup: {e}')
+
+
+def main(args=None):
+    """Main entry point for the Sphero instance task controller node."""
+    rclpy.init(args=args)
+    node = None
+    temp_node = None
+    shutdown_requested = False
+
+    def signal_handler(_sig, _frame):
+        nonlocal shutdown_requested
+        print("\nKeyboard interrupt detected. Shutting down...")
+        shutdown_requested = True
+
+    # Register signal handler for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        # Create a temporary node to read the sphero_name parameter
+        temp_node = rclpy.create_node('temp_param_node')
+        temp_node.declare_parameter('sphero_name', '')  # No default - REQUIRED parameter
+        sphero_name = temp_node.get_parameter('sphero_name').value
+
+        if not sphero_name:
+            raise ValueError(
+                "The 'sphero_name' parameter is required but was not provided. "
+                "Please launch with: ros2 run sphero_instance_controller sphero_instance_task_controller_node.py "
+                "--ros-args -p sphero_name:=<YOUR_SPHERO_NAME>"
+            )
+
+        print(f"Sphero name from parameter: {sphero_name}")
+
+        # Destroy temporary node before creating controller node
+        temp_node.destroy_node()
+        temp_node = None
+
+        # Scan for Sphero
+        print(f"Scanning for Sphero robot: {sphero_name}...")
+        robot = scanner.find_toy(toy_name=sphero_name)
+
+        with SpheroEduAPI(toy=robot) as api:
+            print(f"Connected to {sphero_name}")
+
+            # Create the node
+            node = SpheroInstanceTaskController(robot, api, sphero_name)
+
+            # Spin until shutdown requested
+            while rclpy.ok() and not shutdown_requested:
+                rclpy.spin_once(node, timeout_sec=0.1)
+
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        # Clean up temporary node if it exists
+        if temp_node:
+            temp_node.destroy_node()
+
+        # Clean up the controller node
+        if node:
+            node.cleanup()
+            node.destroy_node()
+
+        # Shutdown ROS 2
+        if rclpy.ok():
+            rclpy.shutdown()
+
+        print("Goodbye!")
+
+
+if __name__ == '__main__':
+    main()

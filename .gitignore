@@ -41,3 +41,10 @@ Thumbs.db
 *.exe
 *.out
 *.app
+src/sphero_instance_controller/ARCHITECTURE.md
+src/sphero_instance_controller/generate_architecture_diagram.py
+src/sphero_instance_controller/SESSION_SUMMARY.md
+src/sphero_instance_controller/sphero_architecture.png
+src/sphero_instance_controller/sphero_data_flow.png
+src/sphero_instance_controller/sphero_multi_robot.png
+src/sphero_instance_controller/VISUALIZATION_GUIDE.md

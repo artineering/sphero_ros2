@@ -675,18 +675,20 @@ class SpheroTaskController(Node):
         })
         self.matrix_pub.publish(msg)
 
-    def send_collision(self, action: str, mode: str = 'obstacle'):
+    def send_collision(self, action: str, mode: str = 'obstacle', sensitivity: str = 'HIGH'):
         """
         Send collision detection command.
 
         Args:
             action: 'start' to enable collision detection, 'stop' to disable
             mode: 'tap' for tap detection, 'obstacle' for obstacle detection
+            sensitivity: Collision sensitivity level (SUPER_HIGH, VERY_HIGH, HIGH, MEDIUM, LOW, VERY_LOW)
         """
         msg = String()
         msg.data = json.dumps({
             'action': action,
-            'mode': mode
+            'mode': mode,
+            'sensitivity': sensitivity
         })
         self.collision_pub.publish(msg)
 
@@ -781,9 +783,10 @@ class SpheroTaskController(Node):
         params = task.parameters
         action = params.get('action', 'start')  # 'start' or 'stop'
         mode = params.get('mode', 'obstacle')  # 'tap' or 'obstacle'
+        sensitivity = params.get('sensitivity', 'HIGH')  # Sensitivity level
 
-        self.send_collision(action, mode)
-        self.get_logger().info(f'COLLISION: action={action}, mode={mode}')
+        self.send_collision(action, mode, sensitivity)
+        self.get_logger().info(f'COLLISION: action={action}, mode={mode}, sensitivity={sensitivity}')
         return True
 
     def execute_basic_reflect(self, task: Task) -> bool:
