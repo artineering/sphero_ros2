@@ -43,7 +43,9 @@ class SpheroInstanceStateMachineController(Node):
         super().__init__('sphero_instance_statemachine_controller_node')
 
         self.sphero_name = sphero_name
-        self.topic_prefix = f'sphero/{sphero_name}'
+        # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
+        topic_name_safe = sphero_name.replace("-", "_")
+        self.topic_prefix = f'sphero/{topic_name_safe}'
 
         # Initialize state machine core class
         self.state_machine = StateMachine(
@@ -127,12 +129,22 @@ class SpheroInstanceStateMachineController(Node):
 
     def _log_initialization(self):
         """Log initialization information."""
-        self.get_logger().info(f'Sphero Instance State Machine Controller initialized for {self.sphero_name}')
-        self.get_logger().info(f'  - Topic prefix: {self.topic_prefix}')
-        self.get_logger().info(f'  - Listening for config on {self.topic_prefix}/state_machine/config')
-        self.get_logger().info(f'  - Publishing status to {self.topic_prefix}/state_machine/status')
-        self.get_logger().info(f'  - Publishing events to {self.topic_prefix}/state_machine/events')
-        self.get_logger().info(f'  - Publishing tasks to {self.topic_prefix}/task')
+        self.get_logger().info('='*70)
+        self.get_logger().info('🔄 STATE MACHINE CONTROLLER ACTIVATED')
+        self.get_logger().info('='*70)
+        self.get_logger().info(f'Sphero Name: {self.sphero_name}')
+        self.get_logger().info(f'Topic Prefix: {self.topic_prefix}')
+        self.get_logger().info('Subscribed Topics:')
+        self.get_logger().info(f'  - {self.topic_prefix}/state_machine/config')
+        self.get_logger().info(f'  - {self.topic_prefix}/sensors')
+        self.get_logger().info(f'  - Dynamic collision topics (when configured)')
+        self.get_logger().info('Publishing Topics:')
+        self.get_logger().info(f'  - {self.topic_prefix}/state_machine/status')
+        self.get_logger().info(f'  - {self.topic_prefix}/state_machine/events')
+        self.get_logger().info(f'  - {self.topic_prefix}/task')
+        self.get_logger().info('='*70)
+        self.get_logger().info('✅ State Machine Controller READY')
+        self.get_logger().info('='*70)
 
     def _log_info(self, message: str):
         """Logger function for StateMachine class."""
@@ -473,10 +485,17 @@ def main(args=None):
 
         # Spin until shutdown requested
         while rclpy.ok() and not shutdown_requested:
-            rclpy.spin_once(node, timeout_sec=0.1)
+            try:
+                rclpy.spin_once(node, timeout_sec=0.1)
+            except rclpy.executors.ExternalShutdownException:
+                # Expected during shutdown - ignore
+                break
 
     except KeyboardInterrupt:
         print("\nShutting down...")
+    except rclpy.executors.ExternalShutdownException:
+        # Expected during external shutdown - ignore
+        pass
     except Exception as e:
         print(f"Error: {e}")
         import traceback

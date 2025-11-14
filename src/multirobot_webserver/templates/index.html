@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Robot Sphero Controller</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Multi-Robot Sphero Controller</h1>
+            <p class="subtitle">Manage multiple Sphero robots from a single interface</p>
+        </header>
+
+        <div class="controls">
+            <button id="addSpheroBtn" class="btn btn-primary">
+                <span class="icon">+</span> Add Sphero
+            </button>
+            <button id="refreshBtn" class="btn btn-secondary">
+                <span class="icon">🔄</span> Refresh
+            </button>
+            <div class="status-badge">
+                <span id="spheroCount">0</span> Sphero(s) Connected
+            </button>
+        </div>
+
+        <div id="spheroGrid" class="sphero-grid">
+            <!-- Sphero cards will be dynamically added here -->
+        </div>
+
+        <div id="noSpherosMessage" class="no-spheros">
+            <div class="empty-state">
+                <div class="empty-icon">🔍</div>
+                <h2>No Spheros Connected</h2>
+                <p>Click "Add Sphero" to connect your first Sphero robot</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Sphero Modal -->
+    <div id="addSpheroModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add New Sphero</h2>
+                <span class="close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <label for="spheroNameInput">Sphero Name:</label>
+                <input type="text" id="spheroNameInput" placeholder="e.g., SB-3660" class="input-field">
+                <p class="help-text">Enter the name of your Sphero (e.g., SB-3660, SB-1234)</p>
+            </div>
+            <div class="modal-footer">
+                <button id="cancelBtn" class="btn btn-secondary">Cancel</button>
+                <button id="confirmAddBtn" class="btn btn-primary">Add Sphero</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Remove Modal -->
+    <div id="confirmRemoveModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Remove Sphero?</h2>
+                <span class="close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="removeConfirmText">Are you sure you want to remove this Sphero?</p>
+            </div>
+            <div class="modal-footer">
+                <button id="cancelRemoveBtn" class="btn btn-secondary">Cancel</button>
+                <button id="confirmRemoveBtn" class="btn btn-danger">Remove</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

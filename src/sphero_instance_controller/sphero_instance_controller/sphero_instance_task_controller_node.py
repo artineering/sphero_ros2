@@ -20,19 +20,14 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 
 from std_msgs.msg import String
 
-from spherov2 import scanner
-from spherov2.sphero_edu import SpheroEduAPI
-
 from sphero_instance_controller.core.sphero import (
-    Sphero,
     TaskExecutor,
     TaskDescriptor,
     TaskStatus
 )
-from sphero_instance_controller.spherov2_collision_patch import apply_collision_patch
 
-# Apply collision detection patch
-apply_collision_patch()
+# Note: Task controller does NOT import scanner, SpheroEduAPI, or Sphero
+# It only communicates through ROS topics
 
 
 class SpheroInstanceTaskController(Node):
@@ -43,26 +38,26 @@ class SpheroInstanceTaskController(Node):
     All topics are prefixed with 'sphero/<sphero_name>/'
     """
 
-    def __init__(self, robot, api, sphero_name: str):
+    def __init__(self, sphero_name: str):
         """
         Initialize the task controller node.
 
         Args:
-            robot: The Sphero robot object from scanner
-            api: The SpheroEduAPI object
             sphero_name: Name of the Sphero (used for topic namespacing)
         """
         super().__init__('sphero_instance_task_controller_node')
 
         self.sphero_name = sphero_name
-        self.topic_prefix = f'sphero/{sphero_name}'
+        # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
+        topic_name_safe = sphero_name.replace("-", "_")
+        self.topic_prefix = f'sphero/{topic_name_safe}'
 
-        # Initialize Sphero core class
-        self.sphero = Sphero(robot, api, sphero_name)
+        # Note: Task controller does NOT connect to hardware
+        # It only communicates through ROS topics with the device controller
 
-        # Initialize task executor with callbacks
+        # Initialize task executor (without direct Sphero access)
         self.task_executor = TaskExecutor(
-            sphero=self.sphero,
+            sphero=None,  # No direct hardware access
             position_callback=self.get_current_position,
             heading_callback=self.get_current_heading
         )
@@ -91,8 +86,7 @@ class SpheroInstanceTaskController(Node):
         # Log initialization
         self._log_initialization()
 
-        # Set ready LED (green)
-        self.sphero.set_led(0, 255, 0)
+        # Note: LED control is done through ROS topics, not direct hardware access
 
     def _create_subscribers(self):
         """Create all ROS subscribers."""
@@ -134,10 +128,20 @@ class SpheroInstanceTaskController(Node):
 
     def _log_initialization(self):
         """Log initialization information."""
-        self.get_logger().info(f'Sphero Instance Task Controller initialized for {self.sphero_name}')
-        self.get_logger().info(f'  - Topic prefix: {self.topic_prefix}')
-        self.get_logger().info(f'  - Listening for tasks on {self.topic_prefix}/task')
-        self.get_logger().info(f'  - Publishing status to {self.topic_prefix}/task/status')
+        self.get_logger().info('='*70)
+        self.get_logger().info('🎯 TASK CONTROLLER ACTIVATED')
+        self.get_logger().info('='*70)
+        self.get_logger().info(f'Sphero Name: {self.sphero_name}')
+        self.get_logger().info(f'Topic Prefix: {self.topic_prefix}')
+        self.get_logger().info('Subscribed Topics:')
+        self.get_logger().info(f'  - {self.topic_prefix}/task')
+        self.get_logger().info(f'  - {self.topic_prefix}/state')
+        self.get_logger().info(f'  - {self.topic_prefix}/reset_aim')
+        self.get_logger().info('Publishing Topics:')
+        self.get_logger().info(f'  - {self.topic_prefix}/task/status')
+        self.get_logger().info('='*70)
+        self.get_logger().info('✅ Task Controller READY')
+        self.get_logger().info('='*70)
 
     def get_current_position(self):
         """Get current position for task executor."""
@@ -275,11 +279,9 @@ class SpheroInstanceTaskController(Node):
     def cleanup(self):
         """Clean up resources before shutdown."""
         self.get_logger().info('Cleaning up Sphero instance task controller...')
-        try:
-            self.sphero.cleanup()
-            self.get_logger().info('Sphero cleanup complete')
-        except Exception as e:
-            self.get_logger().error(f'Error during cleanup: {e}')
+        # Task controller has no hardware to clean up
+        # Hardware cleanup is handled by the device controller
+        self.get_logger().info('Task controller cleanup complete')
 
 
 def main(args=None):
@@ -316,22 +318,24 @@ def main(args=None):
         temp_node.destroy_node()
         temp_node = None
 
-        # Scan for Sphero
-        print(f"Scanning for Sphero robot: {sphero_name}...")
-        robot = scanner.find_toy(toy_name=sphero_name)
+        # Create the task controller node (no hardware connection needed)
+        print(f"Initializing task controller for {sphero_name}...")
+        node = SpheroInstanceTaskController(sphero_name)
+        print(f"Task controller initialized for {sphero_name}")
 
-        with SpheroEduAPI(toy=robot) as api:
-            print(f"Connected to {sphero_name}")
-
-            # Create the node
-            node = SpheroInstanceTaskController(robot, api, sphero_name)
-
-            # Spin until shutdown requested
-            while rclpy.ok() and not shutdown_requested:
+        # Spin until shutdown requested
+        while rclpy.ok() and not shutdown_requested:
+            try:
                 rclpy.spin_once(node, timeout_sec=0.1)
+            except rclpy.executors.ExternalShutdownException:
+                # Expected during shutdown - ignore
+                break
 
     except KeyboardInterrupt:
         print("\nShutting down...")
+    except rclpy.executors.ExternalShutdownException:
+        # Expected during external shutdown - ignore
+        pass
     except Exception as e:
         print(f"Error: {e}")
         import traceback

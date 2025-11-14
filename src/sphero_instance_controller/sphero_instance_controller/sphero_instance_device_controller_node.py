@@ -59,7 +59,9 @@ class SpheroInstanceDeviceController(Node):
         super().__init__('sphero_instance_device_controller_node')
 
         self.sphero_name = sphero_name
-        self.topic_prefix = f'sphero/{sphero_name}'
+        # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
+        topic_name_safe = sphero_name.replace("-", "_")
+        self.topic_prefix = f'sphero/{topic_name_safe}'
 
         # Initialize Sphero core class
         self.sphero = Sphero(robot, api, sphero_name)
@@ -144,12 +146,26 @@ class SpheroInstanceDeviceController(Node):
 
     def _log_initialization(self):
         """Log initialization information."""
-        self.get_logger().info(f'Sphero Instance Device Controller initialized for {self.sphero_name}')
-        self.get_logger().info('Parameters:')
-        self.get_logger().info(f'  - sphero_name: {self.sphero_name}')
-        self.get_logger().info(f'  - topic_prefix: {self.topic_prefix}')
-        self.get_logger().info(f'  - sensor_rate: {self.sensor_rate} Hz (period: {self.sensor_period:.3f}s)')
-        self.get_logger().info(f'  - heartbeat_rate: {self.heartbeat_rate} seconds')
+        self.get_logger().info('='*70)
+        self.get_logger().info('🎮 DEVICE CONTROLLER ACTIVATED')
+        self.get_logger().info('='*70)
+        self.get_logger().info(f'Sphero Name: {self.sphero_name}')
+        self.get_logger().info(f'Topic Prefix: {self.topic_prefix}')
+        self.get_logger().info(f'Sensor Rate: {self.sensor_rate} Hz')
+        self.get_logger().info(f'Heartbeat: Every {self.heartbeat_rate} seconds')
+        self.get_logger().info('Subscribed Topics:')
+        self.get_logger().info(f'  - {self.topic_prefix}/led')
+        self.get_logger().info(f'  - {self.topic_prefix}/roll')
+        self.get_logger().info(f'  - {self.topic_prefix}/stop')
+        self.get_logger().info(f'  - {self.topic_prefix}/matrix')
+        self.get_logger().info(f'  - ... and 6 more')
+        self.get_logger().info('Publishing Topics:')
+        self.get_logger().info(f'  - {self.topic_prefix}/sensors')
+        self.get_logger().info(f'  - {self.topic_prefix}/state')
+        self.get_logger().info(f'  - {self.topic_prefix}/battery')
+        self.get_logger().info(f'  - {self.topic_prefix}/status')
+        self.get_logger().info('='*70)
+        self.get_logger().info('✅ Device Controller READY')
 
     # ===== Command Callbacks =====
 
@@ -470,13 +486,38 @@ def main(args=None):
 
         print(f"Sphero name from parameter: {sphero_name}")
 
-        # Destroy temporary node before creating controller node
-        temp_node.destroy_node()
-        temp_node = None
+        # Sanitize topic name for publishing error status
+        topic_name_safe = sphero_name.replace("-", "_")
+        topic_prefix = f'sphero/{topic_name_safe}'
 
         # Scan for Sphero
         print(f"Scanning for Sphero robot: {sphero_name}...")
-        robot = scanner.find_toy(toy_name=sphero_name)
+        try:
+            robot = scanner.find_toy(toy_name=sphero_name)
+        except Exception as scan_error:
+            # Toy not found - publish error status before exiting
+            print(f"✗ Failed to find Sphero {sphero_name}: {scan_error}")
+
+            # Use temp_node to publish error status
+            error_pub = temp_node.create_publisher(String, f'{topic_prefix}/device_error', 10)
+            error_msg = String()
+            error_msg.data = json.dumps({
+                'error': 'toy_not_found',
+                'sphero_name': sphero_name,
+                'message': str(scan_error)
+            })
+
+            # Publish multiple times to ensure delivery
+            for _ in range(5):
+                error_pub.publish(error_msg)
+                time.sleep(0.1)
+
+            print(f"Published error status for {sphero_name}")
+            raise  # Re-raise to trigger shutdown
+
+        # Destroy temporary node before creating controller node
+        temp_node.destroy_node()
+        temp_node = None
 
         with SpheroEduAPI(toy=robot) as api:
             print(f"Connected to {sphero_name}")

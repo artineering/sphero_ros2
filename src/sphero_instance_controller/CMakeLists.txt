@@ -45,7 +45,19 @@ install(
     ${PROJECT_NAME}/sphero_instance_device_controller_node.py
     ${PROJECT_NAME}/sphero_instance_task_controller_node.py
     ${PROJECT_NAME}/sphero_instance_statemachine_controller_node.py
+    ${PROJECT_NAME}/sphero_instance_websocket_server.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install web interface templates and static files
+install(
+  DIRECTORY ${PROJECT_NAME}/templates
+  DESTINATION lib/python3.12/site-packages/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY ${PROJECT_NAME}/static
+  DESTINATION lib/python3.12/site-packages/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)

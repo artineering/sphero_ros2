@@ -605,12 +605,20 @@ class SpheroState:
         if self._api is None:
             return False
 
+        # Import PacketDecodingException for better error handling
+        try:
+            from spherov2.controls import PacketDecodingException
+        except ImportError:
+            PacketDecodingException = Exception
+
         # Query orientation from device
         try:
             orientation = self._api.get_orientation()
             self.set('orientation', orientation.get('pitch', 0.0), 'pitch')
             self.set('orientation', orientation.get('roll', 0.0), 'roll')
             self.set('orientation', orientation.get('yaw', 0.0), 'yaw')
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass  # Silent fail - sensor may not be available
 
@@ -620,6 +628,8 @@ class SpheroState:
             self.set('accelerometer', accel.get('x', 0.0), 'x')
             self.set('accelerometer', accel.get('y', 0.0), 'y')
             self.set('accelerometer', accel.get('z', 0.0), 'z')
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass
 
@@ -629,6 +639,8 @@ class SpheroState:
             self.set('gyroscope', gyro.get('x', 0.0), 'x')
             self.set('gyroscope', gyro.get('y', 0.0), 'y')
             self.set('gyroscope', gyro.get('z', 0.0), 'z')
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass
 
@@ -648,6 +660,8 @@ class SpheroState:
                 self.set('position', new_x, 'x')
                 self.set('position', new_y, 'y')
                 self._last_published_position = (new_x, new_y)
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass
 
@@ -656,6 +670,8 @@ class SpheroState:
             velocity = self._api.get_velocity()
             self.set('velocity', velocity.get('x', 0.0), 'x')
             self.set('velocity', velocity.get('y', 0.0), 'y')
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass
 
@@ -663,6 +679,8 @@ class SpheroState:
         try:
             heading = self._api.get_heading()
             self.set('motion', int(heading) % 360, 'heading')
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass
 
@@ -671,6 +689,8 @@ class SpheroState:
             speed = self._api.get_speed()
             self.set('motion', abs(int(speed)), 'speed')
             self.set('motion', abs(speed) > 0, 'is_moving')
+        except PacketDecodingException:
+            pass  # Bluetooth packet collision - skip this update
         except Exception:
             pass
 
@@ -899,15 +919,15 @@ class SpheroState:
 
     def to_sphero_sensor_msg(self):
         """
-        Convert the state to a battleship_game/SpheroSensor message.
+        Convert the state to a SpheroSensor message.
 
         Returns:
             SpheroSensor message or None if ROS2 is not available
 
-        Note: This method requires the sphero_package.msg module to be available.
+        Note: This method requires the sphero_instance_controller.msg module to be available.
         """
         try:
-            from sphero_package.msg import SpheroSensor
+            from sphero_instance_controller.msg import SpheroSensor
         except ImportError:
             return None
 
