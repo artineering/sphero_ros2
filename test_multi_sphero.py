@@ -25,7 +25,8 @@ class MultiSpheroTester:
     def __init__(self, base_url='http://localhost:5000'):
         """Initialize the tester with the multi-robot webserver URL."""
         self.base_url = base_url
-        self.sphero_names = ['SB-3660', 'SB-74FB', 'SB-3716', 'SB-58EF']
+        """self.sphero_names = ['SB-3660', 'SB-74FB', 'SB-3716', 'SB-58EF']"""
+        self.sphero_names = ['SB-3660']
         self.connected_spheros = []
         self.sphero_ports = {}  # Map sphero_name -> port
         self.running = True

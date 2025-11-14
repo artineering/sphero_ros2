@@ -45,11 +45,15 @@ class SpheroInstanceTaskController(Node):
         Args:
             sphero_name: Name of the Sphero (used for topic namespacing)
         """
-        super().__init__('sphero_instance_task_controller_node')
+        # Sanitize name: replace hyphens with underscores (ROS2 naming rules)
+        name_safe = sphero_name.replace("-", "_")
+        # Create unique node name with sphero name suffix
+        node_name = f'sphero_task_controller_{name_safe}'
+        super().__init__(node_name)
 
         self.sphero_name = sphero_name
         # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
-        topic_name_safe = sphero_name.replace("-", "_")
+        topic_name_safe = name_safe
         self.topic_prefix = f'sphero/{topic_name_safe}'
 
         # Note: Task controller does NOT connect to hardware

@@ -56,11 +56,15 @@ class SpheroInstanceDeviceController(Node):
             api: The SpheroEduAPI object
             sphero_name: Name of the Sphero (used for topic namespacing)
         """
-        super().__init__('sphero_instance_device_controller_node')
+        # Sanitize name: replace hyphens with underscores (ROS2 naming rules)
+        name_safe = sphero_name.replace("-", "_")
+        # Create unique node name with sphero name suffix
+        node_name = f'sphero_device_controller_{name_safe}'
+        super().__init__(node_name)
 
         self.sphero_name = sphero_name
         # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
-        topic_name_safe = sphero_name.replace("-", "_")
+        topic_name_safe = name_safe
         self.topic_prefix = f'sphero/{topic_name_safe}'
 
         # Initialize Sphero core class
