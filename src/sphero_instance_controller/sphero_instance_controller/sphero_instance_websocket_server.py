@@ -293,6 +293,7 @@ class SpheroInstanceWebSocketServer(Node):
             error_type = error_data.get('error', 'unknown')
 
             if error_type == 'toy_not_found':
+                self._shutdown_triggered = True  # Mark that we received the error
                 self.get_logger().error(f"✗ Sphero {self.sphero_name} not found - initiating shutdown")
                 # Emit error to websocket clients
                 if hasattr(self, 'socketio'):
@@ -332,7 +333,23 @@ class SpheroInstanceWebSocketServer(Node):
                 '--ros-args', '-p', f'sphero_name:={self.sphero_name}'
             ], stdout=None, stderr=None, preexec_fn=os.setpgrp)  # Create new process group
 
-            time.sleep(2)  # Wait for device controller to initialize
+            # Monitor device controller for early exit (toy not found)
+            for i in range(20):  # Check for 10 seconds (20 * 0.5s)
+                time.sleep(0.5)
+                if self.device_controller_process.poll() is not None:
+                    # Device controller exited - likely toy not found
+                    self.get_logger().error(f'Device controller exited early (exit code: {self.device_controller_process.returncode})')
+                    # Wait a bit for error message to arrive via topic
+                    time.sleep(1)
+                    # If we didn't receive the error via topic, trigger shutdown manually
+                    if not hasattr(self, '_shutdown_triggered'):
+                        self.get_logger().error(f'Toy not found for {self.sphero_name} - initiating shutdown')
+                        import threading
+                        threading.Thread(target=self._shutdown_after_delay, daemon=True).start()
+                    return False
+                # After 2 seconds, break to continue if still running
+                if i >= 4:
+                    break
 
             # Start task controller (inherit stdout/stderr to see debug logs)
             self.get_logger().info('Launching Task Controller...')

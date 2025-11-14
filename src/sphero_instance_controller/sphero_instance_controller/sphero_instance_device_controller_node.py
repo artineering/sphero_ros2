@@ -492,6 +492,7 @@ def main(args=None):
 
         # Scan for Sphero
         print(f"Scanning for Sphero robot: {sphero_name}...")
+        robot = None
         try:
             robot = scanner.find_toy(toy_name=sphero_name)
         except Exception as scan_error:
@@ -507,13 +508,18 @@ def main(args=None):
                 'message': str(scan_error)
             })
 
-            # Publish multiple times to ensure delivery
-            for _ in range(5):
+            # Publish multiple times and spin to ensure delivery
+            for _ in range(10):
                 error_pub.publish(error_msg)
-                time.sleep(0.1)
+                rclpy.spin_once(temp_node, timeout_sec=0.05)
+                time.sleep(0.05)
 
-            print(f"Published error status for {sphero_name}")
-            raise  # Re-raise to trigger shutdown
+            print(f"Published error status for {sphero_name} - exiting")
+            # Clean exit without raising exception
+            temp_node.destroy_node()
+            temp_node = None
+            rclpy.shutdown()
+            return  # Exit cleanly
 
         # Destroy temporary node before creating controller node
         temp_node.destroy_node()
