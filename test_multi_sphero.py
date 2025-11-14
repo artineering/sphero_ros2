@@ -3,13 +3,13 @@
 """
 Test script for connecting to multiple Sphero robots.
 
-This script connects to four Spheros using the multi-robot webserver:
-- SB-3660 (Red LED)
-- SB-74FB (Green LED)
-- SB-3716 (Blue LED)
-- SB-58EF (Yellow LED)
+This script connects to four Spheros using the multi-robot webserver
+and displays Ninja Turtle matrix patterns on each:
+- SB-3660 → Leonardo (Blue bandana)
+- SB-74FB → Raphael (Red bandana)
+- SB-3716 → Donatello (Purple bandana)
+- SB-58EF → Michelangelo (Orange bandana)
 
-After connecting all Spheros, it sets unique LED colors for each one.
 Press Ctrl+C to disconnect all Spheros and exit.
 """
 
@@ -25,8 +25,7 @@ class MultiSpheroTester:
     def __init__(self, base_url='http://localhost:5000'):
         """Initialize the tester with the multi-robot webserver URL."""
         self.base_url = base_url
-        """self.sphero_names = ['SB-3660', 'SB-74FB', 'SB-3716', 'SB-58EF']"""
-        self.sphero_names = ['SB-3660']
+        self.sphero_names = ['SB-3660', 'SB-74FB', 'SB-3716', 'SB-58EF']
         self.connected_spheros = []
         self.sphero_ports = {}  # Map sphero_name -> port
         self.running = True
@@ -37,6 +36,14 @@ class MultiSpheroTester:
             'SB-74FB': (0, 255, 0),      # Green
             'SB-3716': (0, 0, 255),      # Blue
             'SB-58EF': (255, 255, 0)     # Yellow
+        }
+
+        # Define Ninja Turtle assignments for each Sphero
+        self.turtle_assignments = {
+            'SB-3660': {'turtle': 'leonardo', 'color': (0, 0, 255), 'name': 'Leonardo'},        # Blue bandana
+            'SB-74FB': {'turtle': 'raphael', 'color': (255, 0, 0), 'name': 'Raphael'},         # Red bandana
+            'SB-3716': {'turtle': 'donatello', 'color': (128, 0, 128), 'name': 'Donatello'},   # Purple bandana
+            'SB-58EF': {'turtle': 'michelangelo', 'color': (255, 165, 0), 'name': 'Michelangelo'}  # Orange bandana
         }
 
     def connect_sphero(self, sphero_name: str) -> bool:
@@ -158,6 +165,48 @@ class MultiSpheroTester:
             print(f"⚠️  Error setting LED for {sphero_name}: {e}")
             return False
 
+    def set_matrix_pattern(self, sphero_name: str, pattern: str, red: int, green: int, blue: int) -> bool:
+        """
+        Set the LED matrix pattern for a Sphero.
+
+        Args:
+            sphero_name: Name of the Sphero
+            pattern: Pattern name (e.g., 'leonardo', 'raphael', etc.)
+            red: Red value for pattern color (0-255)
+            green: Green value for pattern color (0-255)
+            blue: Blue value for pattern color (0-255)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if sphero_name not in self.sphero_ports:
+            print(f"⚠️  {sphero_name} is not connected")
+            return False
+
+        port = self.sphero_ports[sphero_name]
+        try:
+            response = requests.post(
+                f'http://localhost:{port}/api/matrix',
+                json={
+                    'pattern': pattern,
+                    'red': red,
+                    'green': green,
+                    'blue': blue
+                },
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                print(f"🐢 Set {sphero_name} matrix to {pattern} with RGB({red}, {green}, {blue})")
+                return True
+            else:
+                print(f"⚠️  Failed to set matrix for {sphero_name}: HTTP {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"⚠️  Error setting matrix for {sphero_name}: {e}")
+            return False
+
     def set_all_led_colors(self):
         """Set unique LED colors for all connected Spheros."""
         print()
@@ -180,6 +229,34 @@ class MultiSpheroTester:
         print("="*60)
         print()
 
+    def set_all_turtle_patterns(self):
+        """Set Ninja Turtle matrix patterns for all connected Spheros."""
+        print()
+        print("="*60)
+        print("Setting Ninja Turtle Matrix Patterns")
+        print("="*60)
+        print()
+
+        for sphero_name in self.connected_spheros:
+            if sphero_name in self.turtle_assignments:
+                assignment = self.turtle_assignments[sphero_name]
+                turtle_name = assignment['name']
+                pattern = assignment['turtle']
+                r, g, b = assignment['color']
+                color_name = self._get_color_name(r, g, b)
+
+                print(f"Setting {sphero_name} to {turtle_name} ({color_name} bandana)...")
+                self.set_led_color(sphero_name, 0, 0, 0)
+                time.sleep(0.5)
+                self.set_matrix_pattern(sphero_name, pattern, r, g, b)
+                time.sleep(0.5)
+
+        print()
+        print("="*60)
+        print("All Ninja Turtle patterns configured")
+        print("="*60)
+        print()
+
     def _get_color_name(self, r: int, g: int, b: int) -> str:
         """Get human-readable color name from RGB values."""
         if r == 255 and g == 0 and b == 0:
@@ -196,6 +273,10 @@ class MultiSpheroTester:
             return "Cyan"
         elif r == 255 and g == 255 and b == 255:
             return "White"
+        elif r == 128 and g == 0 and b == 128:
+            return "Purple"
+        elif r == 255 and g == 165 and b == 0:
+            return "Orange"
         else:
             return f"RGB({r}, {g}, {b})"
 
@@ -240,8 +321,8 @@ class MultiSpheroTester:
             for name in self.connected_spheros:
                 print(f"  - {name}")
 
-            # Set unique LED colors for each Sphero
-            self.set_all_led_colors()
+            # Set Ninja Turtle matrix patterns for each Sphero
+            self.set_all_turtle_patterns()
         else:
             print("✗ No Spheros connected")
 
