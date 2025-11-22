@@ -545,6 +545,22 @@ async function resetToOrigin() {
     }
 }
 
+// Reset Aim
+async function resetAim() {
+    try {
+        const response = await fetch('/api/motion/reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const result = await response.json();
+        if (result.success) {
+            console.log('Sphero aim reset');
+        }
+    } catch (error) {
+        console.error('Failed to reset aim:', error);
+    }
+}
+
 // Quick Move
 async function quickMove(heading) {
     const speed = 100;

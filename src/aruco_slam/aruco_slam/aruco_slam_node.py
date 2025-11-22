@@ -37,11 +37,11 @@ class ArucoSLAMNode(Node):
         super().__init__('aruco_slam_node')
 
         # Declare parameters
-        self.declare_parameter('camera_id', 2)
-        self.declare_parameter('field_width_cm', 600.0)
-        self.declare_parameter('field_height_cm', 400.0)
-        self.declare_parameter('corner_marker_ids', [0, 1, 2, 3])
-        self.declare_parameter('sphero_marker_ids', [10, 11, 12, 13])
+        self.declare_parameter('camera_id', 0)
+        self.declare_parameter('field_width_cm', 300.0)
+        self.declare_parameter('field_height_cm', 200.0)
+        self.declare_parameter('corner_marker_ids', [4, 5, 6, 7])
+        self.declare_parameter('sphero_marker_ids', [3, 1, 2, 20])
         self.declare_parameter('sphero_names', ['SB-3660', 'SB-74FB', 'SB-3716', 'SB-58EF'])
         self.declare_parameter('publish_rate_hz', 10.0)
         self.declare_parameter('auto_calibrate', True)

@@ -46,6 +46,8 @@ class ArucoDetector:
         """Start camera capture for visualization."""
         if self.cap is None:
             self.cap = cv2.VideoCapture(self.camera_id)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
             if not self.cap.isOpened():
                 raise RuntimeError(f"Cannot open camera {self.camera_id}")
         self.visualizing = True

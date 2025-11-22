@@ -521,7 +521,16 @@ def create_flask_app(node: SpheroInstanceWebSocketServer):
     CORS(app)
 
     # Use threading async_mode to support emitting from ROS callback threads
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+    # Configure ping/pong timeouts to prevent disconnections when browser tabs are inactive
+    socketio = SocketIO(
+        app,
+        cors_allowed_origins="*",
+        async_mode='threading',
+        ping_timeout=60,        # Client must respond within 60 seconds (vs 5s default)
+        ping_interval=25,       # Server sends ping every 25 seconds
+        engineio_logger=False,  # Reduce logging noise
+        logger=False            # Reduce logging noise
+    )
     node.socketio = socketio
 
     # HTTP routes
