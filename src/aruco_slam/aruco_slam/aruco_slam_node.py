@@ -98,6 +98,9 @@ class ArucoSLAMNode(Node):
         # Start camera
         try:
             self.detector.begin_visualization()
+            # Create resizable visualization window
+            if self.show_viz:
+                cv2.namedWindow('ArUco SLAM', cv2.WINDOW_NORMAL)
             self.get_logger().info(f"ArUco SLAM node started - Camera {camera_id}")
             self.get_logger().info(f"Field size: {field_width}x{field_height} cm")
             self.get_logger().info(f"Corner markers: {corner_ids}")

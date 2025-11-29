@@ -45,7 +45,7 @@ class ArucoDetector:
     def begin_visualization(self):
         """Start camera capture for visualization."""
         if self.cap is None:
-            self.cap = cv2.VideoCapture(self.camera_id)
+            self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
             if not self.cap.isOpened():
@@ -133,7 +133,7 @@ class ArucoDetector:
                         )
 
         # Display frame
-        cv2.imshow('ArUco Detector', frame)
+        cv2.imshow('AruCo SLAM', frame)
 
         # Check for quit key ('q')
         if cv2.waitKey(1) & 0xFF == ord('q'):
