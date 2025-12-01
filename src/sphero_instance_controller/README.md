@@ -261,11 +261,12 @@ ros2 topic pub /sphero/SB-3660/task std_msgs/msg/String \
   '{data: "{\"task_type\": \"patrol\", \"parameters\": {\"waypoints\": [{\"x\": 0, \"y\": 0}, {\"x\": 100, \"y\": 0}, {\"x\": 100, \"y\": 100}, {\"x\": 0, \"y\": 100}], \"speed\": 80, \"loop\": true}}"}'
 ```
 
-**Move in a circle:**
+**Move in a circle (uses differential motor speeds for precise radius control):**
 ```bash
 ros2 topic pub /sphero/SB-3660/task std_msgs/msg/String \
-  '{data: "{\"task_type\": \"circle\", \"parameters\": {\"radius\": 50, \"speed\": 100, \"duration\": 10.0}}"}'
+  '{data: "{\"task_type\": \"circle\", \"parameters\": {\"radius\": 50, \"speed\": 100, \"duration\": 10.0, \"direction\": \"ccw\"}}"}'
 ```
+Note: The circle task uses raw motor control to achieve precise circular motion based on the desired radius. The `direction` parameter can be "cw" (clockwise) or "ccw" (counter-clockwise, default).
 
 **LED color sequence:**
 ```bash
@@ -277,7 +278,7 @@ ros2 topic pub /sphero/SB-3660/task std_msgs/msg/String \
 
 - **move_to**: Move to specific (x, y) coordinates
 - **patrol**: Follow waypoints in sequence
-- **circle**: Move in circular pattern
+- **circle**: Move in circular pattern using differential motor speeds (supports radius, speed, duration, direction parameters)
 - **square**: Move in square pattern
 - **led_sequence**: Execute LED color sequence
 - **matrix_sequence**: Display matrix pattern sequence (BOLT only)

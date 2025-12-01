@@ -277,6 +277,56 @@
                 </div>
 
                 <div class="control-section">
+                    <h3>Raw Motor Control</h3>
+                    <p class="info-text">Control left and right motors independently for precise maneuvering</p>
+                    <div class="motor-controls">
+                        <div class="motor-group">
+                            <h4>Left Motor</h4>
+                            <div class="form-group">
+                                <label>Mode:</label>
+                                <select id="left-motor-mode">
+                                    <option value="forward" selected>Forward</option>
+                                    <option value="reverse">Reverse</option>
+                                    <option value="brake">Brake</option>
+                                    <option value="off">Off</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Speed: <span id="left-motor-speed-val">100</span> (0-255)</label>
+                                <input type="range" id="left-motor-speed" min="0" max="255" value="100" oninput="updateLeftMotorSpeed()">
+                            </div>
+                        </div>
+                        <div class="motor-group">
+                            <h4>Right Motor</h4>
+                            <div class="form-group">
+                                <label>Mode:</label>
+                                <select id="right-motor-mode">
+                                    <option value="forward" selected>Forward</option>
+                                    <option value="reverse">Reverse</option>
+                                    <option value="brake">Brake</option>
+                                    <option value="off">Off</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Speed: <span id="right-motor-speed-val">100</span> (0-255)</label>
+                                <input type="range" id="right-motor-speed" min="0" max="255" value="100" oninput="updateRightMotorSpeed()">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="button-group">
+                        <button class="btn btn-primary" onclick="sendRawMotor()">Apply Motor Settings</button>
+                        <button class="btn btn-secondary" onclick="syncMotors()">Sync Motors (Both Forward)</button>
+                    </div>
+                    <div class="quick-patterns">
+                        <h4>Quick Patterns</h4>
+                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('spin-left')">Spin Left</button>
+                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('spin-right')">Spin Right</button>
+                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('curve-left')">Curve Left</button>
+                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('curve-right')">Curve Right</button>
+                    </div>
+                </div>
+
+                <div class="control-section">
                     <h3>Quick Move</h3>
                     <div class="direction-pad">
                         <button class="dir-btn" onclick="quickMove(0)">↑</button>

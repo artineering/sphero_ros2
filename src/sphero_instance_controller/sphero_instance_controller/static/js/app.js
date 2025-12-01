@@ -580,6 +580,98 @@ async function quickMove(heading) {
     }
 }
 
+// Raw Motor Control Functions
+function updateLeftMotorSpeed() {
+    const speed = document.getElementById('left-motor-speed').value;
+    document.getElementById('left-motor-speed-val').textContent = speed;
+}
+
+function updateRightMotorSpeed() {
+    const speed = document.getElementById('right-motor-speed').value;
+    document.getElementById('right-motor-speed-val').textContent = speed;
+}
+
+async function sendRawMotor() {
+    const leftMode = document.getElementById('left-motor-mode').value;
+    const leftSpeed = parseInt(document.getElementById('left-motor-speed').value);
+    const rightMode = document.getElementById('right-motor-mode').value;
+    const rightSpeed = parseInt(document.getElementById('right-motor-speed').value);
+
+    try {
+        await fetch('/api/motion/raw_motor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                left_mode: leftMode,
+                left_speed: leftSpeed,
+                right_mode: rightMode,
+                right_speed: rightSpeed
+            })
+        });
+        console.log(`Raw motor command sent: L=${leftMode}@${leftSpeed}, R=${rightMode}@${rightSpeed}`);
+    } catch (error) {
+        console.error('Failed to send raw motor command:', error);
+    }
+}
+
+function syncMotors() {
+    // Set both motors to forward mode with same speed
+    const speed = parseInt(document.getElementById('left-motor-speed').value);
+
+    document.getElementById('left-motor-mode').value = 'forward';
+    document.getElementById('right-motor-mode').value = 'forward';
+    document.getElementById('right-motor-speed').value = speed;
+    document.getElementById('right-motor-speed-val').textContent = speed;
+
+    console.log('Motors synced to forward mode');
+}
+
+function setRawMotorPattern(pattern) {
+    const baseSpeed = 150;
+
+    switch(pattern) {
+        case 'spin-left':
+            // Left reverse, right forward for left spin
+            document.getElementById('left-motor-mode').value = 'reverse';
+            document.getElementById('left-motor-speed').value = baseSpeed;
+            document.getElementById('left-motor-speed-val').textContent = baseSpeed;
+            document.getElementById('right-motor-mode').value = 'forward';
+            document.getElementById('right-motor-speed').value = baseSpeed;
+            document.getElementById('right-motor-speed-val').textContent = baseSpeed;
+            break;
+        case 'spin-right':
+            // Left forward, right reverse for right spin
+            document.getElementById('left-motor-mode').value = 'forward';
+            document.getElementById('left-motor-speed').value = baseSpeed;
+            document.getElementById('left-motor-speed-val').textContent = baseSpeed;
+            document.getElementById('right-motor-mode').value = 'reverse';
+            document.getElementById('right-motor-speed').value = baseSpeed;
+            document.getElementById('right-motor-speed-val').textContent = baseSpeed;
+            break;
+        case 'curve-left':
+            // Left slower than right for left curve
+            document.getElementById('left-motor-mode').value = 'forward';
+            document.getElementById('left-motor-speed').value = Math.floor(baseSpeed * 0.6);
+            document.getElementById('left-motor-speed-val').textContent = Math.floor(baseSpeed * 0.6);
+            document.getElementById('right-motor-mode').value = 'forward';
+            document.getElementById('right-motor-speed').value = baseSpeed;
+            document.getElementById('right-motor-speed-val').textContent = baseSpeed;
+            break;
+        case 'curve-right':
+            // Right slower than left for right curve
+            document.getElementById('left-motor-mode').value = 'forward';
+            document.getElementById('left-motor-speed').value = baseSpeed;
+            document.getElementById('left-motor-speed-val').textContent = baseSpeed;
+            document.getElementById('right-motor-mode').value = 'forward';
+            document.getElementById('right-motor-speed').value = Math.floor(baseSpeed * 0.6);
+            document.getElementById('right-motor-speed-val').textContent = Math.floor(baseSpeed * 0.6);
+            break;
+    }
+
+    // Automatically apply the pattern
+    sendRawMotor();
+}
+
 // Error Handling
 function handleError(data) {
     console.error('Error from server:', data);
@@ -912,7 +1004,8 @@ function showTaskForm(taskType) {
         formFields.innerHTML = `
             <div class="form-group">
                 <label>Radius (cm):</label>
-                <input type="number" id="task-radius" value="50" step="10">
+                <input type="number" id="task-radius" value="50" step="10" min="10">
+                <small>Circle radius using differential motor speeds</small>
             </div>
             <div class="form-group">
                 <label>Speed (0-255):</label>
@@ -921,6 +1014,13 @@ function showTaskForm(taskType) {
             <div class="form-group">
                 <label>Duration (seconds):</label>
                 <input type="number" id="task-duration" value="10" step="1">
+            </div>
+            <div class="form-group">
+                <label>Direction:</label>
+                <select id="task-direction">
+                    <option value="ccw" selected>Counter-Clockwise (CCW)</option>
+                    <option value="cw">Clockwise (CW)</option>
+                </select>
             </div>
         `;
     } else if (taskType === 'square') {
@@ -1021,6 +1121,7 @@ async function submitCurrentTask() {
         parameters.radius = parseFloat(document.getElementById('task-radius').value);
         parameters.speed = parseInt(document.getElementById('task-speed').value);
         parameters.duration = parseFloat(document.getElementById('task-duration').value);
+        parameters.direction = document.getElementById('task-direction').value;
     } else if (currentTaskType === 'square') {
         parameters.side_length = parseFloat(document.getElementById('task-side-length').value);
         parameters.speed = parseInt(document.getElementById('task-speed').value);

@@ -281,10 +281,23 @@ class TaskExecutor:
         return False
 
     def _execute_circle(self, task: TaskDescriptor) -> bool:
-        """Move in a circular pattern."""
-        radius = task.parameters.get('radius', 50)  # cm
-        speed = task.parameters.get('speed', self.default_speed)
+        """
+        Move in a circular pattern using differential motor speeds.
+
+        The circle motion is achieved by setting different speeds for left and right motors.
+        The speed differential is calculated based on the desired radius and base speed.
+
+        For a Sphero with wheel separation d (5.0 cm), to achieve circular motion
+        with radius r at average speed v:
+        - Outer wheel speed: v_outer = v * (r + d/2) / r
+        - Inner wheel speed: v_inner = v * (r - d/2) / r
+        """
+        from spherov2.commands.sphero import RawMotorModes
+
+        radius = task.parameters.get('radius', 50)  # cm (radius of circle path)
+        speed = task.parameters.get('speed', self.default_speed)  # average speed
         duration = task.parameters.get('duration', 10.0)  # seconds
+        direction = task.parameters.get('direction', 'ccw').lower()  # 'cw' or 'ccw'
 
         if 'start_time' not in task.parameters:
             task.parameters['start_time'] = time.time()
@@ -295,9 +308,40 @@ class TaskExecutor:
             self.sphero.stop()
             return True
 
-        # Rotate heading continuously
-        heading = int((elapsed * 36) % 360)  # 10 degrees per second
-        self.sphero.roll(heading, speed)
+        # Sphero wheel separation (distance between left and right motors)
+        wheel_separation = 5.0  # cm
+
+        # Calculate differential speeds for circular motion
+        # r_outer = radius + wheel_separation/2
+        # r_inner = radius - wheel_separation/2
+        # v_outer/v_inner = r_outer/r_inner
+
+        # Clamp radius to avoid division by very small numbers
+        effective_radius = max(radius, wheel_separation)
+
+        # Calculate speed ratios
+        outer_ratio = (effective_radius + wheel_separation / 2) / effective_radius
+        inner_ratio = (effective_radius - wheel_separation / 2) / effective_radius
+
+        # Calculate motor speeds (0-255 range)
+        # Scale the base speed by the ratios
+        outer_speed = int(min(255, speed * outer_ratio))
+        inner_speed = int(min(255, speed * inner_ratio))
+
+        # Determine which motor is inner/outer based on direction
+        if direction == 'cw':  # Clockwise: right motor is inner
+            left_speed = outer_speed
+            right_speed = inner_speed
+        else:  # Counter-clockwise (default): left motor is inner
+            left_speed = inner_speed
+            right_speed = outer_speed
+
+        # Use raw motor control for precise circular motion
+        self.sphero.set_raw_motor_speed(
+            RawMotorModes.FORWARD, left_speed,
+            RawMotorModes.FORWARD, right_speed
+        )
+
         return False
 
     def _execute_square(self, task: TaskDescriptor) -> bool:
