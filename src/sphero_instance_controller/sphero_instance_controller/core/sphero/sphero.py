@@ -11,9 +11,11 @@ import time
 import json
 from typing import Optional, Callable, Dict, Any
 
+from spherov2.toy.sphero import Sphero as SpheroToy
 from spherov2.sphero_edu import SpheroEduAPI, EventType
 from spherov2.types import Color
 from spherov2.commands.sensor import Sensor, CollisionDetectionMethods
+from spherov2.commands.sphero import RawMotorModes
 
 from .state import SpheroState, SpheroConnectionState
 from .matrix_patterns import get_pattern
@@ -34,7 +36,7 @@ class Sphero:
         state: SpheroState object tracking current robot state
     """
 
-    def __init__(self, robot, api: SpheroEduAPI, name: str):
+    def __init__(self, robot: SpheroToy, api: SpheroEduAPI, name: str):
         """
         Initialize the Sphero controller.
 
@@ -213,6 +215,29 @@ class Sphero:
         except Exception as e:
             print(f"Error setting heading: {e}")
             return False
+        
+    def set_raw_motor_speed(self, leftMode: RawMotorModes, leftSpeed, rightMode: RawMotorModes, rightSpeed, proc = None) -> bool:
+        """
+        Set the raw motor speeds.
+        
+        Args:
+            leftMode: Motor mode (Fwd, Rev, Brake, Off, Ignore)
+            leftSpeed: Raw motor speed 0-255
+            rightMode: Motor mode (Fwd, Rev, Brake, Off, Ignore)
+            rightSpeed: Raw motor speed 0-255
+
+        Returns:
+            True if successful, False otherwise
+
+        """
+        try:
+            self.robot.set_raw_motors(leftMode, leftSpeed, rightMode, rightSpeed, proc)
+            return True
+        
+        except Exception as e:
+            print(f"Error setting raw motor speeds: {e}")
+            return False
+
 
     def set_speed(self, speed: int, duration: float = 0) -> bool:
         """
