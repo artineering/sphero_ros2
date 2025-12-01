@@ -216,10 +216,10 @@ class Sphero:
             print(f"Error setting heading: {e}")
             return False
         
-    def set_raw_motor_speed(self, leftMode: RawMotorModes, leftSpeed, rightMode: RawMotorModes, rightSpeed, proc = None) -> bool:
+    def set_raw_motor_speed(self, leftMode: RawMotorModes, leftSpeed, rightMode: RawMotorModes, rightSpeed) -> bool:
         """
         Set the raw motor speeds.
-        
+
         Args:
             leftMode: Motor mode (Fwd, Rev, Brake, Off, Ignore)
             leftSpeed: Raw motor speed 0-255
@@ -231,9 +231,9 @@ class Sphero:
 
         """
         try:
-            self.robot.set_raw_motors(leftMode, leftSpeed, rightMode, rightSpeed, proc)
+            self.robot.set_raw_motors(leftMode, leftSpeed, rightMode, rightSpeed)
             return True
-        
+
         except Exception as e:
             print(f"Error setting raw motor speeds: {e}")
             return False
