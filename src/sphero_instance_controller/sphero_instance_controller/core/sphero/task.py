@@ -75,26 +75,25 @@ class TaskDescriptor:
         }
 
 
-class TaskExecutor:
+class TaskExecutorBase:
     """
-    Executes high-level tasks on a Sphero robot.
+    Base class for task executors.
 
-    This class encapsulates all task execution logic, delegating low-level
-    hardware control to the Sphero class.
+    This abstract class defines the common interface and queue management
+    for task execution. Subclasses implement hardware-specific or topic-based
+    command execution.
     """
 
-    def __init__(self, sphero: Sphero,
+    def __init__(self,
                  position_callback: Optional[Callable[[], Dict[str, float]]] = None,
                  heading_callback: Optional[Callable[[], int]] = None):
         """
-        Initialize the task executor.
+        Initialize the base task executor.
 
         Args:
-            sphero: Sphero instance to control
             position_callback: Callback to get current position {'x': float, 'y': float}
             heading_callback: Callback to get current heading (0-359 degrees)
         """
-        self.sphero = sphero
         self.position_callback = position_callback
         self.heading_callback = heading_callback
 
@@ -109,16 +108,57 @@ class TaskExecutor:
         self.task_history: List[TaskDescriptor] = []
 
     def get_current_position(self) -> Dict[str, float]:
-        """Get current position from callback or sphero state."""
+        """Get current position from callback."""
         if self.position_callback:
             return self.position_callback()
-        return {'x': self.sphero.state.position.x, 'y': self.sphero.state.position.y}
+        return {'x': 0.0, 'y': 0.0}
 
     def get_current_heading(self) -> int:
-        """Get current heading from callback or sphero state."""
+        """Get current heading from callback."""
         if self.heading_callback:
             return self.heading_callback()
-        return self.sphero.heading
+        return 0
+
+    # Abstract methods to be implemented by subclasses
+    def _send_raw_motor_command(self, left_mode: str, left_speed: int, right_mode: str, right_speed: int):
+        """Send raw motor command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_raw_motor_command")
+
+    def _send_roll_command(self, heading: int, speed: int, duration: float = 0):
+        """Send roll command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_roll_command")
+
+    def _send_stop_command(self):
+        """Send stop command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_stop_command")
+
+    def _send_led_command(self, red: int, green: int, blue: int, led_type: str = 'main'):
+        """Send LED command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_led_command")
+
+    def _send_heading_command(self, heading: int):
+        """Send heading command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_heading_command")
+
+    def _send_speed_command(self, speed: int):
+        """Send speed command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_speed_command")
+
+    def _send_spin_command(self, angle: int, duration: float = 1.0):
+        """Send spin command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_spin_command")
+
+    def _send_matrix_command(self, pattern: str = None, red: int = 255, green: int = 255, blue: int = 255):
+        """Send matrix command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_matrix_command")
+
+    def _send_stabilization_command(self, enable: bool):
+        """Send stabilization command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_stabilization_command")
+
+    def _send_collision_detection_command(self, action: str, mode: str = 'obstacle', sensitivity: str = 'HIGH'):
+        """Send collision detection command - to be implemented by subclass."""
+        raise NotImplementedError("Subclass must implement _send_collision_detection_command")
 
     def add_task(self, task: TaskDescriptor):
         """Add a task to the queue."""
@@ -234,14 +274,17 @@ class TaskExecutor:
 
         # Check if we've reached the target
         if distance < self.position_tolerance:
-            self.sphero.stop()
+            self._send_stop_command()
             return True
 
         # Calculate heading to target
         target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
 
-        # Send roll command
-        self.sphero.roll(target_heading, speed)
+        # Send roll command only if heading changed or first call
+        if 'last_heading' not in task.parameters or task.parameters['last_heading'] != target_heading:
+            self._send_roll_command(target_heading, speed)
+            task.parameters['last_heading'] = target_heading
+
         return False
 
     def _execute_patrol(self, task: TaskDescriptor) -> bool:
@@ -260,7 +303,7 @@ class TaskExecutor:
                 task.parameters['current_waypoint_index'] = 0
                 return False
             else:
-                self.sphero.stop()
+                self._send_stop_command()
                 return True
 
         # Move to current waypoint
@@ -274,10 +317,18 @@ class TaskExecutor:
         if distance < self.position_tolerance:
             # Reached waypoint, move to next
             task.parameters['current_waypoint_index'] += 1
+            # Clear last heading so new waypoint gets fresh command
+            if 'last_heading' in task.parameters:
+                del task.parameters['last_heading']
             return False
 
         target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
-        self.sphero.roll(target_heading, speed)
+
+        # Send roll command only if heading changed or first call for this waypoint
+        if 'last_heading' not in task.parameters or task.parameters['last_heading'] != target_heading:
+            self._send_roll_command(target_heading, speed)
+            task.parameters['last_heading'] = target_heading
+
         return False
 
     def _execute_circle(self, task: TaskDescriptor) -> bool:
@@ -292,56 +343,49 @@ class TaskExecutor:
         - Outer wheel speed: v_outer = v * (r + d/2) / r
         - Inner wheel speed: v_inner = v * (r - d/2) / r
         """
-        from spherov2.commands.sphero import RawMotorModes
-
         radius = task.parameters.get('radius', 50)  # cm (radius of circle path)
         speed = task.parameters.get('speed', self.default_speed)  # average speed
         duration = task.parameters.get('duration', 10.0)  # seconds
         direction = task.parameters.get('direction', 'ccw').lower()  # 'cw' or 'ccw'
 
+        # Initialize on first call - send motor command ONCE
         if 'start_time' not in task.parameters:
             task.parameters['start_time'] = time.time()
 
+            # Sphero wheel separation (distance between left and right motors)
+            wheel_separation = 5.0  # cm
+
+            # Calculate differential speeds for circular motion
+            # Clamp radius to avoid division by very small numbers
+            effective_radius = max(radius, wheel_separation)
+
+            # Calculate speed ratios
+            outer_ratio = (effective_radius + wheel_separation / 2) / effective_radius
+            inner_ratio = (effective_radius - wheel_separation / 2) / effective_radius
+
+            # Calculate motor speeds (0-255 range)
+            outer_speed = int(min(255, speed * outer_ratio))
+            inner_speed = int(min(255, speed * inner_ratio))
+
+            # Determine which motor is inner/outer based on direction
+            if direction == 'cw':  # Clockwise: right motor is inner
+                left_speed = outer_speed
+                right_speed = inner_speed
+            else:  # Counter-clockwise (default): left motor is inner
+                left_speed = inner_speed
+                right_speed = outer_speed
+
+            # Send motor command ONCE at the start
+            self._send_raw_motor_command('forward', left_speed, 'forward', right_speed)
+            return False  # Task started, still running
+
+        # Check if duration has elapsed
         elapsed = time.time() - task.parameters['start_time']
-
         if elapsed >= duration:
-            self.sphero.stop()
-            return True
+            self._send_stop_command()
+            return True  # Task completed
 
-        # Sphero wheel separation (distance between left and right motors)
-        wheel_separation = 5.0  # cm
-
-        # Calculate differential speeds for circular motion
-        # r_outer = radius + wheel_separation/2
-        # r_inner = radius - wheel_separation/2
-        # v_outer/v_inner = r_outer/r_inner
-
-        # Clamp radius to avoid division by very small numbers
-        effective_radius = max(radius, wheel_separation)
-
-        # Calculate speed ratios
-        outer_ratio = (effective_radius + wheel_separation / 2) / effective_radius
-        inner_ratio = (effective_radius - wheel_separation / 2) / effective_radius
-
-        # Calculate motor speeds (0-255 range)
-        # Scale the base speed by the ratios
-        outer_speed = int(min(255, speed * outer_ratio))
-        inner_speed = int(min(255, speed * inner_ratio))
-
-        # Determine which motor is inner/outer based on direction
-        if direction == 'cw':  # Clockwise: right motor is inner
-            left_speed = outer_speed
-            right_speed = inner_speed
-        else:  # Counter-clockwise (default): left motor is inner
-            left_speed = inner_speed
-            right_speed = outer_speed
-
-        # Use raw motor control for precise circular motion
-        self.sphero.set_raw_motor_speed(
-            RawMotorModes.FORWARD, left_speed,
-            RawMotorModes.FORWARD, right_speed
-        )
-
+        # Still running - motors already set, just wait
         return False
 
     def _execute_square(self, task: TaskDescriptor) -> bool:
@@ -388,7 +432,7 @@ class TaskExecutor:
         # Check if it's time to change color
         if time.time() - task.parameters['last_change_time'] >= interval:
             color = sequence[current_idx]
-            self.sphero.set_led(color['red'], color['green'], color['blue'])
+            self._send_led_command(color['red'], color['green'], color['blue'])
             task.parameters['current_index'] += 1
             task.parameters['last_change_time'] = time.time()
 
@@ -415,7 +459,7 @@ class TaskExecutor:
         # Check if it's time to change pattern
         if time.time() - task.parameters['last_change_time'] >= interval:
             pattern = sequence[current_idx]
-            self.sphero.set_matrix(
+            self._send_matrix_command(
                 pattern=pattern.get('pattern', 'smile'),
                 red=pattern.get('red', 255),
                 green=pattern.get('green', 255),
@@ -434,22 +478,23 @@ class TaskExecutor:
         if 'start_time' not in task.parameters:
             task.parameters['start_time'] = time.time()
             task.parameters['start_heading'] = self.get_current_heading()
+            # Use spin command which handles rotation internally
+            angle = int(360 * rotations)
+            duration = (360 * rotations) / 90  # Estimate: ~90 deg/sec
+            self._send_spin_command(angle, duration)
+            task.parameters['rotation_time'] = duration
+            return False
 
-        # Estimate time for rotation (rough approximation)
-        rotation_time = (360 * rotations) / 90  # Assumes ~90 deg/sec
+        # Check if rotation time has elapsed
+        if time.time() - task.parameters['start_time'] >= task.parameters['rotation_time']:
+            return True  # Completed
 
-        if time.time() - task.parameters['start_time'] >= rotation_time:
-            self.sphero.stop()
-            return True
-
-        # Keep spinning
-        current_heading = self.get_current_heading()
-        self.sphero.roll(current_heading + 10, speed)
+        # Still spinning - command already sent
         return False
 
     def _execute_stop(self, task: TaskDescriptor) -> bool:
         """Stop the Sphero."""
-        self.sphero.stop()
+        self._send_stop_command()
         return True
 
     def _execute_custom(self, task: TaskDescriptor) -> bool:
@@ -459,6 +504,7 @@ class TaskExecutor:
         if 'current_command_index' not in task.parameters:
             task.parameters['current_command_index'] = 0
             task.parameters['command_start_time'] = time.time()
+            task.parameters['command_executed'] = False
 
         current_idx = task.parameters['current_command_index']
 
@@ -468,27 +514,30 @@ class TaskExecutor:
         command = commands[current_idx]
         duration = command.get('duration', 1.0)
 
+        # Execute command only once per sequence step
+        if not task.parameters['command_executed']:
+            cmd_type = command.get('type')
+            if cmd_type == 'led':
+                self._send_led_command(command['red'], command['green'], command['blue'])
+            elif cmd_type == 'roll':
+                self._send_roll_command(command['heading'], command['speed'])
+            elif cmd_type == 'matrix':
+                self._send_matrix_command(
+                    pattern=command['pattern'],
+                    red=command.get('red', 255),
+                    green=command.get('green', 255),
+                    blue=command.get('blue', 255)
+                )
+            elif cmd_type == 'stop':
+                self._send_stop_command()
+            task.parameters['command_executed'] = True
+
         # Check if command duration has elapsed
         if time.time() - task.parameters['command_start_time'] >= duration:
             task.parameters['current_command_index'] += 1
             task.parameters['command_start_time'] = time.time()
+            task.parameters['command_executed'] = False  # Reset for next command
             return False
-
-        # Execute current command
-        cmd_type = command.get('type')
-        if cmd_type == 'led':
-            self.sphero.set_led(command['red'], command['green'], command['blue'])
-        elif cmd_type == 'roll':
-            self.sphero.roll(command['heading'], command['speed'])
-        elif cmd_type == 'matrix':
-            self.sphero.set_matrix(
-                pattern=command['pattern'],
-                red=command.get('red', 255),
-                green=command.get('green', 255),
-                blue=command.get('blue', 255)
-            )
-        elif cmd_type == 'stop':
-            self.sphero.stop()
 
         return False
 
@@ -514,7 +563,7 @@ class TaskExecutor:
         else:
             red, green, blue = 255, 255, 255
 
-        self.sphero.set_led(red, green, blue)
+        self._send_led_command(red, green, blue)
         return True
 
     def _execute_basic_roll(self, task: TaskDescriptor) -> bool:
@@ -527,7 +576,7 @@ class TaskExecutor:
         if duration > 0:
             # Duration-based roll
             if 'start_time' not in params:
-                self.sphero.roll(heading, speed, duration)
+                self._send_roll_command(heading, speed, duration)
                 task.parameters['start_time'] = time.time()
                 return False
 
@@ -535,19 +584,19 @@ class TaskExecutor:
             return elapsed >= duration
         else:
             # Indefinite roll
-            self.sphero.roll(heading, speed, duration)
+            self._send_roll_command(heading, speed, duration)
             return True
 
     def _execute_basic_heading(self, task: TaskDescriptor) -> bool:
         """Execute basic heading command."""
         heading = task.parameters.get('heading', 0)
-        self.sphero.set_heading(heading)
+        self._send_heading_command(heading)
         return True
 
     def _execute_basic_speed(self, task: TaskDescriptor) -> bool:
         """Execute basic speed command."""
         speed = task.parameters.get('speed', 0)
-        self.sphero.set_speed(speed)
+        self._send_speed_command(speed)
         return True
 
     def _execute_basic_matrix(self, task: TaskDescriptor) -> bool:
@@ -558,7 +607,7 @@ class TaskExecutor:
         green = params.get('green', 255)
         blue = params.get('blue', 255)
 
-        self.sphero.set_matrix(pattern=pattern, red=red, green=green, blue=blue)
+        self._send_matrix_command(pattern=pattern, red=red, green=green, blue=blue)
         return True
 
     def _execute_basic_collision(self, task: TaskDescriptor) -> bool:
@@ -568,11 +617,7 @@ class TaskExecutor:
         mode = params.get('mode', 'obstacle')
         sensitivity = params.get('sensitivity', 'HIGH')
 
-        if action == 'start':
-            self.sphero.start_collision_detection(mode=mode, sensitivity=sensitivity)
-        else:
-            self.sphero.stop_collision_detection()
-
+        self._send_collision_detection_command(action, mode, sensitivity)
         return True
 
     def _execute_basic_reflect(self, task: TaskDescriptor) -> bool:
@@ -589,7 +634,7 @@ class TaskExecutor:
         offset = random.randint(offset_min, offset_max)
         new_heading = (reverse_heading + offset) % 360
 
-        self.sphero.roll(new_heading, speed, duration=0.0)
+        self._send_roll_command(new_heading, speed, duration=0.0)
         return True
 
     def _execute_jumping_bean(self, task: TaskDescriptor) -> bool:
@@ -600,7 +645,7 @@ class TaskExecutor:
         speed = params.get('speed', 200)
 
         # Disable stabilization
-        self.sphero.set_stabilization(False)
+        self._send_stabilization_command(False)
 
         # Calculate flips
         num_flips = int(duration / flip_interval)
@@ -609,7 +654,7 @@ class TaskExecutor:
         flip_count = 0
 
         for i in range(num_flips):
-            self.sphero.roll(current_heading, current_speed, flip_interval)
+            self._send_roll_command(current_heading, current_speed, flip_interval)
             flip_count += 1
             current_speed = -current_speed
 
@@ -619,7 +664,7 @@ class TaskExecutor:
             time.sleep(flip_interval)
 
         # Stop and re-enable stabilization
-        self.sphero.stop()
-        self.sphero.set_stabilization(True)
+        self._send_stop_command()
+        self._send_stabilization_command(True)
 
         return True

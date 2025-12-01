@@ -20,11 +20,8 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 
 from std_msgs.msg import String
 
-from sphero_instance_controller.core.sphero import (
-    TaskExecutor,
-    TaskDescriptor,
-    TaskStatus
-)
+from sphero_instance_controller.core.sphero.task import TaskDescriptor, TaskStatus
+from sphero_instance_controller.core.sphero.topic_task_executor import TopicTaskExecutor
 
 # Note: Task controller does NOT import scanner, SpheroEduAPI, or Sphero
 # It only communicates through ROS topics
@@ -59,13 +56,6 @@ class SpheroInstanceTaskController(Node):
         # Note: Task controller does NOT connect to hardware
         # It only communicates through ROS topics with the device controller
 
-        # Initialize task executor (without direct Sphero access)
-        self.task_executor = TaskExecutor(
-            sphero=None,  # No direct hardware access
-            position_callback=self.get_current_position,
-            heading_callback=self.get_current_heading
-        )
-
         # State tracking
         self.current_state = {}
         self.current_position = {'x': 0.0, 'y': 0.0}
@@ -74,11 +64,18 @@ class SpheroInstanceTaskController(Node):
         # Callback group for reentrant callbacks
         self.callback_group = ReentrantCallbackGroup()
 
+        # Create publishers first (needed for command_publisher callback)
+        self._create_publishers()
+
         # Create subscribers
         self._create_subscribers()
 
-        # Create publishers
-        self._create_publishers()
+        # Initialize task executor (topic-based, no direct Sphero access)
+        self.task_executor = TopicTaskExecutor(
+            command_publisher=self.publish_command,
+            position_callback=self.get_current_position,
+            heading_callback=self.get_current_heading
+        )
 
         # Create timer for task execution (10 Hz)
         self.task_timer = self.create_timer(
@@ -130,6 +127,67 @@ class SpheroInstanceTaskController(Node):
             10
         )
 
+        # Command publishers for task execution
+        self.raw_motor_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/raw_motor',
+            10
+        )
+
+        self.motion_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/roll',
+            10
+        )
+
+        self.led_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/led',
+            10
+        )
+
+        self.heading_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/heading',
+            10
+        )
+
+        self.speed_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/speed',
+            10
+        )
+
+        self.spin_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/spin',
+            10
+        )
+
+        self.matrix_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/matrix',
+            10
+        )
+
+        self.stop_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/stop',
+            10
+        )
+
+        self.stabilization_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/stabilization',
+            10
+        )
+
+        self.collision_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/collision',
+            10
+        )
+
     def _log_initialization(self):
         """Log initialization information."""
         self.get_logger().info('='*70)
@@ -143,8 +201,18 @@ class SpheroInstanceTaskController(Node):
         self.get_logger().info(f'  - {self.topic_prefix}/reset_aim')
         self.get_logger().info('Publishing Topics:')
         self.get_logger().info(f'  - {self.topic_prefix}/task/status')
+        self.get_logger().info(f'  - {self.topic_prefix}/raw_motor')
+        self.get_logger().info(f'  - {self.topic_prefix}/roll')
+        self.get_logger().info(f'  - {self.topic_prefix}/led')
+        self.get_logger().info(f'  - {self.topic_prefix}/heading')
+        self.get_logger().info(f'  - {self.topic_prefix}/speed')
+        self.get_logger().info(f'  - {self.topic_prefix}/spin')
+        self.get_logger().info(f'  - {self.topic_prefix}/matrix')
+        self.get_logger().info(f'  - {self.topic_prefix}/stop')
+        self.get_logger().info(f'  - {self.topic_prefix}/stabilization')
+        self.get_logger().info(f'  - {self.topic_prefix}/collision')
         self.get_logger().info('='*70)
-        self.get_logger().info('✅ Task Controller READY')
+        self.get_logger().info('✅ Task Controller READY (Topic-Based Executor)')
         self.get_logger().info('='*70)
 
     def get_current_position(self):
@@ -154,6 +222,54 @@ class SpheroInstanceTaskController(Node):
     def get_current_heading(self):
         """Get current heading for task executor."""
         return self.current_heading
+
+    def publish_command(self, topic_name: str, params: dict):
+        """
+        Publish a command to the appropriate ROS topic.
+
+        Args:
+            topic_name: The command topic name (e.g., 'raw_motor', 'led', 'motion')
+            params: Dictionary of parameters for the command
+        """
+        msg = String()
+        msg.data = json.dumps(params)
+
+        # Route to appropriate publisher based on topic name
+        if topic_name == 'raw_motor':
+            self.raw_motor_pub.publish(msg)
+            self.get_logger().debug(f'Published raw_motor: {params}')
+        elif topic_name == 'motion':
+            # Motion commands can be roll or stop
+            action = params.get('action', 'roll')
+            if action == 'stop':
+                self.stop_pub.publish(msg)
+                self.get_logger().debug('Published stop command')
+            else:
+                self.motion_pub.publish(msg)
+                self.get_logger().debug(f'Published motion: {params}')
+        elif topic_name == 'led':
+            self.led_pub.publish(msg)
+            self.get_logger().debug(f'Published LED: {params}')
+        elif topic_name == 'heading':
+            self.heading_pub.publish(msg)
+            self.get_logger().debug(f'Published heading: {params}')
+        elif topic_name == 'speed':
+            self.speed_pub.publish(msg)
+            self.get_logger().debug(f'Published speed: {params}')
+        elif topic_name == 'spin':
+            self.spin_pub.publish(msg)
+            self.get_logger().debug(f'Published spin: {params}')
+        elif topic_name == 'matrix':
+            self.matrix_pub.publish(msg)
+            self.get_logger().debug(f'Published matrix: {params}')
+        elif topic_name == 'stabilization':
+            self.stabilization_pub.publish(msg)
+            self.get_logger().debug(f'Published stabilization: {params}')
+        elif topic_name == 'collision':
+            self.collision_pub.publish(msg)
+            self.get_logger().debug(f'Published collision: {params}')
+        else:
+            self.get_logger().warning(f'Unknown command topic: {topic_name}')
 
     # ===== Callbacks =====
 

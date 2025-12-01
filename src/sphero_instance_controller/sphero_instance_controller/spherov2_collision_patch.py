@@ -14,21 +14,19 @@ def apply_collision_patch():
     def patched_collision_helper(listener, packet):
         """Handle both 16 and 18 byte collision responses"""
         import sys
-        print(f"[spherov2-patch] Collision packet received! Size: {len(packet.data)} bytes", file=sys.stderr)
-        print(f"[spherov2-patch] Packet hex: {packet.data.hex()}", file=sys.stderr)
+        # print(f"[spherov2-patch] Collision packet received! Size: {len(packet.data)} bytes", file=sys.stderr)
+        # print(f"[spherov2-patch] Packet hex: {packet.data.hex()}", file=sys.stderr)
 
         try:
             data = packet.data
 
             # Pad data if it's shorter than 18 bytes
             if len(data) == 16:
-                print(f"[spherov2-patch] Padding 16-byte packet to 18 bytes", file=sys.stderr)
+                # print(f"[spherov2-patch] Padding 16-byte packet to 18 bytes", file=sys.stderr)
                 data = data + b'\x00\x00'
             elif len(data) < 18:
-                print(f"[spherov2-patch] Padding {len(data)}-byte packet to 18 bytes", file=sys.stderr)
+                # print(f"[spherov2-patch] Padding {len(data)}-byte packet to 18 bytes", file=sys.stderr)
                 data = data + b'\x00' * (18 - len(data))
-            else:
-                print(f"[spherov2-patch] Packet is already 18 bytes", file=sys.stderr)
 
             # Parse the collision data
             unpacked = struct.unpack('>3hB3hBL', data)
@@ -44,10 +42,10 @@ def apply_collision_patch():
                 speed=unpacked[7],
                 time=unpacked[8] / 1000
             )
-            print(f"[spherov2-patch] Successfully parsed collision data", file=sys.stderr)
-            print(f"[spherov2-patch] Calling listener with collision_data", file=sys.stderr)
+            # print(f"[spherov2-patch] Successfully parsed collision data", file=sys.stderr)
+            # print(f"[spherov2-patch] Calling listener with collision_data", file=sys.stderr)
             listener(collision_data)
-            print(f"[spherov2-patch] Listener called successfully", file=sys.stderr)
+            # print(f"[spherov2-patch] Listener called successfully", file=sys.stderr)
 
         except struct.error as e:
             # Log malformed collision packets with debug info

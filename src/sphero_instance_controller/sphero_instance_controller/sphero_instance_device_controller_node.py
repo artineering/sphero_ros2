@@ -184,7 +184,8 @@ class SpheroInstanceDeviceController(Node):
             red = data.get('red', 0)
             green = data.get('green', 0)
             blue = data.get('blue', 0)
-            led_type = data.get('led', 'main').lower()
+            # Accept both 'type' and 'led' for backwards compatibility
+            led_type = data.get('type', data.get('led', 'main')).lower()
 
             success = self.sphero.set_led(red, green, blue, led_type)
             if success:
