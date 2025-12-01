@@ -166,6 +166,12 @@ class SpheroInstanceWebSocketServer(Node):
             10
         )
 
+        self.raw_motor_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/raw_motor',
+            10
+        )
+
         self.spin_pub = self.create_publisher(
             String,
             f'{self.topic_prefix}/spin',
@@ -462,6 +468,17 @@ class SpheroInstanceWebSocketServer(Node):
         msg.data = json.dumps({'speed': speed, 'heading': heading})
         self.speed_pub.publish(msg)
 
+    def publish_raw_motor_command(self, left_mode: str, left_speed: int, right_mode: str, right_speed: int):
+        """Publish raw motor command."""
+        msg = String()
+        msg.data = json.dumps({
+            'left_mode': left_mode,
+            'left_speed': left_speed,
+            'right_mode': right_mode,
+            'right_speed': right_speed
+        })
+        self.raw_motor_pub.publish(msg)
+
     def publish_spin_command(self, angle: int, duration: float):
         """Publish spin command."""
         msg = String()
@@ -620,6 +637,19 @@ def create_flask_app(node: SpheroInstanceWebSocketServer):
         node.publish_roll_command(data.get('heading', 0), data.get('speed', 0))
         return jsonify({'status': 'success'})
 
+    @app.route('/api/motion/raw_motor', methods=['POST'])
+    def api_raw_motor():
+        """Raw motor control command."""
+        from flask import request, jsonify
+        data = request.get_json()
+        node.publish_raw_motor_command(
+            data.get('left_mode', 'forward'),
+            data.get('left_speed', 0),
+            data.get('right_mode', 'forward'),
+            data.get('right_speed', 0)
+        )
+        return jsonify({'status': 'success'})
+
     @app.route('/api/task', methods=['POST'])
     def api_task():
         """Submit a task."""
@@ -715,6 +745,16 @@ def create_flask_app(node: SpheroInstanceWebSocketServer):
     def handle_speed_command(data):
         """Handle speed command."""
         node.publish_speed_command(data['speed'], data.get('heading', 0))
+
+    @socketio.on('raw_motor_command')
+    def handle_raw_motor_command(data):
+        """Handle raw motor command."""
+        node.publish_raw_motor_command(
+            data.get('left_mode', 'forward'),
+            data.get('left_speed', 0),
+            data.get('right_mode', 'forward'),
+            data.get('right_speed', 0)
+        )
 
     @socketio.on('spin_command')
     def handle_spin_command(data):

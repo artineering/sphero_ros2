@@ -113,6 +113,9 @@ class SpheroInstanceDeviceController(Node):
         self.speed_sub = self.create_subscription(
             String, f'{self.topic_prefix}/speed', self.speed_callback, 10)
 
+        self.raw_motor_sub = self.create_subscription(
+            String, f'{self.topic_prefix}/raw_motor', self.raw_motor_callback, 10)
+
         self.stop_sub = self.create_subscription(
             String, f'{self.topic_prefix}/stop', self.stop_callback, 10)
 
@@ -160,6 +163,7 @@ class SpheroInstanceDeviceController(Node):
         self.get_logger().info('Subscribed Topics:')
         self.get_logger().info(f'  - {self.topic_prefix}/led')
         self.get_logger().info(f'  - {self.topic_prefix}/roll')
+        self.get_logger().info(f'  - {self.topic_prefix}/raw_motor')
         self.get_logger().info(f'  - {self.topic_prefix}/stop')
         self.get_logger().info(f'  - {self.topic_prefix}/matrix')
         self.get_logger().info(f'  - ... and 6 more')
@@ -263,6 +267,41 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().error(f'Invalid JSON in speed command: {str(e)}')
         except Exception as e:
             self.get_logger().error(f'Error in speed callback: {str(e)}')
+
+    def raw_motor_callback(self, msg: String):
+        """Handle raw motor commands."""
+        try:
+            from spherov2.commands.sphero import RawMotorModes
+
+            data = json.loads(msg.data)
+            left_mode_str = data.get('left_mode', 'forward').lower()
+            left_speed = int(data.get('left_speed', 0))
+            right_mode_str = data.get('right_mode', 'forward').lower()
+            right_speed = int(data.get('right_speed', 0))
+
+            # Map mode strings to RawMotorModes enum
+            mode_map = {
+                'forward': RawMotorModes.FORWARD,
+                'fwd': RawMotorModes.FORWARD,
+                'reverse': RawMotorModes.REVERSE,
+                'rev': RawMotorModes.REVERSE,
+                'brake': RawMotorModes.BRAKE,
+                'off': RawMotorModes.OFF,
+                'ignore': RawMotorModes.IGNORE
+            }
+
+            left_mode = mode_map.get(left_mode_str, RawMotorModes.FORWARD)
+            right_mode = mode_map.get(right_mode_str, RawMotorModes.FORWARD)
+
+            success = self.sphero.set_raw_motor_speed(left_mode, left_speed, right_mode, right_speed)
+            if success:
+                self.get_logger().info(
+                    f'Raw motors set - Left: {left_mode_str}@{left_speed}, Right: {right_mode_str}@{right_speed}')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in raw_motor command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in raw_motor callback: {str(e)}')
 
     def stop_callback(self, msg: String):
         """Handle stop commands."""

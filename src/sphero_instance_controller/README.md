@@ -101,6 +101,7 @@ All topics are namespaced under `sphero/<sphero_name>/`:
 - `sphero/<sphero_name>/spin` - Spin commands
 - `sphero/<sphero_name>/heading` - Heading control
 - `sphero/<sphero_name>/speed` - Speed control
+- `sphero/<sphero_name>/raw_motor` - Raw motor control (independent left/right motors)
 - `sphero/<sphero_name>/stop` - Stop movement
 - `sphero/<sphero_name>/reset_aim` - Reset orientation and position
 - `sphero/<sphero_name>/matrix` - LED matrix display (BOLT only)
@@ -171,6 +172,10 @@ ros2 topic pub /sphero/SB-1234/led std_msgs/msg/String \
 # Make Sphero SB-3660 roll
 ros2 topic pub /sphero/SB-3660/roll std_msgs/msg/String \
   '{data: "{\"heading\": 90, \"speed\": 100, \"duration\": 2.0}"}'
+
+# Control raw motors independently (left motor faster than right for curved motion)
+ros2 topic pub /sphero/SB-3660/raw_motor std_msgs/msg/String \
+  '{data: "{\"left_mode\": \"forward\", \"left_speed\": 200, \"right_mode\": \"forward\", \"right_speed\": 150}"}'
 ```
 
 ## Parameters
