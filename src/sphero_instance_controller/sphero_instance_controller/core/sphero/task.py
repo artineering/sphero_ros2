@@ -277,13 +277,12 @@ class TaskExecutorBase:
             self._send_stop_command()
             return True
 
-        # Calculate heading to target
-        target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
-
-        # Send roll command only if heading changed or first call
-        if 'last_heading' not in task.parameters or task.parameters['last_heading'] != target_heading:
+        # Send roll command only once at the start
+        if 'command_sent' not in task.parameters:
+            # Calculate heading to target
+            target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
             self._send_roll_command(target_heading, speed)
-            task.parameters['last_heading'] = target_heading
+            task.parameters['command_sent'] = True
 
         return False
 
