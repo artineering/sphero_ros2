@@ -300,15 +300,24 @@ class TaskExecutorBase:
         if current_idx >= len(waypoints):
             if loop:
                 task.parameters['current_waypoint_index'] = 0
+                # Clear command_sent flag to allow fresh command for new waypoint
+                if 'command_sent' in task.parameters:
+                    del task.parameters['command_sent']
                 return False
             else:
                 self._send_stop_command()
                 return True
 
-        # Move to current waypoint
+        # Get current waypoint
         waypoint = waypoints[current_idx]
-        current_pos = self.get_current_position()
 
+        # Update task parameters to match move_to expectations
+        task.parameters['x'] = waypoint['x']
+        task.parameters['y'] = waypoint['y']
+        task.parameters['speed'] = speed
+
+        # Check if we've reached the current waypoint
+        current_pos = self.get_current_position()
         dx = waypoint['x'] - current_pos['x']
         dy = waypoint['y'] - current_pos['y']
         distance = math.sqrt(dx**2 + dy**2)
@@ -316,19 +325,13 @@ class TaskExecutorBase:
         if distance < self.position_tolerance:
             # Reached waypoint, move to next
             task.parameters['current_waypoint_index'] += 1
-            # Clear last heading so new waypoint gets fresh command
-            if 'last_heading' in task.parameters:
-                del task.parameters['last_heading']
+            # Clear command_sent flag so new waypoint gets fresh command
+            if 'command_sent' in task.parameters:
+                del task.parameters['command_sent']
             return False
 
-        target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
-
-        # Send roll command only if heading changed or first call for this waypoint
-        if 'last_heading' not in task.parameters or task.parameters['last_heading'] != target_heading:
-            self._send_roll_command(target_heading, speed)
-            task.parameters['last_heading'] = target_heading
-
-        return False
+        # Use move_to logic for movement
+        return self._execute_move_to(task)
 
     def _execute_circle(self, task: TaskDescriptor) -> bool:
         """
