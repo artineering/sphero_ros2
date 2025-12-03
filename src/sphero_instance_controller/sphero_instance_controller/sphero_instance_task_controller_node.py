@@ -79,7 +79,7 @@ class SpheroInstanceTaskController(Node):
 
         # Create timer for task execution (10 Hz)
         self.task_timer = self.create_timer(
-            0.1,
+            0.01,
             self.task_execution_loop,
             callback_group=self.callback_group
         )

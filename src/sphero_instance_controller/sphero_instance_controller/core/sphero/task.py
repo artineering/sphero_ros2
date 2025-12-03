@@ -265,6 +265,10 @@ class TaskExecutorBase:
         target_y = task.parameters.get('y', 0)
         speed = task.parameters.get('speed', self.default_speed)
 
+        # Stall detection parameters
+        stall_timeout = task.parameters.get('stall_timeout', 5.0)  # seconds
+        stall_distance_threshold = task.parameters.get('stall_distance_threshold', 2.0)  # cm
+
         current_pos = self.get_current_position()
 
         # Calculate distance and heading
@@ -272,17 +276,49 @@ class TaskExecutorBase:
         dy = target_y - current_pos['y']
         distance = math.sqrt(dx**2 + dy**2)
 
+        print(f"[MOVE_TO] current distance = {distance}cm")
+
         # Check if we've reached the target
         if distance < self.position_tolerance:
             self._send_stop_command()
             return True
 
-        # Send roll command only once at the start
+        # Initialize stall detection on first call
         if 'command_sent' not in task.parameters:
             # Calculate heading to target
             target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
             self._send_roll_command(target_heading, speed)
             task.parameters['command_sent'] = True
+            task.parameters['last_distance'] = distance
+            task.parameters['last_progress_time'] = time.time()
+            task.parameters['stalled'] = False
+            return False
+
+        # Stall detection: check if making progress
+        last_distance = task.parameters.get('last_distance', distance)
+        last_progress_time = task.parameters.get('last_progress_time', time.time())
+
+        # Check if distance has decreased by at least the threshold
+        distance_change = last_distance - distance
+
+        if distance_change > stall_distance_threshold:
+            # Making progress - update tracking
+            task.parameters['last_distance'] = distance
+            task.parameters['last_progress_time'] = time.time()
+            task.parameters['stalled'] = False
+        else:
+            # Not making sufficient progress - check timeout
+            time_since_progress = time.time() - last_progress_time
+
+            if time_since_progress >= stall_timeout:
+                # Stalled - mark as failed
+                if not task.parameters.get('stalled', False):
+                    print(f"[MOVE_TO] STALLED: No progress for {stall_timeout}s (distance: {distance}cm)")
+                    task.parameters['stalled'] = True
+                    self._send_stop_command()
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"Stalled: No progress for {stall_timeout}s"
+                return True  # Task completed (failed)
 
         return False
 
