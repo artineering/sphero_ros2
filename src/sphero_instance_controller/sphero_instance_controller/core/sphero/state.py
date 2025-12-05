@@ -301,6 +301,9 @@ class SpheroState:
     # Connection
     connection_state: SpheroConnectionState = SpheroConnectionState.DISCONNECTED
 
+    # External localization mode
+    external_localization: bool = False
+
     # Motion and Position
     motion: SpheroMotionState = field(default_factory=SpheroMotionState)
     position: SpheroPosition = field(default_factory=SpheroPosition)
@@ -347,6 +350,18 @@ class SpheroState:
     def update_timestamp(self):
         """Update the last_update timestamp to current time."""
         self.last_update = time.time()
+
+    def set_external_location(self, x: float, y: float):
+        # Apply position offset (for reset_aim functionality)
+        # This makes position relative to our coordinate system origin
+        new_x = x - self._position_offset_x
+        new_y = y - self._position_offset_y
+
+        # Only update position if change exceeds threshold (reduces noise)
+        if self._should_update_position(new_x, new_y):
+            self.set('position', new_x, 'x')
+            self.set('position', new_y, 'y')
+            self._last_published_position = (new_x, new_y)
 
     def _should_update_position(self, new_x: float, new_y: float) -> bool:
         """
@@ -644,26 +659,27 @@ class SpheroState:
         except Exception:
             pass
 
-        # Query location from device
-        try:
-            location = self._api.get_location()
-            device_x = location.get('x', 0.0)
-            device_y = location.get('y', 0.0)
+        # Query location from device if we are using the sphero's internal localization
+        if not self.external_localization:
+            try:
+                location = self._api.get_location()
+                device_x = location.get('x', 0.0)
+                device_y = location.get('y', 0.0)
 
-            # Apply position offset (for reset_aim functionality)
-            # This makes position relative to our coordinate system origin
-            new_x = device_x - self._position_offset_x
-            new_y = device_y - self._position_offset_y
+                # Apply position offset (for reset_aim functionality)
+                # This makes position relative to our coordinate system origin
+                new_x = device_x - self._position_offset_x
+                new_y = device_y - self._position_offset_y
 
-            # Only update position if change exceeds threshold (reduces noise)
-            if self._should_update_position(new_x, new_y):
-                self.set('position', new_x, 'x')
-                self.set('position', new_y, 'y')
-                self._last_published_position = (new_x, new_y)
-        except PacketDecodingException:
-            pass  # Bluetooth packet collision - skip this update
-        except Exception:
-            pass
+                # Only update position if change exceeds threshold (reduces noise)
+                if self._should_update_position(new_x, new_y):
+                    self.set('position', new_x, 'x')
+                    self.set('position', new_y, 'y')
+                    self._last_published_position = (new_x, new_y)
+            except PacketDecodingException:
+                pass  # Bluetooth packet collision - skip this update
+            except Exception:
+                pass
 
         # Query velocity from device
         try:
@@ -963,83 +979,6 @@ class SpheroState:
         # sensor_msg.timestamp is left unset here
 
         return sensor_msg
-
-    @classmethod
-    def from_sensor_msg(cls, sensor_data: dict, existing_state: Optional['SpheroState'] = None) -> 'SpheroState':
-        """
-        Create or update a SpheroState from sensor message data.
-
-        Args:
-            sensor_data: Dictionary containing sensor data
-            existing_state: Optional existing state to update
-
-        Returns:
-            SpheroState: New or updated state object
-        """
-        if existing_state is None:
-            state = cls()
-        else:
-            state = existing_state
-
-        # Update orientation
-        if 'pitch' in sensor_data:
-            state.orientation.pitch = sensor_data['pitch']
-        if 'roll' in sensor_data:
-            state.orientation.roll = sensor_data['roll']
-        if 'yaw' in sensor_data:
-            state.orientation.yaw = sensor_data['yaw']
-
-        # Update accelerometer
-        if 'accel_x' in sensor_data:
-            state.accelerometer.x = sensor_data['accel_x']
-        if 'accel_y' in sensor_data:
-            state.accelerometer.y = sensor_data['accel_y']
-        if 'accel_z' in sensor_data:
-            state.accelerometer.z = sensor_data['accel_z']
-
-        # Update gyroscope
-        if 'gyro_x' in sensor_data:
-            state.gyroscope.x = sensor_data['gyro_x']
-        if 'gyro_y' in sensor_data:
-            state.gyroscope.y = sensor_data['gyro_y']
-        if 'gyro_z' in sensor_data:
-            state.gyroscope.z = sensor_data['gyro_z']
-
-        # Update position
-        if 'x' in sensor_data:
-            state.position.x = sensor_data['x']
-        if 'y' in sensor_data:
-            state.position.y = sensor_data['y']
-
-        # Update velocity
-        if 'velocity_x' in sensor_data:
-            state.velocity.x = sensor_data['velocity_x']
-        if 'velocity_y' in sensor_data:
-            state.velocity.y = sensor_data['velocity_y']
-
-        # Update battery
-        if 'battery_percentage' in sensor_data:
-            state.battery.percentage = sensor_data['battery_percentage']
-
-        # Update motion state
-        if 'heading' in sensor_data:
-            state.motion.heading = sensor_data['heading']
-        if 'speed' in sensor_data:
-            state.motion.speed = sensor_data['speed']
-        if 'is_moving' in sensor_data:
-            state.motion.is_moving = sensor_data['is_moving']
-
-        # Update toy info
-        if 'toy_name' in sensor_data:
-            state.toy_name = sensor_data['toy_name']
-
-        # Update timestamp
-        if 'timestamp' in sensor_data:
-            state.timestamp = sensor_data['timestamp']
-
-        state.update_timestamp()
-
-        return state
 
     def is_healthy(self) -> bool:
         """

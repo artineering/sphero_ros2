@@ -19,6 +19,8 @@ from rclpy.node import Node
 
 from std_msgs.msg import String
 from sensor_msgs.msg import BatteryState
+from geometry_msgs.msg import PoseStamped
+
 from sphero_instance_controller.msg import SpheroSensor
 
 from spherov2 import scanner
@@ -62,21 +64,25 @@ class SpheroInstanceDeviceController(Node):
         node_name = f'sphero_device_controller_{name_safe}'
         super().__init__(node_name)
 
-        self.sphero_name = sphero_name
-        # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
-        topic_name_safe = name_safe
-        self.topic_prefix = f'sphero/{topic_name_safe}'
-
-        # Initialize Sphero core class
-        self.sphero = Sphero(robot, api, sphero_name)
-
         # Declare and get ROS parameters
         self.declare_parameter('sensor_rate', 10.0)  # Default: 10 Hz
         self.declare_parameter('heartbeat_rate', 5.0)  # Default: 5 seconds
+        self.declare_parameter('external_localization', False) # Default: turned OFF
 
         self.sensor_rate = self.get_parameter('sensor_rate').value
         self.heartbeat_rate = self.get_parameter('heartbeat_rate').value
+        self.external_location = self.get_parameter('external_localization').value
 
+
+        self.sphero_name = sphero_name
+        # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
+        self.topic_name_safe = name_safe
+        self.topic_prefix = f'sphero/{self.topic_name_safe}'
+
+        # Initialize Sphero core class
+        self.sphero = Sphero(robot, api, sphero_name, self.external_location)
+
+        
         # Calculate sensor timer period (1/frequency)
         self.sensor_period = 1.0 / self.sensor_rate if self.sensor_rate > 0 else 0.1
 
@@ -97,6 +103,14 @@ class SpheroInstanceDeviceController(Node):
         self.sphero.set_led(0, 255, 0)
 
     def _create_subscribers(self):
+
+        if self.external_location:
+            """Create ROS subscriber for localization topic."""
+            topic_name = f'/aruco_slam/{self.topic_safe_name}/position'
+            self.localization_sub = self.create_subscription(
+                PoseStamped, topic_name, self._localization_callback, 10)
+    
+        
         """Create all ROS subscribers for command topics."""
         self.led_sub = self.create_subscription(
             String, f'{self.topic_prefix}/led', self.led_callback, 10)
@@ -174,6 +188,11 @@ class SpheroInstanceDeviceController(Node):
         self.get_logger().info(f'  - {self.topic_prefix}/status')
         self.get_logger().info('='*70)
         self.get_logger().info('✅ Device Controller READY')
+
+    # ===== Localization Callback
+
+    def _localization_callback(self, msg: PoseStamped):
+        self.sphero.set_external_location(msg.pose.position.x, msg.pose.position.y)
 
     # ===== Command Callbacks =====
 

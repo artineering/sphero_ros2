@@ -36,7 +36,7 @@ class Sphero:
         state: SpheroState object tracking current robot state
     """
 
-    def __init__(self, robot: SpheroToy, api: SpheroEduAPI, name: str):
+    def __init__(self, robot: SpheroToy, api: SpheroEduAPI, name: str, localization_started: bool = False):
         """
         Initialize the Sphero controller.
 
@@ -52,7 +52,8 @@ class Sphero:
         # Initialize state tracking
         self.state = SpheroState(
             toy_name=name,
-            connection_state=SpheroConnectionState.CONNECTED
+            connection_state=SpheroConnectionState.CONNECTED,
+            external_localization=localization_started
         )
         self.state.set_api(api)
         self.state.set_toy(robot)
@@ -67,6 +68,10 @@ class Sphero:
         # Callback handlers (set by external code like ROS node)
         self._tap_callback: Optional[Callable] = None
         self._obstacle_callback: Optional[Callable] = None
+
+
+    def set_external_location(self, x: float, y: float):
+        self.state.set_external_location(x, y)
 
     # ===== LED Control =====
 

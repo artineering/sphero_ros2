@@ -146,8 +146,8 @@ class ArucoSLAMNode(Node):
                         pose_msg.header.frame_id = 'field'
 
                         # Position: x and y in cm, z=0 (2D field)
-                        pose_msg.pose.position.x = float(field_pos[0]) / 100.0  # Convert cm to meters
-                        pose_msg.pose.position.y = float(field_pos[1]) / 100.0  # Convert cm to meters
+                        pose_msg.pose.position.x = float(field_pos[0]) 
+                        pose_msg.pose.position.y = float(field_pos[1]) 
                         pose_msg.pose.position.z = 0.0
 
                         # Orientation: identity quaternion (no rotation, upright)
