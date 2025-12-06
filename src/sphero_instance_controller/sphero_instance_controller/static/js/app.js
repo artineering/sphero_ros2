@@ -57,6 +57,10 @@ function initializeWebSocket() {
     socket.on('task_status_update', function(data) {
         updateTaskStatusDisplay(data);
     });
+
+    socket.on('sm_status_update', function(data) {
+        updateStateMachineStatusDisplay(data);
+    });
 }
 
 // Tab switching
@@ -971,7 +975,22 @@ function showTaskForm(taskType) {
     formFields.innerHTML = '';
 
     // Generate form fields based on task type
-    if (taskType === 'move_to') {
+    if (taskType === 'roll') {
+        formFields.innerHTML = `
+            <div class="form-group">
+                <label>Heading (degrees, 0-359):</label>
+                <input type="number" id="task-heading" value="0" min="0" max="359" step="15">
+            </div>
+            <div class="form-group">
+                <label>Speed (0-255):</label>
+                <input type="number" id="task-speed" value="100" min="0" max="255">
+            </div>
+            <div class="form-group">
+                <label>Duration (seconds, 0 = indefinite):</label>
+                <input type="number" id="task-duration" value="0" min="0" step="0.5">
+            </div>
+        `;
+    } else if (taskType === 'move_to') {
         formFields.innerHTML = `
             <div class="form-group">
                 <label>Target X (cm):</label>
@@ -1104,7 +1123,11 @@ async function submitCurrentTask() {
     const parameters = {};
 
     // Collect parameters based on task type
-    if (currentTaskType === 'move_to') {
+    if (currentTaskType === 'roll') {
+        parameters.heading = parseInt(document.getElementById('task-heading').value);
+        parameters.speed = parseInt(document.getElementById('task-speed').value);
+        parameters.duration = parseFloat(document.getElementById('task-duration').value);
+    } else if (currentTaskType === 'move_to') {
         parameters.x = parseFloat(document.getElementById('task-x').value);
         parameters.y = parseFloat(document.getElementById('task-y').value);
         parameters.speed = parseInt(document.getElementById('task-speed').value);
@@ -1214,4 +1237,136 @@ function updateTaskStatusDisplay(taskStatus) {
     }
 
     document.getElementById('task-status-data').textContent = JSON.stringify(taskStatus, null, 2);
+}
+
+// ===== State Machine Functions =====
+
+async function sendStateMachineConfig() {
+    try {
+        const configText = document.getElementById('sm-config-editor').value.trim();
+        if (!configText) {
+            showStateMachineMessage('Please enter a configuration', 'error');
+            return;
+        }
+
+        const config = JSON.parse(configText);
+
+        const response = await fetch('/api/state_machine/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            showStateMachineMessage('Configuration sent successfully!', 'success');
+        } else {
+            showStateMachineMessage('Failed to send configuration: ' + data.message, 'error');
+        }
+    } catch (error) {
+        showStateMachineMessage('Invalid JSON or error: ' + error.message, 'error');
+    }
+}
+
+function validateStateMachineConfig() {
+    try {
+        const configText = document.getElementById('sm-config-editor').value.trim();
+        if (!configText) {
+            showStateMachineMessage('Please enter a configuration', 'error');
+            return;
+        }
+
+        const config = JSON.parse(configText);
+
+        // Basic validation
+        if (!config.states || !Array.isArray(config.states) || config.states.length === 0) {
+            showStateMachineMessage('Configuration must have at least one state', 'error');
+            return;
+        }
+
+        if (!config.initial_state) {
+            showStateMachineMessage('Configuration must specify initial_state', 'error');
+            return;
+        }
+
+        showStateMachineMessage('Configuration is valid!', 'success');
+    } catch (error) {
+        showStateMachineMessage('Invalid JSON: ' + error.message, 'error');
+    }
+}
+
+function loadStateMachineTemplate() {
+    const template = {
+        name: "Simple Two-State Machine",
+        initial_state: "idle",
+        states: [
+            {
+                name: "idle",
+                description: "Robot is idle with blue LED",
+                entry_condition: {
+                    type: "timer",
+                    params: {duration: 3.0}
+                },
+                tasks: [
+                    {
+                        type: "set_led",
+                        params: {color: "blue", led: "main"}
+                    }
+                ]
+            },
+            {
+                name: "active",
+                description: "Robot is active with green LED",
+                entry_condition: {
+                    type: "timer",
+                    params: {duration: 3.0}
+                },
+                tasks: [
+                    {
+                        type: "set_led",
+                        params: {color: "green", led: "main"}
+                    }
+                ]
+            }
+        ],
+        transitions: [
+            {
+                source: "idle",
+                destination: "active",
+                trigger: "auto"
+            },
+            {
+                source: "active",
+                destination: "idle",
+                trigger: "auto"
+            }
+        ]
+    };
+
+    document.getElementById('sm-config-editor').value = JSON.stringify(template, null, 2);
+    showStateMachineMessage('Template loaded', 'success');
+}
+
+function clearStateMachineConfig() {
+    document.getElementById('sm-config-editor').value = '';
+    showStateMachineMessage('Configuration cleared', 'success');
+}
+
+function showStateMachineMessage(message, type) {
+    const statusDiv = document.getElementById('sm-config-status');
+    statusDiv.innerHTML = `<div class="alert alert-${type}" style="padding: 10px; margin: 5px 0; border-radius: 4px; background: ${type === 'success' ? '#d4edda' : '#f8d7da'}; border: 1px solid ${type === 'success' ? '#c3e6cb' : '#f5c6cb'}; color: ${type === 'success' ? '#155724' : '#721c24'};">${message}</div>`;
+    setTimeout(() => {
+        statusDiv.innerHTML = '';
+    }, 5000);
+}
+
+function updateStateMachineStatusDisplay(smStatus) {
+    if (!smStatus) return;
+
+    document.getElementById('sm-configured').textContent = smStatus.configured ? 'Yes' : 'No';
+    document.getElementById('sm-current-state').textContent = smStatus.current_state || '--';
+    document.getElementById('sm-state-description').textContent = smStatus.state_description || '--';
+    document.getElementById('sm-time-in-state').textContent = smStatus.time_in_state ? smStatus.time_in_state.toFixed(1) : '--';
+    document.getElementById('sm-task-completed').textContent = smStatus.task_completed ? 'Yes' : 'No';
+    document.getElementById('sm-status-data').textContent = JSON.stringify(smStatus, null, 2);
 }

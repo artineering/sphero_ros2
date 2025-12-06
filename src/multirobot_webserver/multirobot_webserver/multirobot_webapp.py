@@ -35,6 +35,8 @@ class SpheroInstanceManager:
         #     }
         # }
         self.next_port = 5001  # Starting port for WebSocket servers
+        self.aruco_slam_process: Optional[subprocess.Popen] = None
+        self.aruco_slam_enabled = False
 
     def add_sphero(self, sphero_name: str) -> Dict:
         """
@@ -61,12 +63,19 @@ class SpheroInstanceManager:
             # Launch WebSocket server for this instance
             print(f"➕ Adding {sphero_name} on port {port}...")
             # Inherit stdout/stderr to see debug logs from WebSocket server and controllers
-            process = subprocess.Popen([
+            cmd = [
                 'ros2', 'run', 'sphero_instance_controller',
                 'sphero_instance_websocket_server.py',
                 sphero_name,
                 str(port)
-            ])
+            ]
+
+            # Add external_localization parameter if ArUco SLAM is enabled
+            if self.aruco_slam_enabled:
+                cmd.append('true')
+                print(f"   External localization enabled for {sphero_name}")
+
+            process = subprocess.Popen(cmd)
 
             # Store instance info
             instance_info = {
@@ -206,11 +215,107 @@ class SpheroInstanceManager:
             'url': instance['url']
         }
 
+    def start_aruco_slam(self, camera_id: int = 0) -> Dict:
+        """
+        Start the ArUco SLAM node for external localization.
+
+        Args:
+            camera_id: Camera ID to use
+
+        Returns:
+            Dictionary with result
+        """
+        if self.aruco_slam_process is not None:
+            return {
+                'success': False,
+                'message': 'ArUco SLAM is already running'
+            }
+
+        try:
+            print(f"Starting ArUco SLAM node with camera {camera_id}...")
+            self.aruco_slam_process = subprocess.Popen([
+                'ros2', 'run', 'aruco_slam', 'aruco_slam_node.py',
+                '--ros-args', '-p', f'camera_id:={camera_id}'
+            ], stdout=None, stderr=None)
+
+            time.sleep(2)
+
+            if self.aruco_slam_process.poll() is None:
+                self.aruco_slam_enabled = True
+                print(f"ArUco SLAM node started successfully")
+                return {
+                    'success': True,
+                    'message': f'ArUco SLAM started with camera {camera_id}'
+                }
+            else:
+                self.aruco_slam_process = None
+                print(f"Failed to start ArUco SLAM node")
+                return {
+                    'success': False,
+                    'message': 'ArUco SLAM process died on startup'
+                }
+
+        except Exception as e:
+            print(f"Error starting ArUco SLAM: {e}")
+            return {
+                'success': False,
+                'message': f'Error: {str(e)}'
+            }
+
+    def stop_aruco_slam(self) -> Dict:
+        """
+        Stop the ArUco SLAM node.
+
+        Returns:
+            Dictionary with result
+        """
+        if self.aruco_slam_process is None:
+            return {
+                'success': False,
+                'message': 'ArUco SLAM is not running'
+            }
+
+        try:
+            print("Stopping ArUco SLAM node...")
+            self.aruco_slam_process.terminate()
+
+            try:
+                self.aruco_slam_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print("   ArUco SLAM did not terminate, killing...")
+                self.aruco_slam_process.kill()
+                self.aruco_slam_process.wait()
+
+            self.aruco_slam_process = None
+            self.aruco_slam_enabled = False
+            print("ArUco SLAM node stopped")
+            return {
+                'success': True,
+                'message': 'ArUco SLAM stopped successfully'
+            }
+
+        except Exception as e:
+            print(f"Error stopping ArUco SLAM: {e}")
+            return {
+                'success': False,
+                'message': f'Error: {str(e)}'
+            }
+
+    def is_aruco_slam_running(self) -> bool:
+        """Check if ArUco SLAM is currently running."""
+        if self.aruco_slam_process is None:
+            return False
+        return self.aruco_slam_process.poll() is None
+
     def shutdown_all(self):
-        """Shutdown all Sphero instances."""
+        """Shutdown all Sphero instances and ArUco SLAM."""
         print("Shutting down all Sphero instances...")
         for name in list(self.instances.keys()):
             self.remove_sphero(name)
+
+        if self.aruco_slam_process is not None:
+            print("Shutting down ArUco SLAM...")
+            self.stop_aruco_slam()
 
 
 # Create Flask app
@@ -293,7 +398,42 @@ def health():
     """Health check endpoint."""
     return jsonify({
         'status': 'healthy',
-        'sphero_count': len(manager.instances)
+        'sphero_count': len(manager.instances),
+        'aruco_slam_running': manager.is_aruco_slam_running()
+    })
+
+
+@app.route('/api/aruco_slam/start', methods=['POST'])
+def start_aruco_slam():
+    """Start ArUco SLAM node."""
+    data = request.get_json() or {}
+    camera_id = data.get('camera_id', 0)
+    result = manager.start_aruco_slam(camera_id)
+
+    if result['success']:
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/api/aruco_slam/stop', methods=['POST'])
+def stop_aruco_slam():
+    """Stop ArUco SLAM node."""
+    result = manager.stop_aruco_slam()
+
+    if result['success']:
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/api/aruco_slam/status', methods=['GET'])
+def aruco_slam_status():
+    """Get ArUco SLAM status."""
+    return jsonify({
+        'success': True,
+        'running': manager.is_aruco_slam_running(),
+        'enabled': manager.aruco_slam_enabled
     })
 
 
@@ -315,10 +455,32 @@ def main():
     # Register signal handler
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Run Flask app
+    # Prompt for ArUco SLAM startup
     print("="*60)
     print("Multi-Robot Sphero Web Server")
     print("="*60)
+
+    response = input("Start ArUco SLAM node for external localization? (y/N): ").strip().lower()
+    if response == 'y':
+        camera_id_input = input("Enter camera ID (default: 0): ").strip()
+        camera_id = 0
+        if camera_id_input:
+            try:
+                camera_id = int(camera_id_input)
+            except ValueError:
+                print(f"Invalid camera ID '{camera_id_input}', using default: 0")
+                camera_id = 0
+
+        result = manager.start_aruco_slam(camera_id)
+        if result['success']:
+            print(f"ArUco SLAM started: {result['message']}")
+        else:
+            print(f"Failed to start ArUco SLAM: {result['message']}")
+    else:
+        print("ArUco SLAM will not be started (can be started later via API)")
+
+    # Run Flask app
+    print("-"*60)
     print("Starting server on http://localhost:5000")
     print("Press Ctrl+C to shutdown")
     print("="*60)

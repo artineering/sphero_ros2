@@ -58,6 +58,18 @@ class ArucoSLAMNode(Node):
         self.auto_calibrate = self.get_parameter('auto_calibrate').value
         self.show_viz = self.get_parameter('show_visualization').value
 
+        # Check if camera_id is valid, prompt if less than 0
+        if camera_id < 0:
+            self.get_logger().warn(f"Invalid camera_id: {camera_id}. Please provide a valid camera ID.")
+            camera_id_input = input("Enter camera ID (e.g., 0, 1, 2...): ").strip()
+            try:
+                camera_id = int(camera_id_input)
+                if camera_id < 0:
+                    raise ValueError("Camera ID must be >= 0")
+            except ValueError as e:
+                self.get_logger().error(f"Invalid camera ID input: {e}")
+                raise RuntimeError("Camera ID not provided or invalid")
+
         # Initialize detector and mapper
         self.detector = ArucoDetector(camera_id=camera_id)
         self.field_mapper = FieldMapper(

@@ -34,18 +34,20 @@ class SpheroInstanceWebSocketServer(Node):
     Uses namespaced topics: sphero/<sphero_name>/*
     """
 
-    def __init__(self, sphero_name: str, websocket_port: int):
+    def __init__(self, sphero_name: str, websocket_port: int, external_localization: bool = False):
         """
         Initialize the websocket server node.
 
         Args:
             sphero_name: Name of the Sphero (e.g., 'SB-3660')
             websocket_port: Port for WebSocket server (e.g., 5001, 5002, ...)
+            external_localization: Whether to use external localization (ArUco SLAM)
         """
         super().__init__(f'sphero_websocket_server_{sphero_name.replace("-", "_")}')
 
         self.sphero_name = sphero_name
         self.websocket_port = websocket_port
+        self.external_localization = external_localization
         # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
         self.topic_name_safe = sphero_name.replace("-", "_")
         self.topic_prefix = f'sphero/{self.topic_name_safe}'
@@ -336,7 +338,9 @@ class SpheroInstanceWebSocketServer(Node):
             self.device_controller_process = subprocess.Popen([
                 'ros2', 'run', 'sphero_instance_controller',
                 'sphero_instance_device_controller_node.py',
-                '--ros-args', '-p', f'sphero_name:={self.sphero_name}'
+                '--ros-args',
+                '-p', f'sphero_name:={self.sphero_name}',
+                '-p', f'external_localization:={str(self.external_localization).lower()}'
             ], stdout=None, stderr=None, preexec_fn=os.setpgrp)  # Create new process group
 
             # Monitor device controller for early exit (toy not found)
@@ -781,15 +785,19 @@ def main(args=None):
     # Get parameters from command line or environment
     import sys
     if len(sys.argv) < 3:
-        print("Usage: sphero_instance_websocket_server <sphero_name> <port>")
+        print("Usage: sphero_instance_websocket_server <sphero_name> <port> [external_localization]")
         print("Example: sphero_instance_websocket_server SB-3660 5001")
+        print("Example: sphero_instance_websocket_server SB-3660 5001 true")
         sys.exit(1)
 
     sphero_name = sys.argv[1]
     websocket_port = int(sys.argv[2])
+    external_localization = False
+    if len(sys.argv) >= 4:
+        external_localization = sys.argv[3].lower() in ['true', '1', 'yes']
 
     # Create node
-    node = SpheroInstanceWebSocketServer(sphero_name, websocket_port)
+    node = SpheroInstanceWebSocketServer(sphero_name, websocket_port, external_localization)
 
     # Create Flask app with WebSocket
     app, socketio = create_flask_app(node)
