@@ -13,6 +13,7 @@ instances to run simultaneously.
 import time
 import json
 import signal
+import random
 
 import rclpy
 from rclpy.node import Node
@@ -66,7 +67,7 @@ class SpheroInstanceDeviceController(Node):
 
         # Declare and get ROS parameters
         self.declare_parameter('sensor_rate', 10.0)  # Default: 10 Hz
-        self.declare_parameter('heartbeat_rate', 5.0)  # Default: 5 seconds
+        self.declare_parameter('heartbeat_rate', 0)  # Default: 5 seconds
         self.declare_parameter('external_localization', False) # Default: turned OFF
 
         self.sensor_rate = self.get_parameter('sensor_rate').value
@@ -94,19 +95,29 @@ class SpheroInstanceDeviceController(Node):
 
         # Create timers
         self.sensor_timer = self.create_timer(self.sensor_period, self.publish_sensors)
-        self.heartbeat_timer = self.create_timer(self.heartbeat_rate, self.publish_heartbeat)
+
+        if self.heartbeat_rate > 0:
+            self.heartbeat_timer = self.create_timer(self.heartbeat_rate, self.publish_heartbeat)
 
         # Log initialization info
         self._log_initialization()
 
-        # Initial LED indicator (green = ready)
-        self.sphero.set_led(0, 255, 0)
+        # Initial front and back LEDs
+        self.sphero.set_led(0, 255, 0, 'front')
+        self.sphero.set_led(255, 0, 0, 'back')
+        self.sphero.set_led(0, 0, 0, 'main')
+
+        # Set the arrow symbol to indicate heading
+        red = 128 * random.randint(0,2)
+        green = 128 * random.randint(0,2)
+        blue = 128 * random.randint(0,2)
+        self.sphero.set_matrix('arrow_right', None, red, green, blue)
 
     def _create_subscribers(self):
 
         if self.external_location:
             """Create ROS subscriber for localization topic."""
-            topic_name = f'/aruco_slam/{self.topic_safe_name}/position'
+            topic_name = f'/aruco_slam/{self.topic_name_safe}/position'
             self.localization_sub = self.create_subscription(
                 PoseStamped, topic_name, self._localization_callback, 10)
     
