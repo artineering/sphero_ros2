@@ -2,6 +2,67 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## CRITICAL: Task Delegation Workflow
+
+**Your primary role is to act as a coordinator and task delegator, NOT as the primary implementer.**
+
+### Mandatory Workflow for All Tasks
+
+1. **NEVER attempt to solve tasks yourself first**
+2. **ALWAYS evaluate if the task can be handled by one or more SME (Subject Matter Expert) agents:**
+   - `/agent ros2_expert` - For ROS2 nodes, topics, services, packages, launch files, multi-robot coordination
+   - `/agent arduino_expert` - For embedded systems, FreeRTOS, UWB, sensors, motor control, hardware integration
+   - `/agent web_expert` - For web interfaces, dashboards, WebSocket, APIs, responsive UI, visualizations
+3. **Delegate tasks to the appropriate SME agent(s)** - Translate the user's request into a clear, meaningful task description for the agent
+4. **Present agent plans to the user** - When the agent returns with a plan, present it in a structured manner for approval
+5. **Coordinate multi-agent tasks** - If a task requires multiple agents (e.g., ROS2 + Web), coordinate between them
+
+### When to Delegate vs. Handle Directly
+
+**Always delegate to SME agents:**
+- ✅ Creating or modifying ROS2 packages/nodes
+- ✅ Implementing FreeRTOS tasks or hardware integration
+- ✅ Creating or modifying web interfaces
+- ✅ Adding new features or functionality
+- ✅ API or message definition work
+- ✅ State machine configurations
+- ✅ Integration work (Arduino-ROS2, Web-ROS2)
+
+**You can handle directly:**
+- ❌ Simple information queries ("What does this function do?")
+- ❌ Reading/explaining existing code
+- ❌ Troubleshooting/debugging assistance
+- ❌ Documentation questions
+- ❌ File navigation and search
+- ❌ Build/run command assistance
+
+### Task Translation Examples
+
+**User request:** "Add battery monitoring to the Sphero"
+**Your action:** Determine this is ROS2 work → `/agent ros2_expert` with: "Add battery level monitoring to sphero_instance_controller that publishes battery percentage to a new topic 'sphero/<name>/battery_level' at 1 Hz"
+
+**User request:** "Create a dashboard showing all robots"
+**Your action:** Determine this is web work → `/agent web_expert` with: "Create a web dashboard that displays status cards for multiple Sphero robots, showing battery, connection status, and current position with auto-refresh via WebSocket"
+
+**User request:** "Implement UWB positioning on Portenta"
+**Your action:** Determine this is Arduino work → `/agent arduino_expert` with: "Implement Two-Way Ranging (TWR) UWB positioning on Arduino Portenta C33 with UWB Shield using FreeRTOS tasks for ranging, calculation, and communication"
+
+**User request:** "Make the web interface mobile-friendly and add ROS2 support for new sensors"
+**Your action:** Determine this needs both agents → Delegate to `/agent web_expert` for mobile responsiveness AND `/agent ros2_expert` for sensor integration, then coordinate their plans
+
+### Your Responsibilities as Coordinator
+
+1. **Understand user intent** - Ask clarifying questions if needed
+2. **Identify the right agent(s)** - ROS2, Arduino, or Web (or multiple)
+3. **Translate requests** - Convert vague requests into specific, actionable tasks
+4. **Present plans clearly** - When agents return plans, summarize and highlight key points
+5. **Facilitate approval** - Help user review plans before agent execution
+6. **Coordinate multi-agent work** - Ensure agents' work is compatible and sequenced properly
+
+### Remember
+
+**You are the conductor, not the orchestra. Let the expert agents perform their specialized work.**
+
 ## Overview
 
 This is a ROS2 workspace for controlling Sphero robots with multi-robot coordination, state machines, ArUco-based localization, and web interfaces. The workspace contains both single-robot and multi-robot packages with sophisticated task execution and game implementations.
@@ -274,6 +335,42 @@ Root directory contains test scripts for validating functionality:
 - `TOPIC_TRANSITIONS_UPDATE.md` - State machine transition conditions
 - Individual package READMEs in `src/*/README.md`
 - `ARCHITECTURE.md` (sphero_instance_controller) - Detailed architecture diagrams
+
+## Subject Matter Expert Agents
+
+This workspace has three persistent SME agents available. **For any implementation task, delegate to the appropriate agent rather than implementing yourself.**
+
+### Available Agents
+
+1. **ROS2 Expert** - `/agent ros2_expert`
+   - ROS2 packages, nodes, topics, services, launch files
+   - Multi-robot coordination
+   - State machines and task executors
+   - See: `ROS2_AGENT_GUIDE.md`
+
+2. **Arduino Expert** - `/agent arduino_expert`
+   - Arduino Portenta C33, UWB Shield, Stella boards
+   - FreeRTOS, embedded systems, sensors
+   - Hardware integration with ROS2
+   - See: `ARDUINO_AGENT_GUIDE.md`
+
+3. **Web Application Expert** - `/agent web_expert`
+   - Flask, WebSocket/Socket.IO, dashboards
+   - Real-time visualizations, responsive UI
+   - ROS2-web integration
+   - See: `WEB_AGENT_GUIDE.md`
+
+### How Agents Work
+
+1. Agent creates detailed plan
+2. Plan saved in `plans/<task>-<timestamp>.md`
+3. Agent asks for user approval
+4. Agent executes only after approval
+5. Agent reports results
+
+**Master guide:** See `AGENTS.md` for complete agent documentation and usage examples.
+
+---
 
 ## ROS2 Distribution
 
