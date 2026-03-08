@@ -263,22 +263,144 @@ When Arduino code interfaces with ROS2:
 
 ## Common Commands
 
-### Arduino CLI
+### Arduino CLI (REQUIRED TOOL - Installed and Configured)
+
+**Location:** `/home/svaghela/ros2_ws_2/bin/arduino-cli` (in PATH)
+**Config:** `~/.arduino15/arduino-cli.yaml`
+
+**Installed Board Cores:**
+- `arduino:renesas_portenta@1.5.3` - Arduino Portenta C33
+- `arduino:mbed_stella@4.5.0` - Arduino Stella
+
+#### Board-Specific Commands
+
+**Portenta C33 (Anchor Firmware):**
 ```bash
-# Compile sketch
-arduino-cli compile --fqbn arduino:mbed_portenta:portenta_c33 sketch_name
+# FQBN for Portenta C33
+FQBN="arduino:renesas_portenta:portenta_c33"
 
-# Upload sketch
-arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:mbed_portenta:portenta_c33 sketch_name
+# Compile anchor firmware
+arduino-cli compile --fqbn $FQBN arduino/anchor_firmware
 
-# Install libraries
-arduino-cli lib install "FreeRTOS"
-arduino-cli lib install "DW3000"
+# Upload to board (auto-detect port)
+arduino-cli upload --fqbn $FQBN arduino/anchor_firmware
 
-# List connected boards
+# Upload to specific port
+arduino-cli upload -p /dev/ttyACM0 --fqbn $FQBN arduino/anchor_firmware
+
+# Compile and upload in one command
+arduino-cli compile --upload --fqbn $FQBN -p /dev/ttyACM0 arduino/anchor_firmware
+```
+
+**Arduino Stella (Tag Firmware):**
+```bash
+# FQBN for Stella
+FQBN="arduino:mbed_stella:stella"
+
+# Compile tag firmware
+arduino-cli compile --fqbn $FQBN arduino/tag_firmware
+
+# Upload to board
+arduino-cli upload --fqbn $FQBN arduino/tag_firmware
+
+# Compile and upload
+arduino-cli compile --upload --fqbn $FQBN -p /dev/ttyACM1 arduino/tag_firmware
+```
+
+#### General Commands
+
+```bash
+# List all installed boards and cores
+arduino-cli board listall
+
+# List connected boards (auto-detect)
 arduino-cli board list
 
+# Update board index
+arduino-cli core update-index
+
+# Install board core
+arduino-cli core install arduino:renesas_portenta
+arduino-cli core install arduino:mbed_stella
+
+# Install libraries (if available in library manager)
+arduino-cli lib install "LibraryName"
+
+# Search for libraries
+arduino-cli lib search "UWB"
+
 # Monitor serial output
+arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
+
+# Monitor with specific config
+arduino-cli monitor -p /dev/ttyACM0 --config baudrate=115200,bits=8,parity=N,stop_bits=1
+```
+
+#### Batch Flashing (Multiple Boards)
+
+**Flash 4 Portenta C33 Anchors:**
+```bash
+# Configure and flash anchor 1
+sed -i 's/#define ANCHOR_ID.*/#define ANCHOR_ID 1/' arduino/anchor_firmware/anchor_firmware.ino
+arduino-cli compile --upload --fqbn arduino:renesas_portenta:portenta_c33 -p /dev/ttyACM0 arduino/anchor_firmware
+
+# Configure and flash anchor 2
+sed -i 's/#define ANCHOR_ID.*/#define ANCHOR_ID 2/' arduino/anchor_firmware/anchor_firmware.ino
+arduino-cli compile --upload --fqbn arduino:renesas_portenta:portenta_c33 -p /dev/ttyACM1 arduino/anchor_firmware
+
+# ... repeat for anchors 3 and 4
+```
+
+**Flash 10 Stella Tags:**
+```bash
+# Loop to flash tags 1-10
+for TAG_ID in {1..10}; do
+  echo "Flashing Tag $TAG_ID..."
+  sed -i "s/#define TAG_ID.*/#define TAG_ID $TAG_ID/" arduino/tag_firmware/tag_firmware_optimized.ino
+  arduino-cli compile --upload --fqbn arduino:mbed_stella:stella arduino/tag_firmware
+  echo "Tag $TAG_ID flashed. Disconnect and connect next tag."
+  read -p "Press Enter when ready for next tag..."
+done
+```
+
+#### Troubleshooting Commands
+
+```bash
+# Verbose compilation (see errors)
+arduino-cli compile --fqbn arduino:renesas_portenta:portenta_c33 --verbose arduino/anchor_firmware
+
+# Clean build cache
+arduino-cli cache clean
+
+# Verify board connection
+arduino-cli board list
+
+# Get board details
+arduino-cli board details --fqbn arduino:renesas_portenta:portenta_c33
+
+# Check core installation
+arduino-cli core list
+```
+
+### IMPORTANT: Arduino CLI Usage in Plans
+
+When creating plans for firmware development, **ALWAYS include Arduino CLI commands** for:
+1. Compilation verification
+2. Upload instructions
+3. Batch flashing procedures (for multiple boards)
+4. Serial monitoring for testing
+
+**Example in plan:**
+```markdown
+## Testing Plan
+
+### Compilation Test
+arduino-cli compile --fqbn arduino:renesas_portenta:portenta_c33 arduino/anchor_firmware
+
+### Upload to Hardware
+arduino-cli compile --upload --fqbn arduino:renesas_portenta:portenta_c33 -p /dev/ttyACM0 arduino/anchor_firmware
+
+### Monitor Output
 arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 ```
 

@@ -17,21 +17,21 @@
  */
 
 #include <PortentaUWBShield.h>
-#include <WiFi.h>
+#include <WiFiC3.h>
 #include <WiFiUdp.h>
 
 // ============================================================
 // USER CONFIGURATION — change these per anchor before flashing
 // ============================================================
-#define ANCHOR_ID       1       // Unique anchor identifier (1–4)
+#define ANCHOR_ID       2       // Unique anchor identifier (1–4)
 #define NUM_TAGS        10      // Total number of Stella tags
 #define SERIAL_BAUD     115200
 #define PREAMBLE_BASE   9       // Base preamble code (valid: 9–12 for ch9)
 
 // WiFi and UDP configuration
-#define WIFI_SSID       "YourNetworkName"     // Change this to your WiFi SSID
-#define WIFI_PASS       "YourPassword"        // Change this to your WiFi password
-#define UDP_HOST        "192.168.1.100"       // ROS2 host IP address
+#define WIFI_SSID       "ghibli"              // Change this to your WiFi SSID
+#define WIFI_PASS       "myNeighbortotoro@1123"  // Change this to your WiFi password
+#define UDP_HOST        "192.168.1.166"       // ROS2 host IP address
 #define UDP_PORT        5000                  // UDP destination port
 #define WIFI_RETRY_MS   5000                  // Reconnect interval (ms)
 #define SERIAL_DEBUG                          // Comment out to disable debug prints
