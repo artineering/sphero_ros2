@@ -1303,42 +1303,34 @@ function loadStateMachineTemplate() {
             {
                 name: "idle",
                 description: "Robot is idle with blue LED",
-                entry_condition: {
-                    type: "timer",
-                    params: {duration: 3.0}
-                },
                 tasks: [
                     {
-                        type: "set_led",
-                        params: {color: "blue", led: "main"}
+                        task_type: "set_led",
+                        parameters: {red: 0, green: 0, blue: 255}
+                    }
+                ],
+                exits: [
+                    {
+                        condition: {type: "timer", duration: 3.0},
+                        destination: "active"
                     }
                 ]
             },
             {
                 name: "active",
                 description: "Robot is active with green LED",
-                entry_condition: {
-                    type: "timer",
-                    params: {duration: 3.0}
-                },
                 tasks: [
                     {
-                        type: "set_led",
-                        params: {color: "green", led: "main"}
+                        task_type: "set_led",
+                        parameters: {red: 0, green: 255, blue: 0}
+                    }
+                ],
+                exits: [
+                    {
+                        condition: {type: "timer", duration: 3.0},
+                        destination: "idle"
                     }
                 ]
-            }
-        ],
-        transitions: [
-            {
-                source: "idle",
-                destination: "active",
-                trigger: "auto"
-            },
-            {
-                source: "active",
-                destination: "idle",
-                trigger: "auto"
             }
         ]
     };
@@ -1368,5 +1360,15 @@ function updateStateMachineStatusDisplay(smStatus) {
     document.getElementById('sm-state-description').textContent = smStatus.state_description || '--';
     document.getElementById('sm-time-in-state').textContent = smStatus.time_in_state ? smStatus.time_in_state.toFixed(1) : '--';
     document.getElementById('sm-task-completed').textContent = smStatus.task_completed ? 'Yes' : 'No';
+
+    const leafEl = document.getElementById('sm-is-leaf');
+    if (leafEl) {
+        leafEl.textContent = smStatus.is_leaf_state === undefined ? '--' : (smStatus.is_leaf_state ? 'Yes' : 'No');
+    }
+    const exitsEl = document.getElementById('sm-num-exits');
+    if (exitsEl) {
+        exitsEl.textContent = smStatus.num_exits ?? '--';
+    }
+
     document.getElementById('sm-status-data').textContent = JSON.stringify(smStatus, null, 2);
 }

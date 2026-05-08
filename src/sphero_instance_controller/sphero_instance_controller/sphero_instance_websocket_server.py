@@ -662,6 +662,16 @@ def create_flask_app(node: SpheroInstanceWebSocketServer):
         node.publish_task_command(data)
         return jsonify({'status': 'success'})
 
+    @app.route('/api/state_machine/config', methods=['POST'])
+    def api_state_machine_config():
+        """Submit a state machine configuration."""
+        from flask import request, jsonify
+        data = request.get_json()
+        if data is None:
+            return jsonify({'success': False, 'message': 'Request body must be JSON'}), 400
+        node.publish_sm_config(data)
+        return jsonify({'success': True, 'message': 'Configuration published'})
+
     # WebSocket event handlers
 
     @socketio.on('connect')
