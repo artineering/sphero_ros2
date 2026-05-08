@@ -3,159 +3,152 @@
 """
 State Machine Core Logic for Sphero Robot.
 
-This module provides a configurable state machine that can be dynamically configured.
-Each state has entry conditions and associated tasks.
+Each state declares its own ``exits[]`` list. Every exit pairs a ``condition``
+with a ``destination`` state. Each tick, the state machine evaluates the
+current state's exits in declared order; the first whose condition is True
+fires the transition. A state with no ``exits`` is a leaf state and the
+machine remains there.
 """
 
 import time
-import importlib
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Iterable
 from enum import Enum
 from dataclasses import dataclass, field
 
 
 class ConditionType(Enum):
-    """Types of entry conditions for states."""
+    """Types of conditions usable for entry and exit."""
     ALWAYS = "always"
     TIMER = "timer"
     TOPIC_VALUE = "topic_value"
-    CUSTOM = "custom"
+    TOPIC_MESSAGE = "topic_message"
 
 
-class TransitionConditionType(Enum):
-    """Types of transition conditions."""
-    AUTO = "auto"  # Automatic based on state entry conditions
-    TOPIC_VALUE = "topic_value"  # Based on a ROS topic value
-    TOPIC_MESSAGE = "topic_message"  # Based on receiving any message on a topic
-    TIMER = "timer"  # Time-based from source state
+_VALID_OPERATORS = ('==', '!=', '>', '<', '>=', '<=')
+_ENTRY_CONDITION_TYPES = ('always', 'timer', 'topic_value')
+_EXIT_CONDITION_TYPES = ('always', 'timer', 'topic_value', 'topic_message')
+
+
+@dataclass
+class ExitSpec:
+    """A single exit from a state: a condition paired with a destination."""
+    condition: Dict[str, Any]
+    destination: str
 
 
 @dataclass
 class DynamicState:
-    """
-    Represents a dynamically configured state.
+    """A dynamically configured state.
 
-    Attributes:
-        name: Unique identifier for the state
-        config: Full configuration dictionary
-        entry_condition_type: Type of condition to enter state
-        entry_condition_params: Parameters for the entry condition
-        tasks: List of tasks to execute when state is active
-        description: Human-readable description
-        timeout: Optional timeout in seconds
+    Schema (config dict):
+        name: str
+        description: str (optional)
+        entry_condition: {type, ...} (optional, defaults to {type: 'always'})
+        exits: [{condition: {type, ...}, destination: str}, ...] (optional)
+        tasks: [...] (optional)
+        timeout: float (optional)
+
+    A state with no ``exits`` (empty list or missing key) is a leaf state.
     """
     name: str
     config: Dict[str, Any]
-    entry_condition_type: str = 'always'
-    entry_condition_params: Dict[str, Any] = field(default_factory=dict)
+    entry_condition: Dict[str, Any] = field(default_factory=lambda: {'type': 'always'})
+    exits: List[ExitSpec] = field(default_factory=list)
     tasks: List[Dict[str, Any]] = field(default_factory=list)
     description: str = ''
     timeout: Optional[float] = None
 
-    # Runtime data
     entry_time: Optional[float] = None
     condition_met: bool = False
     task_completed: bool = False
 
     def __post_init__(self):
-        """Initialize state from config."""
-        # Entry condition configuration
-        self.entry_condition_type = self.config.get('entry_condition', {}).get('type', 'always')
-        self.entry_condition_params = self.config.get('entry_condition', {}).get('params', {})
+        self.entry_condition = self.config.get('entry_condition', {'type': 'always'})
 
-        # Task configuration - support both single task (backward compatibility) and task array
+        self.exits = [
+            ExitSpec(
+                condition=exit_cfg.get('condition', {}),
+                destination=exit_cfg.get('destination'),
+            )
+            for exit_cfg in self.config.get('exits', [])
+        ]
+
         if 'tasks' in self.config:
-            # New format: array of tasks
             self.tasks = self.config['tasks']
         elif 'task' in self.config:
-            # Old format: single task - convert to array
             self.tasks = [self.config['task']]
         else:
-            # No tasks
             self.tasks = []
 
-        # State metadata
         self.description = self.config.get('description', '')
         self.timeout = self.config.get('timeout', None)
+
+    def isLeafState(self) -> bool:
+        """Return True if this state has no exits and will never transition out."""
+        return len(self.exits) == 0
 
 
 class StateMachine:
     """
     Core state machine logic for Sphero robot.
 
-    Manages states, transitions, and condition evaluation.
-    This class is ROS-independent and can be used standalone.
+    ROS-independent — all interaction with the outside world happens through
+    injectable callbacks (logger, topic subscribe/unsubscribe).
     """
 
     def __init__(
         self,
         logger: Optional[Callable] = None,
         topic_subscribe_callback: Optional[Callable] = None,
-        topic_unsubscribe_callback: Optional[Callable] = None
+        topic_unsubscribe_callback: Optional[Callable] = None,
     ):
         """
-        Initialize the state machine.
-
         Args:
-            logger: Optional logging function (e.g., node.get_logger().info)
-            topic_subscribe_callback: Callback to subscribe to topics (topic_name, msg_type, field_path)
-            topic_unsubscribe_callback: Callback to unsubscribe from topics (topic_name)
+            logger: Optional logging function (e.g. ``node.get_logger().info``).
+            topic_subscribe_callback: Called with ``(topic_name, msg_type, field_path)``
+                for every topic referenced by an entry/exit condition.
+            topic_unsubscribe_callback: Called with ``(topic_name)`` to unsubscribe
+                when the configuration changes.
         """
         self.logger = logger or self._default_logger
         self.topic_subscribe_callback = topic_subscribe_callback
         self.topic_unsubscribe_callback = topic_unsubscribe_callback
 
-        # State machine configuration
         self.config: Optional[Dict[str, Any]] = None
         self.states: Dict[str, DynamicState] = {}
-        self.transitions: List[Dict[str, Any]] = []
         self.current_state: Optional[str] = None
 
-        # Condition monitoring data
+        # Sensor data is kept for backward compatibility with the ROS2 controller
+        # node, which calls update_sensor_data(). It is no longer evaluated by the
+        # condition engine — exit/entry conditions read from topic_values only.
         self.sensor_topic_values: Dict[str, Any] = {}
-        self.state_timers: Dict[str, float] = {}
 
-        # Dynamic topic monitoring for transitions
         self.topic_values: Dict[str, Any] = {}
         self.topic_last_received: Dict[str, float] = {}
 
     def _default_logger(self, message: str):
-        """Default logger that prints to console."""
         print(f"[StateMachine] {message}")
 
+    # ------------------------------------------------------------------ config
+
     def configure(self, config: Dict[str, Any]) -> bool:
-        """
-        Configure the state machine from a configuration dictionary.
-
-        Args:
-            config: State machine configuration
-
-        Returns:
-            True if configuration successful, False otherwise
-        """
+        """Configure the state machine. Returns True on success."""
         self.logger(f'Configuring state machine: {config.get("name", "unnamed")}')
 
-        # Validate configuration
         if not self.validate_config(config):
             self.logger('ERROR: Invalid configuration')
             return False
 
-        # Build the state machine
         self._build_state_machine(config)
-
         self.logger(f'State machine configured with {len(self.states)} states')
         return True
 
     def validate_config(self, config: Dict[str, Any]) -> bool:
-        """
-        Validate the state machine configuration.
+        """Validate the configuration. Returns True if valid."""
+        if not isinstance(config, dict):
+            self.logger('ERROR: Configuration must be a dictionary')
+            return False
 
-        Args:
-            config: Configuration dictionary
-
-        Returns:
-            True if valid, False otherwise
-        """
         if 'states' not in config or not config['states']:
             self.logger('ERROR: Configuration must have at least one state')
             return False
@@ -164,157 +157,191 @@ class StateMachine:
             self.logger('ERROR: Configuration must specify initial_state')
             return False
 
-        # Check that initial state exists
         state_names = [s['name'] for s in config['states']]
         if config['initial_state'] not in state_names:
             self.logger(f'ERROR: Initial state "{config["initial_state"]}" not found in states')
             return False
 
-        # Validate transitions reference existing states
         if 'transitions' in config:
-            for trans in config['transitions']:
-                if trans['source'] not in state_names:
-                    self.logger(f'ERROR: Transition source "{trans["source"]}" not found')
-                    return False
-                if trans['destination'] not in state_names:
-                    self.logger(f'ERROR: Transition destination "{trans["destination"]}" not found')
-                    return False
-
-                # Validate transition condition if present
-                if 'condition' in trans:
-                    if not self._validate_transition_condition(trans['condition']):
-                        self.logger(f'ERROR: Invalid transition condition: {trans}')
-                        return False
-
-        return True
-
-    def _validate_transition_condition(self, condition: Dict[str, Any]) -> bool:
-        """Validate a transition condition configuration."""
-        condition_type = condition.get('type', 'auto')
-
-        # Validate based on condition type
-        if condition_type in ['topic_value', 'topic_message']:
-            # These require topic and msg_type
-            if 'topic' not in condition:
-                self.logger(f'ERROR: Condition type {condition_type} requires "topic" parameter')
-                return False
-            if 'msg_type' not in condition:
-                self.logger(f'ERROR: Condition type {condition_type} requires "msg_type" parameter')
-                return False
-
-            # topic_value also requires operator and value
-            if condition_type == 'topic_value':
-                if 'operator' not in condition:
-                    self.logger('ERROR: Condition type topic_value requires "operator" parameter')
-                    return False
-                if 'value' not in condition:
-                    self.logger('ERROR: Condition type topic_value requires "value" parameter')
-                    return False
-
-                # Validate operator
-                valid_operators = ['==', '!=', '>', '<', '>=', '<=']
-                if condition['operator'] not in valid_operators:
-                    self.logger(f'ERROR: Invalid operator "{condition["operator"]}". Must be one of: {valid_operators}')
-                    return False
-
-        elif condition_type == 'timer':
-            # Timer condition requires duration
-            if 'duration' not in condition:
-                self.logger('ERROR: Condition type timer requires "duration" parameter')
-                return False
-
-        elif condition_type != 'auto':
-            self.logger(f'WARNING: Unknown condition type: {condition_type}')
+            self.logger(
+                'ERROR: Top-level "transitions" is no longer supported. '
+                'Move each transition into the source state\'s `exits[]` array '
+                'as {"condition": {...}, "destination": "..."}.'
+            )
             return False
 
+        for state_cfg in config['states']:
+            name = state_cfg.get('name', '<unnamed>')
+
+            entry = state_cfg.get('entry_condition')
+            if entry is not None:
+                if not self._validate_condition(
+                    entry,
+                    allowed_types=_ENTRY_CONDITION_TYPES,
+                    label=f'state "{name}" entry_condition',
+                ):
+                    return False
+
+            for i, exit_cfg in enumerate(state_cfg.get('exits', [])):
+                label = f'state "{name}" exits[{i}]'
+                if not isinstance(exit_cfg, dict):
+                    self.logger(f'ERROR: {label} must be a dict')
+                    return False
+                if 'condition' not in exit_cfg:
+                    self.logger(f'ERROR: {label} missing "condition"')
+                    return False
+                if 'destination' not in exit_cfg:
+                    self.logger(f'ERROR: {label} missing "destination"')
+                    return False
+                if exit_cfg['destination'] not in state_names:
+                    self.logger(
+                        f'ERROR: {label} destination "{exit_cfg["destination"]}" '
+                        f'is not a known state'
+                    )
+                    return False
+                if not self._validate_condition(
+                    exit_cfg['condition'],
+                    allowed_types=_EXIT_CONDITION_TYPES,
+                    label=f'{label}.condition',
+                ):
+                    return False
+
         return True
 
-    def _build_state_machine(self, config: Dict[str, Any]):
-        """Build the state machine from configuration."""
-        self.config = config
-        self.states = {}
-        self.transitions = config.get('transitions', [])
+    def _validate_condition(
+        self,
+        condition: Any,
+        allowed_types: Iterable[str],
+        label: str,
+    ) -> bool:
+        """Validate a condition dict. ``allowed_types`` gates which types are accepted."""
+        if not isinstance(condition, dict):
+            self.logger(f'ERROR: {label} must be a dict')
+            return False
 
-        # Clean up old topic subscriptions
+        cond_type = condition.get('type')
+        if cond_type is None:
+            self.logger(f'ERROR: {label} missing "type"')
+            return False
+
+        if cond_type not in allowed_types:
+            self.logger(
+                f'ERROR: {label} unknown or disallowed type "{cond_type}". '
+                f'Allowed: {list(allowed_types)}'
+            )
+            return False
+
+        if cond_type == 'always':
+            return True
+
+        if cond_type == 'timer':
+            if 'duration' not in condition:
+                self.logger(f'ERROR: {label} type "timer" requires "duration"')
+                return False
+            return True
+
+        if cond_type == 'topic_value':
+            for required in ('topic', 'operator', 'value'):
+                if required not in condition:
+                    self.logger(f'ERROR: {label} type "topic_value" requires "{required}"')
+                    return False
+            if condition['operator'] not in _VALID_OPERATORS:
+                self.logger(
+                    f'ERROR: {label} invalid operator "{condition["operator"]}". '
+                    f'Must be one of {list(_VALID_OPERATORS)}'
+                )
+                return False
+            return True
+
+        if cond_type == 'topic_message':
+            if 'topic' not in condition:
+                self.logger(f'ERROR: {label} type "topic_message" requires "topic"')
+                return False
+            return True
+
+        # Should be unreachable thanks to allowed_types check above.
+        self.logger(f'ERROR: {label} unhandled condition type "{cond_type}"')
+        return False
+
+    def _build_state_machine(self, config: Dict[str, Any]):
+        """Build state objects, wire subscriptions, set initial state."""
+        self.config = config
+
         if self.topic_unsubscribe_callback:
             for topic_name in list(self.topic_values.keys()):
                 self.topic_unsubscribe_callback(topic_name)
 
+        self.states = {}
         self.topic_values.clear()
         self.topic_last_received.clear()
 
-        # Create state objects
-        for state_config in config['states']:
-            state_name = state_config['name']
-            self.states[state_name] = DynamicState(state_name, state_config)
-            self.logger(f'Created state: {state_name}')
+        for state_cfg in config['states']:
+            name = state_cfg['name']
+            self.states[name] = DynamicState(name, state_cfg)
+            self.logger(f'Created state: {name}')
 
-        # Set up topic subscriptions for transition conditions
         if self.topic_subscribe_callback:
-            for transition in self.transitions:
-                condition = transition.get('condition', {})
-                condition_type = condition.get('type', 'auto')
+            seen = set()
+            for state in self.states.values():
+                for cond in self._iter_state_conditions(state):
+                    ctype = cond.get('type')
+                    if ctype in ('topic_value', 'topic_message'):
+                        topic = cond.get('topic')
+                        msg_type = cond.get('msg_type')
+                        field_path = cond.get('field_path')
+                        if topic and msg_type and topic not in seen:
+                            seen.add(topic)
+                            self.topic_subscribe_callback(topic, msg_type, field_path)
+                        elif topic and not msg_type:
+                            self.logger(
+                                f'WARNING: state "{state.name}" condition on topic "{topic}" '
+                                f'is missing "msg_type"; cannot subscribe.'
+                            )
 
-                if condition_type in ['topic_value', 'topic_message']:
-                    topic_name = condition.get('topic')
-                    msg_type = condition.get('msg_type')
-                    field_path = condition.get('field_path')
-
-                    if topic_name and msg_type:
-                        self.topic_subscribe_callback(topic_name, msg_type, field_path)
-                    else:
-                        self.logger(f'WARNING: Transition condition {condition_type} missing required parameters')
-
-        # Set initial state
         self.current_state = config['initial_state']
         self.states[self.current_state].entry_time = time.time()
+        self.states[self.current_state].condition_met = True
 
         self.logger(f'State machine ready. Initial state: {self.current_state}')
 
-    def update_sensor_data(self, sensor_data: Dict[str, Any]):
-        """
-        Update sensor data for condition evaluation.
+    @staticmethod
+    def _iter_state_conditions(state: DynamicState) -> Iterable[Dict[str, Any]]:
+        if state.entry_condition:
+            yield state.entry_condition
+        for exit_spec in state.exits:
+            if exit_spec.condition:
+                yield exit_spec.condition
 
-        Args:
-            sensor_data: Dictionary of sensor values
-        """
+    # --------------------------------------------------------------- updaters
+
+    def update_sensor_data(self, sensor_data: Dict[str, Any]):
+        """Backward-compat sensor data sink. No longer consumed by the engine."""
         self.sensor_topic_values.update(sensor_data)
 
     def update_topic_value(self, topic_name: str, value: Any):
-        """
-        Update a topic value for transition conditions.
-
-        Args:
-            topic_name: Name of the topic
-            value: Latest value from the topic
-        """
+        """Record a topic's latest value and timestamp for condition evaluation."""
         self.topic_values[topic_name] = value
         self.topic_last_received[topic_name] = time.time()
 
-    def process(self) -> Optional[Dict[str, Any]]:
-        """
-        Process state machine logic (check conditions, transitions, timeouts).
+    # ------------------------------------------------------------------- tick
 
-        Returns:
-            Dictionary with status and any events, or None if not configured
-        """
+    def process(self) -> Optional[Dict[str, Any]]:
+        """Tick the state machine. Returns a status dict (with events) or None."""
         if self.current_state is None or not self.states:
             return None
 
         events = []
-
-        # Check if current state has timed out
         current = self.states[self.current_state]
+
         if current.timeout is not None and current.entry_time is not None:
             elapsed = time.time() - current.entry_time
             if elapsed > current.timeout:
                 events.append({
                     'type': 'state_timeout',
                     'state': self.current_state,
-                    'elapsed': elapsed
+                    'elapsed': elapsed,
                 })
 
-        # Check for available transitions
         transition_event = self._check_transitions()
         if transition_event:
             events.append(transition_event)
@@ -322,173 +349,99 @@ class StateMachine:
         return {
             'current_state': self.current_state,
             'events': events,
-            'time_in_state': time.time() - current.entry_time if current.entry_time else 0
+            'time_in_state': time.time() - current.entry_time if current.entry_time else 0,
         }
 
     def _check_transitions(self) -> Optional[Dict[str, Any]]:
-        """Check if any transitions should be triggered."""
-        for transition in self.transitions:
-            if transition['source'] == self.current_state:
-                dest_state = transition['destination']
+        """Evaluate the current state's exits and fire the first whose condition is met."""
+        if self.current_state is None:
+            return None
+        current = self.states[self.current_state]
+        if current.isLeafState():
+            return None
 
-                # Check if this transition's condition is met
-                if self._check_transition_condition(transition):
-                    trigger = transition.get('trigger', 'auto')
-                    self.logger(f'Transition triggered: {self.current_state} -> {dest_state} (trigger: {trigger})')
-
-                    # Perform transition
-                    old_state = self.current_state
-                    self.transition_to_state(dest_state)
-
-                    return {
-                        'type': 'state_transition',
-                        'from': old_state,
-                        'to': dest_state,
-                        'timestamp': time.time()
-                    }
-
+        for exit_spec in current.exits:
+            if self._evaluate_condition(exit_spec.condition):
+                old_state = self.current_state
+                dest = exit_spec.destination
+                self.logger(f'Exit fired: {old_state} -> {dest}')
+                self.transition_to_state(dest)
+                return {
+                    'type': 'state_transition',
+                    'from': old_state,
+                    'to': dest,
+                    'timestamp': time.time(),
+                }
         return None
 
-    def _check_transition_condition(self, transition: Dict[str, Any]) -> bool:
-        """Check if a transition's condition is satisfied."""
-        condition = transition.get('condition', {})
-        condition_type = condition.get('type', 'auto')
-        dest_state = transition['destination']
+    def _evaluate_condition(self, condition: Dict[str, Any]) -> bool:
+        """Evaluate a flat condition dict ({type, ...params}) against current runtime state."""
+        if not condition:
+            return False
 
-        # AUTO: Check destination state's entry condition (original behavior)
-        if condition_type == 'auto' or condition_type == TransitionConditionType.AUTO.value:
-            return self._check_entry_condition(dest_state)
+        cond_type = condition.get('type')
 
-        # TIMER: Time-based from current state
-        elif condition_type == 'timer' or condition_type == TransitionConditionType.TIMER.value:
+        if cond_type == 'always':
+            return True
+
+        if cond_type == 'timer':
             if self.current_state is None:
                 return False
-
             current = self.states[self.current_state]
             if current.entry_time is None:
                 return False
-
             duration = condition.get('duration', 0.0)
-            elapsed = time.time() - current.entry_time
-            return elapsed >= duration
+            return time.time() - current.entry_time >= duration
 
-        # TOPIC_VALUE: Check if topic value meets criteria
-        elif condition_type == 'topic_value' or condition_type == TransitionConditionType.TOPIC_VALUE.value:
-            topic_name = condition.get('topic')
+        if cond_type == 'topic_value':
+            topic = condition.get('topic')
             operator = condition.get('operator', '==')
-            expected_value = condition.get('value')
-
-            if not topic_name or topic_name not in self.topic_values:
+            expected = condition.get('value')
+            if not topic or topic not in self.topic_values:
                 return False
-
-            actual_value = self.topic_values[topic_name]
-
             try:
-                return self._compare_values(actual_value, operator, expected_value)
+                return self._compare_values(self.topic_values[topic], operator, expected)
             except Exception as e:
-                self.logger(f'ERROR: Error comparing topic values: {e}')
+                self.logger(f'ERROR: Error comparing topic values for "{topic}": {e}')
                 return False
 
-        # TOPIC_MESSAGE: Check if message was received recently
-        elif condition_type == 'topic_message' or condition_type == TransitionConditionType.TOPIC_MESSAGE.value:
-            topic_name = condition.get('topic')
+        if cond_type == 'topic_message':
+            topic = condition.get('topic')
             timeout = condition.get('timeout', None)
-
-            if not topic_name or topic_name not in self.topic_last_received:
+            if not topic or topic not in self.topic_last_received:
                 return False
-
-            # If timeout specified, check if message was received recently enough
             if timeout is not None:
-                elapsed = time.time() - self.topic_last_received[topic_name]
-                return elapsed <= timeout
-            else:
-                # No timeout, just check if we ever received a message
-                return True
-
-        else:
-            self.logger(f'WARNING: Unknown transition condition type: {condition_type}')
-            return False
-
-    def _check_entry_condition(self, state_name: str, is_initial: bool = False) -> bool:
-        """Check if a state's entry condition is satisfied."""
-        if state_name not in self.states:
-            return False
-
-        # Initial state can always be entered
-        if is_initial:
+                return time.time() - self.topic_last_received[topic] <= timeout
             return True
 
-        state = self.states[state_name]
-        condition_type = state.entry_condition_type
-        params = state.entry_condition_params
-
-        if condition_type == 'always' or condition_type == ConditionType.ALWAYS.value:
-            return True
-
-        elif condition_type == 'timer' or condition_type == ConditionType.TIMER.value:
-            # Check if enough time has passed in current state
-            if self.current_state is None:
-                return False
-
-            current = self.states[self.current_state]
-            if current.entry_time is None:
-                return False
-
-            duration = params.get('duration', 0.0)
-            elapsed = time.time() - current.entry_time
-            return elapsed >= duration
-
-        elif condition_type == 'topic_value' or condition_type == ConditionType.TOPIC_VALUE.value:
-            # Check if a specific topic value meets criteria
-            key = params.get('key', '')
-            operator = params.get('operator', '==')
-            value = params.get('value')
-
-            if key not in self.sensor_topic_values:
-                return False
-
-            actual_value = self.sensor_topic_values[key]
-            return self._compare_values(actual_value, operator, value)
-
-        else:
-            self.logger(f'WARNING: Unknown condition type: {condition_type}')
-            return False
+        self.logger(f'WARNING: Unknown condition type: {cond_type}')
+        return False
 
     def _compare_values(self, actual: Any, operator: str, expected: Any) -> bool:
-        """Compare two values using the given operator."""
         if operator == '==':
             return actual == expected
-        elif operator == '!=':
+        if operator == '!=':
             return actual != expected
-        elif operator == '>':
+        if operator == '>':
             return actual > expected
-        elif operator == '<':
+        if operator == '<':
             return actual < expected
-        elif operator == '>=':
+        if operator == '>=':
             return actual >= expected
-        elif operator == '<=':
+        if operator == '<=':
             return actual <= expected
-        else:
-            self.logger(f'WARNING: Unknown operator: {operator}')
-            return False
+        self.logger(f'WARNING: Unknown operator: {operator}')
+        return False
+
+    # ----------------------------------------------------------- manual moves
 
     def transition_to_state(self, new_state: str) -> bool:
-        """
-        Transition to a new state.
-
-        Args:
-            new_state: Name of the state to transition to
-
-        Returns:
-            True if transition successful, False otherwise
-        """
+        """Force a transition to ``new_state``. Returns True on success."""
         if new_state not in self.states:
             self.logger(f'ERROR: Cannot transition to unknown state: {new_state}')
             return False
 
         old_state = self.current_state
-
-        # Update state
         self.current_state = new_state
         self.states[new_state].entry_time = time.time()
         self.states[new_state].condition_met = True
@@ -497,39 +450,29 @@ class StateMachine:
         self.logger(f'Transitioned from {old_state} to {new_state}')
         return True
 
-    def get_current_state_tasks(self) -> List[Dict[str, Any]]:
-        """
-        Get tasks for the current state.
+    # ------------------------------------------------------------------ tasks
 
-        Returns:
-            List of task dictionaries
-        """
+    def get_current_state_tasks(self) -> List[Dict[str, Any]]:
         if self.current_state and self.current_state in self.states:
             return self.states[self.current_state].tasks
         return []
 
     def mark_tasks_completed(self):
-        """Mark current state's tasks as completed."""
         if self.current_state and self.current_state in self.states:
             self.states[self.current_state].task_completed = True
 
-    def get_status(self) -> Dict[str, Any]:
-        """
-        Get current state machine status.
+    # ----------------------------------------------------------------- status
 
-        Returns:
-            Dictionary with status information
-        """
+    def get_status(self) -> Dict[str, Any]:
         if self.current_state is None:
             return {
                 'configured': False,
                 'current_state': None,
-                'timestamp': time.time()
+                'timestamp': time.time(),
             }
 
         current = self.states[self.current_state]
         elapsed = time.time() - current.entry_time if current.entry_time else 0
-
         return {
             'configured': True,
             'name': self.config.get('name', 'unnamed') if self.config else 'unnamed',
@@ -538,7 +481,8 @@ class StateMachine:
             'time_in_state': elapsed,
             'condition_met': current.condition_met,
             'task_completed': current.task_completed,
+            'is_leaf_state': current.isLeafState(),
             'num_states': len(self.states),
-            'num_transitions': len(self.transitions),
-            'timestamp': time.time()
+            'num_exits': len(current.exits),
+            'timestamp': time.time(),
         }
