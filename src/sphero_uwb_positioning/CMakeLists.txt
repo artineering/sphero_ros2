@@ -7,16 +7,8 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-find_package(std_msgs REQUIRED)
 
-# Generate messages
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/SpheroUWBStatus.msg"
-  DEPENDENCIES std_msgs
-)
-
-# Install Python modules manually (rosidl_generate_interfaces already calls ament_python_install_package)
+# Install Python modules
 install(DIRECTORY ${PROJECT_NAME}/
   DESTINATION lib/python3.12/site-packages/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.py"
@@ -24,9 +16,9 @@ install(DIRECTORY ${PROJECT_NAME}/
 
 # Install Python executables
 install(PROGRAMS
-  ${PROJECT_NAME}/sphero_uwb_positioning_node.py
+  ${PROJECT_NAME}/ble_position_node.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME sphero_uwb_positioning_node
+  RENAME ble_position_node
 )
 
 # Install config and launch files

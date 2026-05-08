@@ -2,25 +2,19 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>sphero_uwb_positioning</name>
-  <version>1.0.0</version>
-  <description>UWB-based positioning system for Sphero robots using WiFi-enabled anchors</description>
-  <maintainer email="svaghela@todo.todo">svaghela</maintainer>
+  <version>2.0.0</version>
+  <description>BLE-based UWB positioning bridge: passively scans tag advertisements and republishes positions on ROS topics.</description>
+  <maintainer email="siddharth.vaghela@tufts.edu">svaghela</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
-  <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
-  <depend>visualization_msgs</depend>
   <depend>diagnostic_msgs</depend>
-  <depend>std_msgs</depend>
-  <depend>tf2_ros</depend>
 
-  <exec_depend>rosidl_default_runtime</exec_depend>
-
-  <member_of_group>rosidl_interface_packages</member_of_group>
+  <exec_depend>python3-bleak</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
