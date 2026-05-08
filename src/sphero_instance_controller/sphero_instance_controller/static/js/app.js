@@ -1241,6 +1241,27 @@ function updateTaskStatusDisplay(taskStatus) {
 
 // ===== State Machine Functions =====
 
+async function _smRuntimeAction(endpoint, label) {
+    try {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await response.json();
+        if (data.success) {
+            showStateMachineMessage(`${label} requested`, 'success');
+        } else {
+            showStateMachineMessage(`Failed to ${label.toLowerCase()}: ${data.message || 'unknown error'}`, 'error');
+        }
+    } catch (error) {
+        showStateMachineMessage(`Error: ${error.message}`, 'error');
+    }
+}
+
+function pauseStateMachine()  { return _smRuntimeAction('/api/state_machine/pause',  'Pause');  }
+function resumeStateMachine() { return _smRuntimeAction('/api/state_machine/resume', 'Resume'); }
+function clearStateMachine()  { return _smRuntimeAction('/api/state_machine/clear',  'Clear');  }
+
 async function sendStateMachineConfig() {
     try {
         const configText = document.getElementById('sm-config-editor').value.trim();
@@ -1368,6 +1389,23 @@ function updateStateMachineStatusDisplay(smStatus) {
     const exitsEl = document.getElementById('sm-num-exits');
     if (exitsEl) {
         exitsEl.textContent = smStatus.num_exits ?? '--';
+    }
+
+    const pausedEl = document.getElementById('sm-paused');
+    if (pausedEl) {
+        pausedEl.textContent = smStatus.paused === undefined ? '--' : (smStatus.paused ? 'Yes' : 'No');
+    }
+    const pauseBtn = document.getElementById('sm-pause-resume-btn');
+    if (pauseBtn) {
+        const configured = smStatus.configured;
+        if (smStatus.paused) {
+            pauseBtn.textContent = 'Resume';
+            pauseBtn.onclick = resumeStateMachine;
+        } else {
+            pauseBtn.textContent = 'Pause';
+            pauseBtn.onclick = pauseStateMachine;
+        }
+        pauseBtn.disabled = !configured;
     }
 
     document.getElementById('sm-status-data').textContent = JSON.stringify(smStatus, null, 2);

@@ -108,6 +108,15 @@ class SpheroInstanceStateMachineController(Node):
             callback_group=self.callback_group
         )
 
+        # Runtime control subscriber (pause / resume / clear)
+        self.control_sub = self.create_subscription(
+            String,
+            f'{self.topic_prefix}/state_machine/control',
+            self.control_callback,
+            10,
+            callback_group=self.callback_group
+        )
+
     def _create_publishers(self):
         """Create all ROS publishers."""
         # Status publisher
@@ -140,6 +149,7 @@ class SpheroInstanceStateMachineController(Node):
         self.get_logger().info(f'Topic Prefix: {self.topic_prefix}')
         self.get_logger().info('Subscribed Topics:')
         self.get_logger().info(f'  - {self.topic_prefix}/state_machine/config')
+        self.get_logger().info(f'  - {self.topic_prefix}/state_machine/control')
         self.get_logger().info(f'  - {self.topic_prefix}/sensors')
         self.get_logger().info(f'  - Dynamic collision topics (when configured)')
         self.get_logger().info('Publishing Topics:')
@@ -251,6 +261,31 @@ class SpheroInstanceStateMachineController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Failed to process sensor data: {e}')
+
+    def control_callback(self, msg: String):
+        """
+        Handle runtime control messages.
+
+        Expected JSON: ``{"action": "pause" | "resume" | "clear"}``.
+        """
+        try:
+            data = json.loads(msg.data)
+            action = (data.get('action') or '').lower()
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in control command: {e}')
+            return
+
+        if action == 'pause':
+            ok = self.state_machine.pause()
+            self.publish_event('sm_paused', {'success': ok})
+        elif action == 'resume':
+            ok = self.state_machine.resume()
+            self.publish_event('sm_resumed', {'success': ok})
+        elif action == 'clear':
+            self.state_machine.clear()
+            self.publish_event('sm_cleared', {})
+        else:
+            self.get_logger().warning(f'Unknown control action: "{action}"')
 
     # ===== Dynamic Topic Subscriptions =====
 

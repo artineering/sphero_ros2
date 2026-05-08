@@ -198,6 +198,12 @@ class SpheroInstanceWebSocketServer(Node):
             10
         )
 
+        self.sm_control_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/state_machine/control',
+            10
+        )
+
     # ===== Callbacks =====
 
     def state_callback(self, msg: String):
@@ -454,6 +460,12 @@ class SpheroInstanceWebSocketServer(Node):
         msg.data = json.dumps(config)
         self.sm_config_pub.publish(msg)
 
+    def publish_sm_control(self, action: str):
+        """Publish a state-machine control command (pause / resume / clear)."""
+        msg = String()
+        msg.data = json.dumps({'action': action})
+        self.sm_control_pub.publish(msg)
+
     def publish_matrix_command(self, pattern: str, red: int = 255, green: int = 255, blue: int = 255):
         """Publish matrix pattern command."""
         msg = String()
@@ -671,6 +683,27 @@ def create_flask_app(node: SpheroInstanceWebSocketServer):
             return jsonify({'success': False, 'message': 'Request body must be JSON'}), 400
         node.publish_sm_config(data)
         return jsonify({'success': True, 'message': 'Configuration published'})
+
+    @app.route('/api/state_machine/pause', methods=['POST'])
+    def api_state_machine_pause():
+        """Pause the running state machine (preserves config and elapsed timers)."""
+        from flask import jsonify
+        node.publish_sm_control('pause')
+        return jsonify({'success': True, 'message': 'Pause requested'})
+
+    @app.route('/api/state_machine/resume', methods=['POST'])
+    def api_state_machine_resume():
+        """Resume a paused state machine."""
+        from flask import jsonify
+        node.publish_sm_control('resume')
+        return jsonify({'success': True, 'message': 'Resume requested'})
+
+    @app.route('/api/state_machine/clear', methods=['POST'])
+    def api_state_machine_clear():
+        """Clear the loaded state machine and unsubscribe from condition topics."""
+        from flask import jsonify
+        node.publish_sm_control('clear')
+        return jsonify({'success': True, 'message': 'Clear requested'})
 
     # WebSocket event handlers
 

@@ -181,7 +181,11 @@
                         <button class="btn btn-primary" onclick="sendStateMachineConfig()">Send Configuration</button>
                         <button class="btn btn-success" onclick="validateStateMachineConfig()">Validate JSON</button>
                         <button class="btn btn-secondary" onclick="loadStateMachineTemplate()">Load Template</button>
-                        <button class="btn btn-danger" onclick="clearStateMachineConfig()">Clear</button>
+                        <button class="btn btn-secondary" onclick="clearStateMachineConfig()">Clear Editor</button>
+                    </div>
+                    <div class="button-group" style="margin-top: 10px;">
+                        <button class="btn btn-warning" id="sm-pause-resume-btn" onclick="pauseStateMachine()">Pause</button>
+                        <button class="btn btn-danger" onclick="clearStateMachine()">Clear State Machine</button>
                     </div>
                     <div id="sm-config-status" style="margin-top: 10px;"></div>
                 </div>
@@ -196,6 +200,7 @@
                         <p><strong>Task Completed:</strong> <span id="sm-task-completed">--</span></p>
                         <p><strong>Leaf State:</strong> <span id="sm-is-leaf">--</span></p>
                         <p><strong>Exits:</strong> <span id="sm-num-exits">--</span></p>
+                        <p><strong>Paused:</strong> <span id="sm-paused">--</span></p>
                     </div>
                     <div class="raw-data">
                         <h4>State Machine Details</h4>

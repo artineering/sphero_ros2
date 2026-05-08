@@ -624,3 +624,161 @@ class TestGetStatus:
         s = sm.get_status()
         assert s['is_leaf_state'] is True
         assert s['num_exits'] == 0
+
+
+# --------------------------------------------------------------- L. pause/resume
+
+
+class TestPauseResume:
+    def test_pause_when_unconfigured_returns_false(self, sm):
+        assert sm.pause() is False
+        assert sm.paused is False
+
+    def test_pause_happy_path_sets_flag(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        assert sm.pause() is True
+        assert sm.paused is True
+
+    def test_pause_when_already_paused_returns_false(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        sm.pause()
+        assert sm.pause() is False
+
+    def test_resume_when_not_paused_returns_false(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        assert sm.resume() is False
+
+    def test_resume_clears_flag(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        sm.pause()
+        assert sm.resume() is True
+        assert sm.paused is False
+
+    def test_paused_process_returns_status_with_no_events(self, sm, clock):
+        sm.configure(_hop_via({'type': 'always'}))
+        sm.pause()
+        result = sm.process()
+        assert result['paused'] is True
+        assert result['events'] == []
+        # Crucially, current_state did NOT advance even though `always` would normally fire.
+        assert sm.current_state == 'A'
+
+    def test_paused_process_does_not_fire_timer_exit(self, sm, clock):
+        sm.configure(_hop_via({'type': 'timer', 'duration': 5}))
+        clock.advance(2.0)
+        sm.pause()
+        clock.advance(10.0)  # would fire if not paused
+        sm.process()
+        assert sm.current_state == 'A'
+        sm.resume()
+        sm.process()  # immediately after resume the timer is still mid-flight
+        assert sm.current_state == 'A'
+        clock.advance(3.0)  # post-resume, 2 + 3 = 5s of unpaused time
+        sm.process()
+        assert sm.current_state == 'B'
+
+    def test_resume_shifts_entry_time_forward_by_paused_duration(self, sm, clock):
+        sm.configure(make_config([_leaf('A')]))
+        original_entry = sm.states['A'].entry_time
+        clock.advance(2.0)
+        sm.pause()
+        clock.advance(7.0)
+        sm.resume()
+        # entry_time should have moved forward by exactly the paused duration (7.0).
+        assert sm.states['A'].entry_time == pytest.approx(original_entry + 7.0)
+
+    def test_resume_shifts_topic_last_received_forward(self, sm, clock):
+        sm.configure(_hop_via({'type': 'topic_message', 'topic': '/halt', 'timeout': 5.0}))
+        sm.update_topic_value('/halt', None)
+        ts_before = sm.topic_last_received['/halt']
+        clock.advance(1.0)
+        sm.pause()
+        clock.advance(10.0)
+        sm.resume()
+        assert sm.topic_last_received['/halt'] == pytest.approx(ts_before + 10.0)
+        # Within the 5s window measured from the *shifted* timestamp, the exit fires.
+        sm.process()
+        assert sm.current_state == 'B'
+
+
+# ----------------------------------------------------------------- M. clear
+
+
+class TestClear:
+    def test_clear_resets_to_unconfigured(self, sm):
+        sm.configure(_hop_via({'type': 'always'}))
+        sm.clear()
+        assert sm.current_state is None
+        assert sm.states == {}
+        assert sm.config is None
+        assert sm.paused is False
+
+    def test_clear_when_unconfigured_is_safe_noop(self, sm):
+        # No exception, no state change.
+        sm.clear()
+        assert sm.current_state is None
+
+    def test_clear_calls_unsubscribe_for_each_subscribed_topic(self, clock, log):
+        unsub_calls = []
+        sub_calls = []
+        sm = StateMachine(
+            logger=log,
+            topic_subscribe_callback=lambda t, m, f: sub_calls.append(t),
+            topic_unsubscribe_callback=lambda t: unsub_calls.append(t),
+        )
+        cfg = make_config([
+            _state('A', exits=[
+                {'condition': {'type': 'topic_value', 'topic': '/v',
+                               'msg_type': 'std_msgs/Float32',
+                               'operator': '>', 'value': 1.0},
+                 'destination': 'B'},
+            ]),
+            _leaf('B'),
+        ])
+        sm.configure(cfg)
+        sm.update_topic_value('/v', 0.0)
+        sm.clear()
+        assert '/v' in unsub_calls
+
+    def test_clear_clears_topic_value_caches(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        sm.update_topic_value('/x', 42)
+        sm.update_sensor_data({'velocity_x': 1.0})
+        sm.clear()
+        assert sm.topic_values == {}
+        assert sm.topic_last_received == {}
+        assert sm.sensor_topic_values == {}
+
+    def test_clear_then_configure_again_works(self, sm, clock):
+        sm.configure(_hop_via({'type': 'always'}))
+        sm.clear()
+        clock.advance(1.0)
+        # Reconfigure with a fresh config; fresh state machine should be live.
+        sm.configure(_hop_via({'type': 'timer', 'duration': 2.0}))
+        assert sm.current_state == 'A'
+        clock.advance(2.0)
+        sm.process()
+        assert sm.current_state == 'B'
+
+    def test_clear_drops_paused_state(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        sm.pause()
+        sm.clear()
+        assert sm.paused is False
+
+
+# ----------------------------------------------------- N. paused field in status
+
+
+class TestStatusPausedField:
+    def test_unconfigured_status_includes_paused(self, sm):
+        s = sm.get_status()
+        assert s['paused'] is False
+
+    def test_configured_status_includes_paused(self, sm):
+        sm.configure(make_config([_leaf('A')]))
+        s = sm.get_status()
+        assert s['paused'] is False
+        sm.pause()
+        s = sm.get_status()
+        assert s['paused'] is True

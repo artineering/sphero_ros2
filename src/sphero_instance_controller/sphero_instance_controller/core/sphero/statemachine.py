@@ -118,6 +118,12 @@ class StateMachine:
         self.states: Dict[str, DynamicState] = {}
         self.current_state: Optional[str] = None
 
+        # Pause / resume state. While paused, process() returns a status dict
+        # with no events; on resume, every entry_time / topic_last_received is
+        # shifted forward by the paused duration so elapsed-time math is correct.
+        self.paused: bool = False
+        self._pause_started_at: Optional[float] = None
+
         # Sensor data is kept for backward compatibility with the ROS2 controller
         # node, which calls update_sensor_data(). It is no longer evaluated by the
         # condition engine — exit/entry conditions read from topic_values only.
@@ -298,6 +304,9 @@ class StateMachine:
                                 f'is missing "msg_type"; cannot subscribe.'
                             )
 
+        self.paused = False
+        self._pause_started_at = None
+
         self.current_state = config['initial_state']
         self.states[self.current_state].entry_time = time.time()
         self.states[self.current_state].condition_met = True
@@ -323,6 +332,47 @@ class StateMachine:
         self.topic_values[topic_name] = value
         self.topic_last_received[topic_name] = time.time()
 
+    # -------------------------------------------------------------- pause/clear
+
+    def pause(self) -> bool:
+        """Pause ticking. Returns False if no current state or already paused."""
+        if self.current_state is None or self.paused:
+            return False
+        self.paused = True
+        self._pause_started_at = time.time()
+        self.logger('State machine paused')
+        return True
+
+    def resume(self) -> bool:
+        """Resume ticking; shift entry/timestamp clocks so paused time doesn't count."""
+        if not self.paused:
+            return False
+        paused_duration = time.time() - (self._pause_started_at or time.time())
+        for state in self.states.values():
+            if state.entry_time is not None:
+                state.entry_time += paused_duration
+        for topic in list(self.topic_last_received.keys()):
+            self.topic_last_received[topic] += paused_duration
+        self.paused = False
+        self._pause_started_at = None
+        self.logger(f'State machine resumed (paused for {paused_duration:.2f}s)')
+        return True
+
+    def clear(self) -> None:
+        """Drop the loaded state machine and unsubscribe from all condition topics."""
+        if self.topic_unsubscribe_callback:
+            for topic_name in list(self.topic_values.keys()):
+                self.topic_unsubscribe_callback(topic_name)
+        self.config = None
+        self.states = {}
+        self.current_state = None
+        self.paused = False
+        self._pause_started_at = None
+        self.sensor_topic_values.clear()
+        self.topic_values.clear()
+        self.topic_last_received.clear()
+        self.logger('State machine cleared')
+
     # ------------------------------------------------------------------- tick
 
     def process(self) -> Optional[Dict[str, Any]]:
@@ -330,8 +380,17 @@ class StateMachine:
         if self.current_state is None or not self.states:
             return None
 
-        events = []
         current = self.states[self.current_state]
+
+        if self.paused:
+            return {
+                'current_state': self.current_state,
+                'events': [],
+                'paused': True,
+                'time_in_state': time.time() - current.entry_time if current.entry_time else 0,
+            }
+
+        events = []
 
         if current.timeout is not None and current.entry_time is not None:
             elapsed = time.time() - current.entry_time
@@ -468,6 +527,7 @@ class StateMachine:
             return {
                 'configured': False,
                 'current_state': None,
+                'paused': False,
                 'timestamp': time.time(),
             }
 
@@ -484,5 +544,6 @@ class StateMachine:
             'is_leaf_state': current.isLeafState(),
             'num_states': len(self.states),
             'num_exits': len(current.exits),
+            'paused': self.paused,
             'timestamp': time.time(),
         }
