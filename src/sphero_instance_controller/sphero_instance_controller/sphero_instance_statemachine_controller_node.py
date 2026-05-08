@@ -160,6 +160,11 @@ class SpheroInstanceStateMachineController(Node):
         """
         Handle incoming state machine configuration.
 
+        Each state owns its own ``exits[]`` list. Every exit pairs a
+        ``condition`` (always | timer | topic_value | topic_message) with a
+        ``destination`` state. A state with no ``exits`` is a leaf state.
+        There is no top-level ``transitions`` block.
+
         Expected JSON format:
         {
             "name": "my_state_machine",
@@ -168,30 +173,27 @@ class SpheroInstanceStateMachineController(Node):
                 {
                     "name": "idle",
                     "description": "Waiting state",
-                    "entry_condition": {
-                        "type": "always",
-                        "params": {}
-                    },
+                    "entry_condition": {"type": "always"},
                     "tasks": [
                         {
                             "task_type": "set_led",
                             "parameters": {"red": 0, "green": 0, "blue": 255}
                         }
+                    ],
+                    "exits": [
+                        {
+                            "condition": {"type": "timer", "duration": 5.0},
+                            "destination": "moving"
+                        }
                     ]
                 },
-                ...
-            ],
-            "transitions": [
                 {
-                    "source": "idle",
-                    "destination": "moving",
-                    "trigger": "timer_based",
-                    "condition": {
-                        "type": "timer",
-                        "duration": 5.0
-                    }
-                },
-                ...
+                    "name": "moving",
+                    "description": "Final state - leaf (no exits)",
+                    "tasks": [
+                        {"task_type": "roll", "parameters": {"speed": 50, "heading": 0}}
+                    ]
+                }
             ]
         }
         """
@@ -205,7 +207,6 @@ class SpheroInstanceStateMachineController(Node):
                 self.publish_event('configuration_loaded', {
                     'name': config.get('name', 'unnamed'),
                     'num_states': len(self.state_machine.states),
-                    'num_transitions': len(self.state_machine.transitions)
                 })
 
                 # Execute initial state tasks
@@ -224,11 +225,12 @@ class SpheroInstanceStateMachineController(Node):
         """
         Handle incoming Sphero sensor data for condition evaluation.
 
-        Converts SpheroSensor message to a dictionary for easy condition checking.
+        Each field is fed into the state machine's topic-value store under its
+        own field name (e.g. ``velocity_x``). Exit conditions can reference them
+        as ``{type: topic_value, topic: 'velocity_x', operator: '>', value: 0.5}``.
         """
         try:
-            # Convert SpheroSensor message to dictionary for condition evaluation
-            sensor_data = {
+            sensor_fields = {
                 'pitch': msg.pitch,
                 'roll': msg.roll,
                 'yaw': msg.yaw,
@@ -242,11 +244,10 @@ class SpheroInstanceStateMachineController(Node):
                 'y': msg.y,
                 'velocity_x': msg.velocity_x,
                 'velocity_y': msg.velocity_y,
-                'battery_percentage': msg.battery_percentage
+                'battery_percentage': msg.battery_percentage,
             }
-
-            # Update state machine with sensor data
-            self.state_machine.update_sensor_data(sensor_data)
+            for field_name, value in sensor_fields.items():
+                self.state_machine.update_topic_value(field_name, value)
 
         except Exception as e:
             self.get_logger().error(f'Failed to process sensor data: {e}')
