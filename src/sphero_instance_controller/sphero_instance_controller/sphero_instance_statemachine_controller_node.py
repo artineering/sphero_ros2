@@ -58,6 +58,10 @@ class SpheroInstanceStateMachineController(Node):
             topic_unsubscribe_callback=self.unsubscribe_from_topic
         )
 
+        # Cache of the previously-active path so we can compute the entered
+        # branch (newly-active levels) on each state_transition event.
+        self._previous_path = []
+
         # Dynamic topic subscriptions for state machine conditions
         self.topic_subscriptions = {}
         self.topic_message_types = {}
@@ -283,6 +287,7 @@ class SpheroInstanceStateMachineController(Node):
             self.publish_event('sm_resumed', {'success': ok})
         elif action == 'clear':
             self.state_machine.clear()
+            self._previous_path = []
             self.publish_event('sm_cleared', {})
         else:
             self.get_logger().warning(f'Unknown control action: "{action}"')
@@ -329,23 +334,24 @@ class SpheroInstanceStateMachineController(Node):
                 'field_path': field_path
             }
 
-            # Create callback that stores the received message
+            # Create callback that stores the received message under the RAW topic
+            # name (not the namespaced one) so SM condition lookups by
+            # ``condition['topic']`` match. The actual ROS subscription still uses
+            # the namespaced topic; only the SM-side key needs to match the config.
             def topic_callback(msg):
-                # Extract specific field if specified
                 if field_path:
                     try:
                         value = msg
                         for field in field_path.split('.'):
                             value = getattr(value, field)
-                        self.state_machine.update_topic_value(namespaced_topic, value)
+                        self.state_machine.update_topic_value(topic_name, value)
                     except AttributeError as e:
                         self.get_logger().error(f'Failed to extract field {field_path} from {namespaced_topic}: {e}')
-                        self.state_machine.update_topic_value(namespaced_topic, msg)
+                        self.state_machine.update_topic_value(topic_name, msg)
                 else:
-                    # Store the entire message
-                    self.state_machine.update_topic_value(namespaced_topic, msg)
+                    self.state_machine.update_topic_value(topic_name, msg)
 
-                self.get_logger().debug(f'Received message on {namespaced_topic}')
+                self.get_logger().debug(f'Received message on {namespaced_topic} (key: {topic_name})')
 
             # Create subscription with default QoS
             qos = QoSProfile(
@@ -401,61 +407,88 @@ class SpheroInstanceStateMachineController(Node):
             event_type = event.get('type')
 
             if event_type == 'state_timeout':
+                path_str = '·'.join(event.get('path') or [event.get('state', '?')])
                 self.get_logger().warning(
-                    f'State {event["state"]} timed out after {event["elapsed"]:.1f}s'
+                    f'State {path_str} timed out after {event["elapsed"]:.1f}s'
                 )
                 self.publish_event('state_timeout', event)
 
             elif event_type == 'state_transition':
+                path_str = '·'.join(event.get('path') or [event.get('to', '?')])
                 self.get_logger().info(
-                    f'Transitioned from {event["from"]} to {event["to"]}'
+                    f'Transitioned to {path_str} (from {event.get("from", "?")})'
                 )
                 self.publish_event('state_transition', event)
 
-                # Execute new state's tasks
-                self.execute_current_state_tasks()
+                # Execute tasks for every newly-entered state on the new path.
+                self.execute_tasks_for_entered_branch(event.get('path') or [])
 
-    def execute_current_state_tasks(self):
-        """Execute tasks for the current state."""
-        tasks = self.state_machine.get_current_state_tasks()
+    def execute_tasks_for_entered_branch(self, new_path):
+        """Run on-entry tasks for each state newly active on the path.
 
+        Compares ``new_path`` against the cached previous path; any level whose
+        state name has changed (or is new) is considered entered, and its tasks
+        are dispatched in root-to-leaf order. Levels that are unchanged are
+        skipped — their tasks already fired when they were first entered.
+        """
+        old_path = self._previous_path
+        for depth, state_name in enumerate(new_path):
+            unchanged = depth < len(old_path) and old_path[depth] == state_name
+            if unchanged:
+                continue
+            self._dispatch_tasks_for_state(new_path, depth, state_name)
+
+        self._previous_path = list(new_path)
+        self.state_machine.mark_tasks_completed()
+
+    def _dispatch_tasks_for_state(self, path, depth, state_name):
+        """Resolve the state at ``path[:depth+1]`` in the SM tree and publish its tasks."""
+        path_to_here = path[:depth + 1]
+        bundles = self.state_machine.get_tasks_for_path(path_to_here)
+        if not bundles:
+            return
+        bundle = bundles[-1]  # tasks for state at this depth
+        tasks = bundle.get('tasks') or []
         if not tasks:
-            self.get_logger().info('No tasks to execute for current state')
-            self.state_machine.mark_tasks_completed()
             return
 
-        current_state = self.state_machine.current_state
-        self.get_logger().info(f'Executing {len(tasks)} task(s) for state {current_state}')
+        path_str = '·'.join(path_to_here)
+        self.get_logger().info(f'Executing {len(tasks)} task(s) for {path_str}')
 
-        # Execute each task in the array
         for idx, task in enumerate(tasks):
-            # Convert old format (type/params) to new format (task_type/parameters)
             task_type = task.get('task_type') or task.get('type', 'none')
             task_params = task.get('parameters') or task.get('params', {})
 
             self.get_logger().info(f'  Task {idx + 1}/{len(tasks)}: {task_type}')
 
-            # Publish task command in TaskExecutor format
             task_command = {
-                'task_id': f'sm_{current_state}_{idx}',
+                'task_id': f'sm_{state_name}_{idx}',
                 'task_type': task_type,
-                'parameters': task_params
+                'parameters': task_params,
             }
-
             msg = String()
             msg.data = json.dumps(task_command)
             self.task_pub.publish(msg)
 
-            # Publish task execution event
             self.publish_event('task_executed', {
-                'state': current_state,
+                'state': state_name,
+                'path': path_to_here,
                 'task_type': task_type,
                 'params': task_params,
                 'task_index': idx,
-                'total_tasks': len(tasks)
+                'total_tasks': len(tasks),
             })
 
-        self.state_machine.mark_tasks_completed()
+    def execute_current_state_tasks(self):
+        """Run on-entry tasks for every state on the current active path (used after configure())."""
+        path = self.state_machine.get_active_path()
+        if not path:
+            self.get_logger().info('No tasks to execute (state machine has no active path)')
+            self.state_machine.mark_tasks_completed()
+            return
+        # Treat the whole path as freshly entered.
+        self._previous_path = []
+        self.execute_tasks_for_entered_branch(path)
 
     def publish_status(self):
         """Publish current state machine status."""

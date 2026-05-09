@@ -1337,6 +1337,90 @@ function loadStateMachineTemplate() {
     showStateMachineMessage('Template loaded', 'success');
 }
 
+function loadCompositeStateMachineTemplate() {
+    // Composite-state demo: a `patrol` parent state with a 4-direction LED cycle
+    // sub-machine (north → east → south → west, 2s each), and a top-level
+    // supervisor exit that breaks out to `idle` whenever any message arrives on
+    // /halt. After an interrupt, re-entering `patrol` (via /resume) starts back
+    // at `north` — no history.
+    //
+    // Trigger from a shell:
+    //   ros2 topic pub --once /sphero/<NAME>/halt   std_msgs/msg/Empty '{}'
+    //   ros2 topic pub --once /sphero/<NAME>/resume std_msgs/msg/Empty '{}'
+    const template = {
+        name: "Patrol with Halt Supervisor",
+        initial_state: "patrol",
+        states: [
+            {
+                name: "idle",
+                description: "Halted — awaiting /resume to re-enter patrol",
+                tasks: [
+                    {task_type: "set_led", parameters: {red: 255, green: 50, blue: 0}}
+                ],
+                exits: [
+                    {
+                        condition: {
+                            type: "topic_message",
+                            topic: "resume",
+                            msg_type: "std_msgs/Empty",
+                            timeout: 2.0
+                        },
+                        destination: "patrol"
+                    }
+                ]
+            },
+            {
+                name: "patrol",
+                description: "4-direction LED patrol; supervisor exit on /halt",
+                exits: [
+                    {
+                        condition: {
+                            type: "topic_message",
+                            topic: "halt",
+                            msg_type: "std_msgs/Empty",
+                            timeout: 2.0
+                        },
+                        destination: "idle"
+                    }
+                ],
+                sub_machine: {
+                    name: "patrol_cycle",
+                    initial_state: "north",
+                    states: [
+                        {
+                            name: "north",
+                            description: "Pointing north — green",
+                            tasks: [{task_type: "set_led", parameters: {red: 0, green: 255, blue: 0}}],
+                            exits: [{condition: {type: "timer", duration: 2.0}, destination: "east"}]
+                        },
+                        {
+                            name: "east",
+                            description: "Pointing east — cyan",
+                            tasks: [{task_type: "set_led", parameters: {red: 0, green: 200, blue: 255}}],
+                            exits: [{condition: {type: "timer", duration: 2.0}, destination: "south"}]
+                        },
+                        {
+                            name: "south",
+                            description: "Pointing south — amber",
+                            tasks: [{task_type: "set_led", parameters: {red: 255, green: 170, blue: 0}}],
+                            exits: [{condition: {type: "timer", duration: 2.0}, destination: "west"}]
+                        },
+                        {
+                            name: "west",
+                            description: "Pointing west — magenta",
+                            tasks: [{task_type: "set_led", parameters: {red: 200, green: 0, blue: 255}}],
+                            exits: [{condition: {type: "timer", duration: 2.0}, destination: "north"}]
+                        }
+                    ]
+                }
+            }
+        ]
+    };
+
+    document.getElementById('sm-config-editor').value = JSON.stringify(template, null, 2);
+    showStateMachineMessage('Composite template loaded — publish to /halt to interrupt; /resume to re-enter (LED cycles N→E→S→W from north every 2s)', 'success');
+}
+
 function clearStateMachineConfig() {
     document.getElementById('sm-config-editor').value = '';
     showStateMachineMessage('Configuration cleared', 'success');
@@ -1366,6 +1450,16 @@ function updateStateMachineStatusDisplay(smStatus) {
     const exitsEl = document.getElementById('sm-num-exits');
     if (exitsEl) {
         exitsEl.textContent = smStatus.num_exits ?? '--';
+    }
+    const pathEl = document.getElementById('sm-path');
+    if (pathEl) {
+        if (Array.isArray(smStatus.path) && smStatus.path.length > 0) {
+            pathEl.textContent = smStatus.path.join(' · ');
+        } else if (smStatus.current_state) {
+            pathEl.textContent = smStatus.current_state;
+        } else {
+            pathEl.textContent = '--';
+        }
     }
 
     const pausedEl = document.getElementById('sm-paused');

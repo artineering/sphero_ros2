@@ -58,6 +58,11 @@ class DynamicState:
     description: str = ''
     timeout: Optional[float] = None
 
+    # Composite-state attachment. Built and assigned by the parent StateMachine
+    # during _build_state_machine — populated only when the state's config carries
+    # a `sub_machine` block.
+    sub_machine: Optional[Any] = None
+
     entry_time: Optional[float] = None
     condition_met: bool = False
     task_completed: bool = False
@@ -87,6 +92,10 @@ class DynamicState:
         """Return True if this state has no exits and will never transition out."""
         return len(self.exits) == 0
 
+    def isComposite(self) -> bool:
+        """Return True if this state has a nested sub-machine."""
+        return self.sub_machine is not None
+
 
 class StateMachine:
     """
@@ -101,6 +110,10 @@ class StateMachine:
         logger: Optional[Callable] = None,
         topic_subscribe_callback: Optional[Callable] = None,
         topic_unsubscribe_callback: Optional[Callable] = None,
+        topic_values: Optional[Dict[str, Any]] = None,
+        topic_last_received: Optional[Dict[str, float]] = None,
+        active_subscriptions: Optional[Dict[str, int]] = None,
+        depth: int = 0,
     ):
         """
         Args:
@@ -109,10 +122,17 @@ class StateMachine:
                 for every topic referenced by an entry/exit condition.
             topic_unsubscribe_callback: Called with ``(topic_name)`` to unsubscribe
                 when the configuration changes.
+            topic_values, topic_last_received: When provided, the SM shares these
+                dicts by reference instead of owning its own. Used by nested
+                sub-machines so a single ``update_topic_value`` at the root is
+                visible to the whole tree.
+            depth: 0 for the top-level SM, +1 for each nesting level. Used for
+                logging only.
         """
         self.logger = logger or self._default_logger
         self.topic_subscribe_callback = topic_subscribe_callback
         self.topic_unsubscribe_callback = topic_unsubscribe_callback
+        self.depth = depth
 
         self.config: Optional[Dict[str, Any]] = None
         self.states: Dict[str, DynamicState] = {}
@@ -129,8 +149,18 @@ class StateMachine:
         # condition engine — exit/entry conditions read from topic_values only.
         self.sensor_topic_values: Dict[str, Any] = {}
 
-        self.topic_values: Dict[str, Any] = {}
-        self.topic_last_received: Dict[str, float] = {}
+        # Nested SMs share the root's topic_values / topic_last_received by
+        # reference so a single update at the root is visible everywhere.
+        self.topic_values: Dict[str, Any] = topic_values if topic_values is not None else {}
+        self.topic_last_received: Dict[str, float] = topic_last_received if topic_last_received is not None else {}
+
+        # Refcount of active subscriptions across the SM tree. Subscriptions are
+        # attached when the owning state becomes active and released when it
+        # exits; the count handles the case of the same topic being referenced
+        # by multiple simultaneously-active states (across nesting levels).
+        self._active_subscriptions: Dict[str, int] = (
+            active_subscriptions if active_subscriptions is not None else {}
+        )
 
     def _default_logger(self, message: str):
         print(f"[StateMachine] {message}")
@@ -212,6 +242,13 @@ class StateMachine:
                 ):
                     return False
 
+            # Recurse into composite states.
+            sub_cfg = state_cfg.get('sub_machine')
+            if sub_cfg is not None:
+                if not self.validate_config(sub_cfg):
+                    self.logger(f'ERROR: state "{name}" has an invalid sub_machine configuration')
+                    return False
+
         return True
 
     def _validate_condition(
@@ -270,48 +307,75 @@ class StateMachine:
         return False
 
     def _build_state_machine(self, config: Dict[str, Any]):
-        """Build state objects, wire subscriptions, set initial state."""
+        """Build state objects, recursively build sub-machines, enter initial state.
+
+        Topic subscriptions are not attached here — each state owns its own
+        condition topics and they get subscribed lazily when the state becomes
+        active (see ``_subscribe_state_topics``).
+        """
         self.config = config
 
-        if self.topic_unsubscribe_callback:
-            for topic_name in list(self.topic_values.keys()):
-                self.topic_unsubscribe_callback(topic_name)
+        # Only the root SM owns the topic stores; nested SMs share by reference.
+        # On reconfigure at the root, release any previously-active subscriptions.
+        if self.depth == 0:
+            self._release_all_active_subscriptions()
+            self.topic_values.clear()
+            self.topic_last_received.clear()
 
         self.states = {}
-        self.topic_values.clear()
-        self.topic_last_received.clear()
 
         for state_cfg in config['states']:
             name = state_cfg['name']
             self.states[name] = DynamicState(name, state_cfg)
-            self.logger(f'Created state: {name}')
+            self.logger(f'{"  " * self.depth}Created state: {name}')
 
-        if self.topic_subscribe_callback:
-            seen = set()
-            for state in self.states.values():
-                for cond in self._iter_state_conditions(state):
-                    ctype = cond.get('type')
-                    if ctype in ('topic_value', 'topic_message'):
-                        topic = cond.get('topic')
-                        msg_type = cond.get('msg_type')
-                        field_path = cond.get('field_path')
-                        if topic and msg_type and topic not in seen:
-                            seen.add(topic)
-                            self.topic_subscribe_callback(topic, msg_type, field_path)
-                        elif topic and not msg_type:
-                            self.logger(
-                                f'WARNING: state "{state.name}" condition on topic "{topic}" '
-                                f'is missing "msg_type"; cannot subscribe.'
-                            )
+            # Surface a one-time warning for missing msg_type so users learn at
+            # configure-time, not when activation silently can't subscribe.
+            for cond in self._iter_state_conditions(self.states[name]):
+                if cond.get('type') in ('topic_value', 'topic_message'):
+                    if cond.get('topic') and not cond.get('msg_type'):
+                        self.logger(
+                            f'WARNING: state "{name}" condition on topic '
+                            f'"{cond.get("topic")}" is missing "msg_type"; '
+                            f'cannot subscribe at activation time.'
+                        )
+
+            # If this state declares a sub_machine, build a nested StateMachine.
+            sub_cfg = state_cfg.get('sub_machine')
+            if sub_cfg:
+                child = StateMachine(
+                    logger=self.logger,
+                    topic_subscribe_callback=self.topic_subscribe_callback,
+                    topic_unsubscribe_callback=self.topic_unsubscribe_callback,
+                    topic_values=self.topic_values,
+                    topic_last_received=self.topic_last_received,
+                    active_subscriptions=self._active_subscriptions,
+                    depth=self.depth + 1,
+                )
+                if not child.configure(sub_cfg):
+                    self.logger(f'ERROR: failed to configure sub_machine for state "{name}"')
+                else:
+                    self.states[name].sub_machine = child
 
         self.paused = False
         self._pause_started_at = None
 
-        self.current_state = config['initial_state']
-        self.states[self.current_state].entry_time = time.time()
-        self.states[self.current_state].condition_met = True
+        # Only the root enters its initial state during build — nested SMs are
+        # entered later when their parent's _enter_initial recurses. Otherwise
+        # a child would be entered twice and its topics subscribed twice.
+        if self.depth == 0:
+            self._enter_initial()
 
-        self.logger(f'State machine ready. Initial state: {self.current_state}')
+        self.logger(f'{"  " * self.depth}State machine ready. Initial state: {self.current_state}')
+
+    def _release_all_active_subscriptions(self) -> None:
+        """Release every currently-active subscription (called only at the root)."""
+        if not self.topic_unsubscribe_callback:
+            self._active_subscriptions.clear()
+            return
+        for topic in list(self._active_subscriptions.keys()):
+            self.topic_unsubscribe_callback(topic)
+        self._active_subscriptions.clear()
 
     @staticmethod
     def _iter_state_conditions(state: DynamicState) -> Iterable[Dict[str, Any]]:
@@ -320,6 +384,75 @@ class StateMachine:
         for exit_spec in state.exits:
             if exit_spec.condition:
                 yield exit_spec.condition
+
+    # ------------------------------------------------- enter / reset helpers
+
+    def _topic_specs_for_state(self, state: DynamicState) -> List[tuple]:
+        """Yield ``(topic, msg_type, field_path)`` for every topic-bearing condition on ``state``."""
+        specs = []
+        seen = set()
+        for cond in self._iter_state_conditions(state):
+            if cond.get('type') in ('topic_value', 'topic_message'):
+                topic = cond.get('topic')
+                msg_type = cond.get('msg_type')
+                if topic and msg_type and topic not in seen:
+                    seen.add(topic)
+                    specs.append((topic, msg_type, cond.get('field_path')))
+        return specs
+
+    def _subscribe_state_topics(self, state: DynamicState) -> None:
+        """Refcount-aware subscribe of every topic referenced by ``state``'s conditions."""
+        for topic, msg_type, field_path in self._topic_specs_for_state(state):
+            new_count = self._active_subscriptions.get(topic, 0) + 1
+            self._active_subscriptions[topic] = new_count
+            if new_count == 1 and self.topic_subscribe_callback:
+                self.topic_subscribe_callback(topic, msg_type, field_path)
+
+    def _unsubscribe_state_topics(self, state: DynamicState) -> None:
+        """Refcount-aware unsubscribe; the underlying callback only fires when refcount hits zero."""
+        for topic, _msg_type, _field_path in self._topic_specs_for_state(state):
+            count = self._active_subscriptions.get(topic, 0)
+            if count <= 0:
+                continue
+            new_count = count - 1
+            if new_count == 0:
+                del self._active_subscriptions[topic]
+                if self.topic_unsubscribe_callback:
+                    self.topic_unsubscribe_callback(topic)
+            else:
+                self._active_subscriptions[topic] = new_count
+
+    def _enter_initial(self) -> None:
+        """Enter this SM's initial state — subscribe its topics and recurse into any sub-machine."""
+        if not self.config or 'initial_state' not in self.config:
+            return
+        initial = self.config['initial_state']
+        if initial not in self.states:
+            return
+        self.current_state = initial
+        st = self.states[initial]
+        st.entry_time = time.time()
+        st.condition_met = True
+        st.task_completed = False
+        self._subscribe_state_topics(st)
+        if st.sub_machine is not None:
+            st.sub_machine._enter_initial()
+
+    def _reset_active_state(self) -> None:
+        """Tear down the active path: unsubscribe deepest first, then wipe runtime fields."""
+        # Walk active path leaf-first so refcounts unwind in the order they were added.
+        if self.current_state is not None and self.current_state in self.states:
+            st = self.states[self.current_state]
+            if st.sub_machine is not None:
+                st.sub_machine._reset_active_state()
+            self._unsubscribe_state_topics(st)
+        for st in self.states.values():
+            st.entry_time = None
+            st.condition_met = False
+            st.task_completed = False
+        self.current_state = None
+        self.paused = False
+        self._pause_started_at = None
 
     # --------------------------------------------------------------- updaters
 
@@ -348,29 +481,42 @@ class StateMachine:
         if not self.paused:
             return False
         paused_duration = time.time() - (self._pause_started_at or time.time())
+        # Shift this level's entry_times.
         for state in self.states.values():
             if state.entry_time is not None:
                 state.entry_time += paused_duration
-        for topic in list(self.topic_last_received.keys()):
-            self.topic_last_received[topic] += paused_duration
+            # Recurse into nested SMs to shift their entry_times too.
+            if state.sub_machine is not None:
+                state.sub_machine._shift_entry_times(paused_duration)
+        # The shared topic_last_received only needs shifting once at the root.
+        if self.depth == 0:
+            for topic in list(self.topic_last_received.keys()):
+                self.topic_last_received[topic] += paused_duration
         self.paused = False
         self._pause_started_at = None
         self.logger(f'State machine resumed (paused for {paused_duration:.2f}s)')
         return True
 
+    def _shift_entry_times(self, dt: float) -> None:
+        """Recursively shift every state's entry_time forward by ``dt`` seconds."""
+        for state in self.states.values():
+            if state.entry_time is not None:
+                state.entry_time += dt
+            if state.sub_machine is not None:
+                state.sub_machine._shift_entry_times(dt)
+
     def clear(self) -> None:
-        """Drop the loaded state machine and unsubscribe from all condition topics."""
-        if self.topic_unsubscribe_callback:
-            for topic_name in list(self.topic_values.keys()):
-                self.topic_unsubscribe_callback(topic_name)
+        """Drop the loaded state machine and release every active subscription."""
+        # Tear down the active path's subscriptions (deepest first).
+        self._reset_active_state()
+        # Belt-and-suspenders: at the root, drop any leftover refcounted subs.
+        if self.depth == 0:
+            self._release_all_active_subscriptions()
+            self.topic_values.clear()
+            self.topic_last_received.clear()
         self.config = None
         self.states = {}
-        self.current_state = None
-        self.paused = False
-        self._pause_started_at = None
         self.sensor_topic_values.clear()
-        self.topic_values.clear()
-        self.topic_last_received.clear()
         self.logger('State machine cleared')
 
     # ------------------------------------------------------------------- tick
@@ -398,18 +544,41 @@ class StateMachine:
                 events.append({
                     'type': 'state_timeout',
                     'state': self.current_state,
+                    'path': self._active_path(),
                     'elapsed': elapsed,
                 })
 
+        # Parent-first: try this level's exits before recursing into the sub-machine.
         transition_event = self._check_transitions()
         if transition_event:
             events.append(transition_event)
+        elif current.sub_machine is not None:
+            # No exit fired here — give the active sub-machine a tick.
+            sub_result = current.sub_machine.process()
+            if sub_result and sub_result.get('events'):
+                # Prepend this state's name onto child event paths so callers see
+                # the full root-to-leaf path.
+                for evt in sub_result['events']:
+                    evt['path'] = [self.current_state] + evt.get('path', [])
+                    events.append(evt)
 
         return {
             'current_state': self.current_state,
+            'path': self._active_path(),
+            'sub_status': current.sub_machine.get_status() if current.sub_machine is not None else None,
             'events': events,
             'time_in_state': time.time() - current.entry_time if current.entry_time else 0,
         }
+
+    def _active_path(self) -> List[str]:
+        """Return the active state path from this level down to the deepest active leaf."""
+        if self.current_state is None:
+            return []
+        path = [self.current_state]
+        st = self.states.get(self.current_state)
+        if st is not None and st.sub_machine is not None:
+            path.extend(st.sub_machine._active_path())
+        return path
 
     def _check_transitions(self) -> Optional[Dict[str, Any]]:
         """Evaluate the current state's exits and fire the first whose condition is met."""
@@ -421,14 +590,26 @@ class StateMachine:
 
         for exit_spec in current.exits:
             if self._evaluate_condition(exit_spec.condition):
+                # Edge-trigger topic_message: clear the receipt so the next tick
+                # doesn't see this same message as "still fresh." Fresh receipts
+                # always re-fire; without this, no-timeout topic_message would
+                # ping-pong forever (bug surfaced in the patrol-with-halt example).
+                cond = exit_spec.condition
+                if cond.get('type') == 'topic_message':
+                    tname = cond.get('topic')
+                    if tname:
+                        self.topic_last_received.pop(tname, None)
+                        self.topic_values.pop(tname, None)
+
                 old_state = self.current_state
                 dest = exit_spec.destination
-                self.logger(f'Exit fired: {old_state} -> {dest}')
+                self.logger(f'{"  " * self.depth}Exit fired: {old_state} -> {dest}')
                 self.transition_to_state(dest)
                 return {
                     'type': 'state_transition',
                     'from': old_state,
                     'to': dest,
+                    'path': self._active_path(),
                     'timestamp': time.time(),
                 }
         return None
@@ -495,16 +676,35 @@ class StateMachine:
     # ----------------------------------------------------------- manual moves
 
     def transition_to_state(self, new_state: str) -> bool:
-        """Force a transition to ``new_state``. Returns True on success."""
+        """Force a transition to ``new_state``. Returns True on success.
+
+        Subscription churn:
+          * The OLD state's sub-machine (if any) is reset, which unsubscribes the
+            old descendant active-path topics deepest-first.
+          * The OLD state's own topics are then released (refcounted).
+          * The NEW state's topics are subscribed (refcounted).
+          * If the NEW state is composite, its sub-machine enters its initial
+            state (which subscribes recursively).
+        """
         if new_state not in self.states:
             self.logger(f'ERROR: Cannot transition to unknown state: {new_state}')
             return False
 
         old_state = self.current_state
+        if old_state is not None and old_state in self.states:
+            old_st = self.states[old_state]
+            if old_st.sub_machine is not None:
+                old_st.sub_machine._reset_active_state()
+            self._unsubscribe_state_topics(old_st)
+
         self.current_state = new_state
-        self.states[new_state].entry_time = time.time()
-        self.states[new_state].condition_met = True
-        self.states[new_state].task_completed = False
+        new_st = self.states[new_state]
+        new_st.entry_time = time.time()
+        new_st.condition_met = True
+        new_st.task_completed = False
+        self._subscribe_state_topics(new_st)
+        if new_st.sub_machine is not None:
+            new_st.sub_machine._enter_initial()
 
         self.logger(f'Transitioned from {old_state} to {new_state}')
         return True
@@ -515,6 +715,28 @@ class StateMachine:
         if self.current_state and self.current_state in self.states:
             return self.states[self.current_state].tasks
         return []
+
+    def get_active_path(self) -> List[str]:
+        """Public wrapper around the recursive active-path walk."""
+        return self._active_path()
+
+    def get_tasks_for_path(self, path: List[str]) -> List[Dict[str, Any]]:
+        """Walk ``path`` from this SM's level downward and return ``(state_name, tasks)`` tuples.
+
+        Each tuple's ``tasks`` is the list configured on that state. Composite
+        states' own tasks are returned alongside their substates' tasks, in
+        root-to-leaf order. Useful for the controller node to fire tasks across
+        every newly-entered level on a transition.
+        """
+        out: List[Dict[str, Any]] = []
+        sm: Optional['StateMachine'] = self
+        for name in path:
+            if sm is None or name not in sm.states:
+                break
+            st = sm.states[name]
+            out.append({'state': name, 'tasks': list(st.tasks)})
+            sm = st.sub_machine
+        return out
 
     def mark_tasks_completed(self):
         if self.current_state and self.current_state in self.states:
@@ -542,8 +764,12 @@ class StateMachine:
             'condition_met': current.condition_met,
             'task_completed': current.task_completed,
             'is_leaf_state': current.isLeafState(),
+            'is_composite': current.isComposite(),
             'num_states': len(self.states),
             'num_exits': len(current.exits),
             'paused': self.paused,
+            'depth': self.depth,
+            'path': self._active_path(),
+            'sub_status': current.sub_machine.get_status() if current.sub_machine is not None else None,
             'timestamp': time.time(),
         }

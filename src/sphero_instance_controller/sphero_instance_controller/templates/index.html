@@ -238,6 +238,7 @@
                     <button class="btn btn-primary" onclick="sendStateMachineConfig()"><span class="btn__glyph">▸</span><span class="btn__label">SEND CONFIG</span></button>
                     <button class="btn btn-accent" onclick="validateStateMachineConfig()"><span class="btn__glyph">✓</span><span class="btn__label">VALIDATE</span></button>
                     <button class="btn btn-secondary" onclick="loadStateMachineTemplate()"><span class="btn__glyph">+</span><span class="btn__label">LOAD TEMPLATE</span></button>
+                    <button class="btn btn-secondary" onclick="loadCompositeStateMachineTemplate()"><span class="btn__glyph">⊞</span><span class="btn__label">LOAD NESTED</span></button>
                     <button class="btn btn-secondary" onclick="clearStateMachineConfig()"><span class="btn__glyph">×</span><span class="btn__label">CLEAR EDITOR</span></button>
                 </div>
                 <div class="button-row">
@@ -253,6 +254,7 @@
                     <div class="rows rows--wide">
                         <span class="rk">[CONFIGURED]</span>   <span class="rv" id="sm-configured">--</span>
                         <span class="rk">[STATE]</span>        <span class="rv" id="sm-current-state">--</span>
+                        <span class="rk">[PATH]</span>         <span class="rv" id="sm-path">--</span>
                         <span class="rk">[DESC]</span>         <span class="rv" id="sm-state-description">--</span>
                         <span class="rk">[T-IN-STATE]</span>   <span class="rv"><span id="sm-time-in-state">--</span> s</span>
                         <span class="rk">[TASK DONE]</span>    <span class="rv" id="sm-task-completed">--</span>
