@@ -20,7 +20,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 
 from std_msgs.msg import String
 
-from sphero_instance_controller.core.sphero.task import TaskDescriptor, TaskStatus
+from sphero_instance_controller.core.common.task import TaskDescriptor, TaskStatus
 from sphero_instance_controller.core.sphero.topic_task_executor import TopicTaskExecutor
 
 # Note: Task controller does NOT import scanner, SpheroEduAPI, or Sphero

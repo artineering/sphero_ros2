@@ -10,10 +10,10 @@ but instead publishes commands to the device controller via ROS topics.
 
 from typing import Dict, Any, Optional, Callable
 
-from .task import TaskExecutorBase
+from .sphero_task_executor import SpheroTaskExecutorBase
 
 
-class TopicTaskExecutor(TaskExecutorBase):
+class TopicTaskExecutor(SpheroTaskExecutorBase):
     """
     Task executor that publishes commands via ROS topics.
 

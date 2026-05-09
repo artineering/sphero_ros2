@@ -10,11 +10,11 @@ Used by the device controller node which has direct access to the Sphero instanc
 from typing import Dict, Any, Optional, Callable
 from spherov2.commands.sphero import RawMotorModes
 
-from .task import TaskExecutorBase
+from .sphero_task_executor import SpheroTaskExecutorBase
 from .sphero import Sphero
 
 
-class DirectTaskExecutor(TaskExecutorBase):
+class DirectTaskExecutor(SpheroTaskExecutorBase):
     """
     Task executor that directly controls Sphero hardware.
 
