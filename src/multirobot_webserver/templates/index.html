@@ -3,73 +3,177 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Robot Sphero Controller</title>
+    <title>SCS·01 — Sphero Control Station</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@200;300;400;500;700&family=Major+Mono+Display&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🤖 Multi-Robot Sphero Controller</h1>
-            <p class="subtitle">Manage multiple Sphero robots from a single interface</p>
+    <div class="grid-overlay" aria-hidden="true"></div>
+    <div class="scanlines" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
+    <div class="shell">
+        <!-- ============================================================ -->
+        <!-- TOP BAR — wordmark, mission clock, telemetry chips           -->
+        <!-- ============================================================ -->
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand__mark">SCS·01</span>
+                <span class="brand__sub">SPHERO CONTROL STATION</span>
+            </div>
+
+            <div class="telemetry">
+                <div class="chip" title="Mission elapsed time">
+                    <span class="chip__label">UPT</span>
+                    <span class="chip__value" id="missionClock">00:00:00</span>
+                </div>
+                <div class="chip" title="Active Sphero units">
+                    <span class="chip__label">FLEET</span>
+                    <span class="chip__value" id="spheroCount">0</span>
+                </div>
+                <div class="chip chip--state" title="External localization">
+                    <span class="chip__label">ARUCO</span>
+                    <span class="dot" id="arucoDot" data-state="offline"></span>
+                    <span class="chip__value" id="arucoLabel">OFFLINE</span>
+                </div>
+                <div class="chip chip--state" title="Backend health">
+                    <span class="chip__label">LINK</span>
+                    <span class="dot" id="linkDot" data-state="online"></span>
+                    <span class="chip__value" id="linkLabel">NOMINAL</span>
+                </div>
+            </div>
         </header>
 
-        <div class="controls">
-            <button id="addSpheroBtn" class="btn btn-primary">
-                <span class="icon">+</span> Add Sphero
+        <!-- ============================================================ -->
+        <!-- ACTION RIBBON — primary verbs                                -->
+        <!-- ============================================================ -->
+        <section class="ribbon" aria-label="Primary actions">
+            <button class="action action--primary" id="addSpheroBtn">
+                <span class="action__glyph">+</span>
+                <span class="action__label">DEPLOY UNIT</span>
             </button>
-            <button id="refreshBtn" class="btn btn-secondary">
-                <span class="icon">🔄</span> Refresh
+            <button class="action" id="refreshBtn">
+                <span class="action__glyph">↻</span>
+                <span class="action__label">REFRESH</span>
             </button>
-            <div class="status-badge">
-                <span id="spheroCount">0</span> Sphero(s) Connected
+            <button class="action action--accent" id="arucoStartBtn">
+                <span class="action__glyph">⚡</span>
+                <span class="action__label">START ARUCO</span>
             </button>
-        </div>
+            <button class="action action--ghost" id="arucoStopBtn" hidden>
+                <span class="action__glyph">■</span>
+                <span class="action__label">STOP ARUCO</span>
+            </button>
+            <span class="ribbon__hint">DEPLOY → enter callsign → unit binds to next channel</span>
+        </section>
 
-        <div id="spheroGrid" class="sphero-grid">
-            <!-- Sphero cards will be dynamically added here -->
-        </div>
+        <!-- ============================================================ -->
+        <!-- FLEET — operator panels for each Sphero                      -->
+        <!-- ============================================================ -->
+        <section class="panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// FLEET</h2>
+                <div class="panel__meta">
+                    <span class="meta__row"><span class="meta__k">CAPACITY</span><span class="meta__v"><span id="capacityFill">0</span>/∞</span></span>
+                    <span class="meta__sep">·</span>
+                    <span class="meta__row"><span class="meta__k">LAST SYNC</span><span class="meta__v" id="lastSync">—</span></span>
+                </div>
+            </div>
 
-        <div id="noSpherosMessage" class="no-spheros">
-            <div class="empty-state">
-                <div class="empty-icon">🔍</div>
-                <h2>No Spheros Connected</h2>
-                <p>Click "Add Sphero" to connect your first Sphero robot</p>
+            <div id="spheroGrid" class="fleet"></div>
+
+            <div id="noSpherosMessage" class="empty">
+                <pre class="empty__art" aria-hidden="true">           .       .
+       .  ╱           ╲
+      .  ╱   ◉  ◉  ◉   ╲   .
+     .  ╱     ◉  ◉      ╲     .
+    .  ╱_______________╲     .
+       AWAITING UPLINK</pre>
+                <p class="empty__title">NO UNITS DEPLOYED</p>
+                <p class="empty__body">Press <kbd>DEPLOY UNIT</kbd> to bind a Sphero to the next available channel.</p>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- LOCALIZATION — ArUco SLAM panel                              -->
+        <!-- ============================================================ -->
+        <section class="panel panel--narrow">
+            <div class="panel__head">
+                <h2 class="panel__title">// LOCALIZATION</h2>
+                <div class="panel__meta">
+                    <span class="meta__row"><span class="meta__k">SUBSYSTEM</span><span class="meta__v">ARUCO·SLAM</span></span>
+                </div>
+            </div>
+
+            <div class="localization">
+                <div class="loc__readout">
+                    <div class="readout">
+                        <span class="readout__k">[STATE]</span>
+                        <span class="readout__v" id="arucoStateText">OFFLINE</span>
+                    </div>
+                    <div class="readout">
+                        <span class="readout__k">[ENABLED]</span>
+                        <span class="readout__v" id="arucoEnabledText">FALSE</span>
+                    </div>
+                    <div class="readout">
+                        <span class="readout__k">[CAMERA]</span>
+                        <input type="number" id="cameraIdInput" value="0" min="0" max="9" class="readout__input">
+                    </div>
+                </div>
+                <div class="loc__hint">External marker tracking provides absolute positioning to all units.</div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- FOOTER                                                       -->
+        <!-- ============================================================ -->
+        <footer class="footer">
+            <div class="footer__left">SCS·01 / OPERATIONAL</div>
+            <div class="footer__center">[ROS2 ROLLING] · [FLASK] · [SOCKET.IO]</div>
+            <div class="footer__right">PORT 5000 · localhost</div>
+        </footer>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- DEPLOY MODAL                                                     -->
+    <!-- ================================================================ -->
+    <div id="addSpheroModal" class="modal" role="dialog" aria-modal="true">
+        <div class="modal__panel">
+            <div class="modal__head">
+                <span class="modal__tag">[ DEPLOY ]</span>
+                <h3 class="modal__title">BIND NEW UNIT</h3>
+                <button class="modal__close close" aria-label="Close">×</button>
+            </div>
+            <div class="modal__body">
+                <label for="spheroNameInput" class="field__label">[ CALLSIGN ]</label>
+                <input type="text" id="spheroNameInput" placeholder="SB-3660" class="field" autocomplete="off" spellcheck="false">
+                <p class="field__hint">Use the engraved Sphero ID (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). The next available channel will be assigned automatically.</p>
+            </div>
+            <div class="modal__foot">
+                <button id="cancelBtn" class="action action--ghost">CANCEL</button>
+                <button id="confirmAddBtn" class="action action--primary">DEPLOY</button>
             </div>
         </div>
     </div>
 
-    <!-- Add Sphero Modal -->
-    <div id="addSpheroModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Add New Sphero</h2>
-                <span class="close">&times;</span>
+    <!-- ================================================================ -->
+    <!-- DETACH (REMOVE) MODAL                                            -->
+    <!-- ================================================================ -->
+    <div id="confirmRemoveModal" class="modal" role="dialog" aria-modal="true">
+        <div class="modal__panel">
+            <div class="modal__head">
+                <span class="modal__tag modal__tag--warn">[ DETACH ]</span>
+                <h3 class="modal__title">RELEASE UNIT</h3>
+                <button class="modal__close close" aria-label="Close">×</button>
             </div>
-            <div class="modal-body">
-                <label for="spheroNameInput">Sphero Name:</label>
-                <input type="text" id="spheroNameInput" placeholder="e.g., SB-3660" class="input-field">
-                <p class="help-text">Enter the name of your Sphero (e.g., SB-3660, SB-1234)</p>
+            <div class="modal__body">
+                <p id="removeConfirmText" class="modal__copy">This will terminate the unit's WebSocket server and stop all attached controllers.</p>
             </div>
-            <div class="modal-footer">
-                <button id="cancelBtn" class="btn btn-secondary">Cancel</button>
-                <button id="confirmAddBtn" class="btn btn-primary">Add Sphero</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Confirm Remove Modal -->
-    <div id="confirmRemoveModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Remove Sphero?</h2>
-                <span class="close">&times;</span>
-            </div>
-            <div class="modal-body">
-                <p id="removeConfirmText">Are you sure you want to remove this Sphero?</p>
-            </div>
-            <div class="modal-footer">
-                <button id="cancelRemoveBtn" class="btn btn-secondary">Cancel</button>
-                <button id="confirmRemoveBtn" class="btn btn-danger">Remove</button>
+            <div class="modal__foot">
+                <button id="cancelRemoveBtn" class="action action--ghost">CANCEL</button>
+                <button id="confirmRemoveBtn" class="action action--danger">DETACH</button>
             </div>
         </div>
     </div>

@@ -3,407 +3,467 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sphero {{ sphero_name }} Controller</title>
+    <title>SCS·{{ sphero_name }} — Unit Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@200;300;400;500;700&family=Major+Mono+Display&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>Sphero {{ sphero_name }} Controller</h1>
-            <div class="status-bar">
-                <span id="connection-status" class="status-connected">Connected</span>
-                <span id="battery-status" class="battery-info">Battery: --</span>
+    <div class="grid-overlay" aria-hidden="true"></div>
+    <div class="scanlines" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
+    <div class="shell">
+        <!-- ========================================================== -->
+        <!-- TOP BAR — unit identity + telemetry chips                  -->
+        <!-- ========================================================== -->
+        <header class="topbar">
+            <div class="brand">
+                <span class="brand__mark">{{ sphero_name }}</span>
+                <span class="brand__sub">UNIT CONSOLE · SCS·01</span>
+            </div>
+            <div class="telemetry">
+                <div class="chip chip--state" title="WebSocket link">
+                    <span class="chip__label">LINK</span>
+                    <span class="dot" id="connection-dot" data-state="online"></span>
+                    <span class="chip__value" id="connection-status">Connected</span>
+                </div>
+                <div class="chip" title="Battery level">
+                    <span class="chip__label">BAT</span>
+                    <span class="chip__value" id="battery-status">--</span>
+                </div>
+                <div class="chip" title="WebSocket port">
+                    <span class="chip__label">CH</span>
+                    <span class="chip__value" id="channel-port">{{ websocket_port }}</span>
+                </div>
             </div>
         </header>
 
-        <div class="tabs">
-            <button class="tab-button active" onclick="openTab(event, 'state')" id="state-tab">State</button>
-            <button class="tab-button" onclick="openTab(event, 'sensors')" id="sensors-tab">Sensors</button>
-            <button class="tab-button" onclick="openTab(event, 'plot')" id="plot-tab">Plot</button>
-            <button class="tab-button" onclick="openTab(event, 'tasks')" id="tasks-tab">Tasks</button>
-            <button class="tab-button" onclick="openTab(event, 'statemachine')" id="statemachine-tab">State Machine</button>
-            <button class="tab-button" onclick="openTab(event, 'matrix')" id="matrix-tab">Matrix</button>
-            <button class="tab-button" onclick="openTab(event, 'motion')" id="motion-tab">Motion</button>
-        </div>
+        <!-- ========================================================== -->
+        <!-- TAB STRIP — console section selectors                      -->
+        <!-- ========================================================== -->
+        <nav class="tabs" role="tablist">
+            <button class="tab-button active" onclick="openTab(event, 'state')" id="state-tab"><span class="tab__idx">01</span><span class="tab__label">STATE</span></button>
+            <button class="tab-button" onclick="openTab(event, 'sensors')" id="sensors-tab"><span class="tab__idx">02</span><span class="tab__label">SENSORS</span></button>
+            <button class="tab-button" onclick="openTab(event, 'plot')" id="plot-tab"><span class="tab__idx">03</span><span class="tab__label">PLOT</span></button>
+            <button class="tab-button" onclick="openTab(event, 'tasks')" id="tasks-tab"><span class="tab__idx">04</span><span class="tab__label">TASKS</span></button>
+            <button class="tab-button" onclick="openTab(event, 'statemachine')" id="statemachine-tab"><span class="tab__idx">05</span><span class="tab__label">STATE MACHINE</span></button>
+            <button class="tab-button" onclick="openTab(event, 'matrix')" id="matrix-tab"><span class="tab__idx">06</span><span class="tab__label">LED + MATRIX</span></button>
+            <button class="tab-button" onclick="openTab(event, 'motion')" id="motion-tab"><span class="tab__idx">07</span><span class="tab__label">MOTION</span></button>
+        </nav>
 
-        <!-- State Tab -->
-        <div id="state" class="tab-content">
-            <h2>Sphero State</h2>
-            <div class="state-panel">
-                <div class="info-grid">
-                    <div class="info-card">
-                        <h3>Connection</h3>
-                        <p><strong>Name:</strong> <span id="state-name">--</span></p>
-                        <p><strong>Status:</strong> <span id="state-connection">--</span></p>
-                        <p><strong>Healthy:</strong> <span id="state-healthy">--</span></p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Battery</h3>
-                        <p><strong>Level:</strong> <span id="state-battery">--</span>%</p>
-                        <p><strong>Voltage:</strong> <span id="state-voltage">--</span>V</p>
-                        <p><strong>Health:</strong> <span id="state-bat-health">--</span></p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Motion</h3>
-                        <p><strong>Heading:</strong> <span id="state-heading">--</span>°</p>
-                        <p><strong>Speed:</strong> <span id="state-speed">--</span></p>
-                        <p><strong>Moving:</strong> <span id="state-moving">--</span></p>
-                    </div>
-                    <div class="info-card">
-                        <h3>LED</h3>
-                        <p><strong>Color:</strong> <span id="state-led" style="display: inline-block; width: 50px; height: 20px; border: 1px solid #ccc; background: #000;"></span></p>
-                    </div>
-                </div>
-                <div class="raw-data">
-                    <h3>Raw State Data</h3>
-                    <pre id="raw-state-data">{}</pre>
-                </div>
+        <!-- ========================================================== -->
+        <!-- 01 · STATE                                                 -->
+        <!-- ========================================================== -->
+        <section id="state" class="tab-content active panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// STATE READOUT</h2>
+                <div class="panel__meta"><span class="meta__k">UNIT</span><span class="meta__v">{{ sphero_name }}</span></div>
             </div>
-        </div>
 
-        <!-- Sensors Tab -->
-        <div id="sensors" class="tab-content">
-            <h2>Sensor Readings</h2>
-            <div class="sensors-panel">
-                <div class="info-grid">
-                    <div class="info-card">
-                        <h3>Accelerometer</h3>
-                        <p><strong>X:</strong> <span id="sensor-accel-x">--</span> Gs</p>
-                        <p><strong>Y:</strong> <span id="sensor-accel-y">--</span> Gs</p>
-                        <p><strong>Z:</strong> <span id="sensor-accel-z">--</span> Gs</p>
+            <div class="readouts">
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ CONN ]</span></div>
+                    <div class="rows">
+                        <span class="rk">[NAME]</span>      <span class="rv" id="state-name">--</span>
+                        <span class="rk">[STATUS]</span>    <span class="rv" id="state-connection">--</span>
+                        <span class="rk">[HEALTH]</span>    <span class="rv" id="state-healthy">--</span>
                     </div>
-                    <div class="info-card">
-                        <h3>Gyroscope</h3>
-                        <p><strong>X:</strong> <span id="sensor-gyro-x">--</span> °/s</p>
-                        <p><strong>Y:</strong> <span id="sensor-gyro-y">--</span> °/s</p>
-                        <p><strong>Z:</strong> <span id="sensor-gyro-z">--</span> °/s</p>
+                </div>
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ POWER ]</span></div>
+                    <div class="rows">
+                        <span class="rk">[LEVEL]</span>     <span class="rv"><span id="state-battery">--</span>%</span>
+                        <span class="rk">[VOLT]</span>      <span class="rv"><span id="state-voltage">--</span> V</span>
+                        <span class="rk">[HEALTH]</span>    <span class="rv" id="state-bat-health">--</span>
                     </div>
-                    <div class="info-card">
-                        <h3>Velocity</h3>
-                        <p><strong>X:</strong> <span id="sensor-vel-x">--</span> cm/s</p>
-                        <p><strong>Y:</strong> <span id="sensor-vel-y">--</span> cm/s</p>
+                </div>
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ MOTION ]</span></div>
+                    <div class="rows">
+                        <span class="rk">[HEADING]</span>   <span class="rv"><span id="state-heading">--</span>°</span>
+                        <span class="rk">[SPEED]</span>     <span class="rv" id="state-speed">--</span>
+                        <span class="rk">[MOVING]</span>    <span class="rv" id="state-moving">--</span>
                     </div>
-                    <div class="info-card">
-                        <h3>Location</h3>
-                        <p><strong>X:</strong> <span id="sensor-loc-x">--</span> cm</p>
-                        <p><strong>Y:</strong> <span id="sensor-loc-y">--</span> cm</p>
+                </div>
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ LED ]</span></div>
+                    <div class="rows">
+                        <span class="rk">[COLOR]</span>     <span class="rv"><span id="state-led" class="color-swatch"></span></span>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- Plot Tab -->
-        <div id="plot" class="tab-content">
-            <h2>XY Position Plot</h2>
-            <div class="plot-panel">
-                <div class="plot-controls">
-                    <button class="btn btn-secondary" onclick="clearPlot()">Clear Plot</button>
-                    <button class="btn btn-secondary" onclick="resetZoom()">Reset Zoom</button>
-                    <label>
-                        <input type="checkbox" id="auto-scale" checked onchange="toggleAutoScale()">
-                        Auto-scale
-                    </label>
-                    <label>
-                        Max Points:
-                        <input type="number" id="max-points" value="100" min="10" max="1000" step="10" onchange="updateMaxPoints()">
-                    </label>
-                </div>
-                <div class="plot-container">
-                    <canvas id="xy-plot"></canvas>
-                </div>
-                <div class="plot-info">
-                    <p><strong>Current Position:</strong> X: <span id="plot-current-x">--</span> cm, Y: <span id="plot-current-y">--</span> cm</p>
-                    <p><strong>Total Points:</strong> <span id="plot-point-count">0</span></p>
-                </div>
+            <div class="raw-block">
+                <div class="raw-block__head">// RAW STATE PACKET</div>
+                <pre id="raw-state-data">{}</pre>
             </div>
-        </div>
+        </section>
 
-        <!-- Tasks Tab -->
-        <div id="tasks" class="tab-content">
-            <h2>Task Controller</h2>
-            <div class="tasks-panel">
-                <!-- Note: Task controller is automatically running in multi-robot setup -->
+        <!-- ========================================================== -->
+        <!-- 02 · SENSORS                                               -->
+        <!-- ========================================================== -->
+        <section id="sensors" class="tab-content panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// SENSOR ARRAY</h2>
+                <div class="panel__meta"><span class="meta__k">SAMPLE RATE</span><span class="meta__v">10 HZ</span></div>
+            </div>
 
-                <!-- Pre-canned Tasks -->
-                <div class="control-section">
-                    <h3>Quick Tasks</h3>
-                    <div class="task-quick-grid">
-                        <button class="task-btn" onclick="showTaskForm('roll')">Roll</button>
-                        <button class="task-btn" onclick="showTaskForm('move_to')">Move To</button>
-                        <button class="task-btn" onclick="showTaskForm('patrol')">Patrol</button>
-                        <button class="task-btn" onclick="showTaskForm('circle')">Circle</button>
-                        <button class="task-btn" onclick="showTaskForm('square')">Square</button>
-                        <button class="task-btn" onclick="showTaskForm('spin')">Spin</button>
-                        <button class="task-btn" onclick="showTaskForm('jumping_bean')">Jumping Bean</button>
-                        <button class="task-btn" onclick="showTaskForm('collision_start')">Start Collision Detection</button>
-                        <button class="task-btn" onclick="showTaskForm('collision_stop')">Stop Collision Detection</button>
-                        <button class="task-btn btn-danger" onclick="submitStopTask()">Stop All</button>
+            <div class="readouts">
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ ACCEL ]</span><span class="readout-card__unit">Gs</span></div>
+                    <div class="rows">
+                        <span class="rk">[X]</span>  <span class="rv" id="sensor-accel-x">--</span>
+                        <span class="rk">[Y]</span>  <span class="rv" id="sensor-accel-y">--</span>
+                        <span class="rk">[Z]</span>  <span class="rv" id="sensor-accel-z">--</span>
                     </div>
                 </div>
-
-                <!-- Task Form -->
-                <div id="task-form-container" class="control-section" style="display: none;">
-                    <h3>Task Parameters: <span id="task-form-title">Task</span></h3>
-                    <div id="task-form-fields"></div>
-                    <div class="button-group">
-                        <button class="btn btn-primary" onclick="submitCurrentTask()">Submit Task</button>
-                        <button class="btn btn-secondary" onclick="cancelTaskForm()">Cancel</button>
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ GYRO ]</span><span class="readout-card__unit">°/s</span></div>
+                    <div class="rows">
+                        <span class="rk">[X]</span>  <span class="rv" id="sensor-gyro-x">--</span>
+                        <span class="rk">[Y]</span>  <span class="rv" id="sensor-gyro-y">--</span>
+                        <span class="rk">[Z]</span>  <span class="rv" id="sensor-gyro-z">--</span>
                     </div>
                 </div>
-
-                <!-- Task Status Display -->
-                <div class="control-section">
-                    <h3>Current Task Status</h3>
-                    <div class="info-card">
-                        <p><strong>Task ID:</strong> <span id="current-task-id">--</span></p>
-                        <p><strong>Type:</strong> <span id="current-task-type">--</span></p>
-                        <p><strong>Status:</strong> <span id="current-task-status">--</span></p>
-                        <p><strong>Duration:</strong> <span id="current-task-duration">--</span>s</p>
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ VEL ]</span><span class="readout-card__unit">cm/s</span></div>
+                    <div class="rows">
+                        <span class="rk">[X]</span>  <span class="rv" id="sensor-vel-x">--</span>
+                        <span class="rk">[Y]</span>  <span class="rv" id="sensor-vel-y">--</span>
                     </div>
-                    <div class="raw-data">
-                        <h4>Task Details</h4>
-                        <pre id="task-status-data">{}</pre>
+                </div>
+                <div class="readout-card">
+                    <div class="readout-card__head"><span class="readout-card__tag">[ POSITION ]</span><span class="readout-card__unit">cm</span></div>
+                    <div class="rows">
+                        <span class="rk">[X]</span>  <span class="rv" id="sensor-loc-x">--</span>
+                        <span class="rk">[Y]</span>  <span class="rv" id="sensor-loc-y">--</span>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        <!-- State Machine Tab -->
-        <div id="statemachine" class="tab-content">
-            <h2>State Machine Controller</h2>
-            <div class="statemachine-panel">
-                <div class="control-section">
-                    <h3>State Machine Configuration</h3>
-                    <textarea id="sm-config-editor" class="config-editor" placeholder="Enter state machine configuration JSON here..." style="width: 100%; min-height: 300px; font-family: 'Courier New', monospace; padding: 10px; border: 1px solid #ccc; border-radius: 4px;"></textarea>
-                    <div class="button-group" style="margin-top: 10px;">
-                        <button class="btn btn-primary" onclick="sendStateMachineConfig()">Send Configuration</button>
-                        <button class="btn btn-success" onclick="validateStateMachineConfig()">Validate JSON</button>
-                        <button class="btn btn-secondary" onclick="loadStateMachineTemplate()">Load Template</button>
-                        <button class="btn btn-secondary" onclick="clearStateMachineConfig()">Clear Editor</button>
-                    </div>
-                    <div class="button-group" style="margin-top: 10px;">
-                        <button class="btn btn-warning" id="sm-pause-resume-btn" onclick="pauseStateMachine()">Pause</button>
-                        <button class="btn btn-danger" onclick="clearStateMachine()">Clear State Machine</button>
-                    </div>
-                    <div id="sm-config-status" style="margin-top: 10px;"></div>
-                </div>
-
-                <div class="control-section">
-                    <h3>Current State Machine Status</h3>
-                    <div class="info-card">
-                        <p><strong>Configured:</strong> <span id="sm-configured">--</span></p>
-                        <p><strong>Current State:</strong> <span id="sm-current-state">--</span></p>
-                        <p><strong>Description:</strong> <span id="sm-state-description">--</span></p>
-                        <p><strong>Time in State:</strong> <span id="sm-time-in-state">--</span>s</p>
-                        <p><strong>Task Completed:</strong> <span id="sm-task-completed">--</span></p>
-                        <p><strong>Leaf State:</strong> <span id="sm-is-leaf">--</span></p>
-                        <p><strong>Exits:</strong> <span id="sm-num-exits">--</span></p>
-                        <p><strong>Paused:</strong> <span id="sm-paused">--</span></p>
-                    </div>
-                    <div class="raw-data">
-                        <h4>State Machine Details</h4>
-                        <pre id="sm-status-data">{}</pre>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3>Quick Reference</h3>
-                    <details>
-                        <summary style="cursor: pointer; font-weight: 600; padding: 5px;">Available Tasks & Conditions</summary>
-                        <div style="margin-top: 10px; font-size: 14px;">
-                            <p><strong>Entry Condition Types:</strong></p>
-                            <ul>
-                                <li><code>always</code> - Always allow entry</li>
-                                <li><code>timer</code> - Wait for duration: <code>{"type": "timer", "params": {"duration": 5.0}}</code></li>
-                                <li><code>topic_value</code> - Check sensor value: <code>{"type": "topic_value", "params": {"key": "battery_percentage", "operator": "<", "value": 20}}</code></li>
-                            </ul>
-                            <p><strong>Task Types:</strong></p>
-                            <ul>
-                                <li><code>set_led</code> - Set LED color</li>
-                                <li><code>roll</code> - Move robot</li>
-                                <li><code>stop</code> - Stop robot</li>
-                                <li><code>matrix</code> - Show LED pattern</li>
-                                <li><code>heading</code> - Set heading</li>
-                                <li><code>speed</code> - Set speed</li>
-                            </ul>
-                        </div>
-                    </details>
+        <!-- ========================================================== -->
+        <!-- 03 · PLOT                                                  -->
+        <!-- ========================================================== -->
+        <section id="plot" class="tab-content panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// XY POSITION PLOT</h2>
+                <div class="panel__meta">
+                    <span class="meta__k">CURRENT</span>
+                    <span class="meta__v">X:<span id="plot-current-x">--</span> Y:<span id="plot-current-y">--</span></span>
+                    <span class="meta__sep">·</span>
+                    <span class="meta__k">PTS</span><span class="meta__v" id="plot-point-count">0</span>
                 </div>
             </div>
-        </div>
 
-        <!-- Matrix Tab -->
-        <div id="matrix" class="tab-content">
-            <h2>LED Matrix & Main LED Control</h2>
-            <div class="matrix-panel">
-                <div class="control-section">
-                    <h3>LED Control</h3>
-                    <div class="color-controls">
-                        <div class="color-input">
-                            <label>LED Type:</label>
-                            <select id="led-type">
-                                <option value="main" selected>Main LED (Dome/Body)</option>
-                                <option value="front">Front LED</option>
-                                <option value="back">Back LED</option>
-                            </select>
-                        </div>
-                        <div class="color-input">
-                            <label>Red: <span id="led-red-val">0</span></label>
-                            <input type="range" id="led-red" min="0" max="255" value="0" oninput="updateLedColorPreview()">
-                        </div>
-                        <div class="color-input">
-                            <label>Green: <span id="led-green-val">255</span></label>
-                            <input type="range" id="led-green" min="0" max="255" value="255" oninput="updateLedColorPreview()">
-                        </div>
-                        <div class="color-input">
-                            <label>Blue: <span id="led-blue-val">0</span></label>
-                            <input type="range" id="led-blue" min="0" max="255" value="0" oninput="updateLedColorPreview()">
-                        </div>
-                        <div class="color-preview" id="led-color-preview"></div>
-                    </div>
-                    <button class="btn btn-primary" onclick="sendLed()">Set LED Color</button>
-                </div>
+            <div class="plot-controls">
+                <button class="btn btn-secondary" onclick="clearPlot()"><span class="btn__glyph">×</span><span class="btn__label">CLEAR PLOT</span></button>
+                <button class="btn btn-secondary" onclick="resetZoom()"><span class="btn__glyph">↺</span><span class="btn__label">RESET ZOOM</span></button>
+                <label class="toggle"><input type="checkbox" id="auto-scale" checked onchange="toggleAutoScale()"><span>AUTO-SCALE</span></label>
+                <label class="toggle">MAX PTS<input type="number" id="max-points" value="100" min="10" max="1000" step="10" onchange="updateMaxPoints()" class="num-input"></label>
+            </div>
+            <div class="plot-frame">
+                <canvas id="xy-plot"></canvas>
+            </div>
+        </section>
 
-                <div class="control-section">
-                    <h3>LED Matrix Patterns (Sphero BOLT only)</h3>
-                    <div class="form-group">
-                        <label>Select Pattern:</label>
-                        <div class="pattern-grid">
-                            <button class="pattern-btn" onclick="sendMatrix('smile')">😊 Smile</button>
-                            <button class="pattern-btn" onclick="sendMatrix('frown')">☹ Frown</button>
-                            <button class="pattern-btn" onclick="sendMatrix('heart')">❤️ Heart</button>
-                            <button class="pattern-btn" onclick="sendMatrix('star')">⭐ Star</button>
-                            <button class="pattern-btn" onclick="sendMatrix('arrow_up')">⬆️ Up</button>
-                            <button class="pattern-btn" onclick="sendMatrix('arrow_down')">⬇️ Down</button>
-                            <button class="pattern-btn" onclick="sendMatrix('arrow_left')">⬅️ Left</button>
-                            <button class="pattern-btn" onclick="sendMatrix('arrow_right')">➡️ Right</button>
-                            <button class="pattern-btn" onclick="sendMatrix('circle')">⭕ Circle</button>
-                            <button class="pattern-btn" onclick="sendMatrix('square')">⬜ Square</button>
-                            <button class="pattern-btn" onclick="sendMatrix('checkmark')">✓ Check</button>
-                            <button class="pattern-btn" onclick="sendMatrix('cross')">✗ Cross</button>
-                            <button class="pattern-btn" onclick="sendMatrix('plus')">➕ Plus</button>
-                            <button class="pattern-btn" onclick="sendMatrix('exclamation')">❗ Alert</button>
-                            <button class="pattern-btn" onclick="sendMatrix('question')">❓ Question</button>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Matrix Color:</label>
-                        <div class="color-controls">
-                            <div class="color-input">
-                                <label>Red: <span id="matrix-red-val">255</span></label>
-                                <input type="range" id="matrix-red" min="0" max="255" value="255" oninput="updateMatrixColorPreview()">
-                            </div>
-                            <div class="color-input">
-                                <label>Green: <span id="matrix-green-val">255</span></label>
-                                <input type="range" id="matrix-green" min="0" max="255" value="255" oninput="updateMatrixColorPreview()">
-                            </div>
-                            <div class="color-input">
-                                <label>Blue: <span id="matrix-blue-val">255</span></label>
-                                <input type="range" id="matrix-blue" min="0" max="255" value="255" oninput="updateMatrixColorPreview()">
-                            </div>
-                            <div class="color-preview" id="matrix-color-preview"></div>
-                        </div>
-                    </div>
-                    <button class="btn btn-danger" onclick="clearMatrix()">Clear Matrix</button>
+        <!-- ========================================================== -->
+        <!-- 04 · TASKS                                                 -->
+        <!-- ========================================================== -->
+        <section id="tasks" class="tab-content panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// TASK QUEUE</h2>
+                <div class="panel__meta"><span class="meta__k">EXEC</span><span class="meta__v">TOPIC</span></div>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// QUICK TASKS</h3>
+                <div class="task-grid">
+                    <button class="task-btn" onclick="showTaskForm('roll')">ROLL</button>
+                    <button class="task-btn" onclick="showTaskForm('move_to')">MOVE TO</button>
+                    <button class="task-btn" onclick="showTaskForm('patrol')">PATROL</button>
+                    <button class="task-btn" onclick="showTaskForm('circle')">CIRCLE</button>
+                    <button class="task-btn" onclick="showTaskForm('square')">SQUARE</button>
+                    <button class="task-btn" onclick="showTaskForm('spin')">SPIN</button>
+                    <button class="task-btn" onclick="showTaskForm('jumping_bean')">JUMPING BEAN</button>
+                    <button class="task-btn" onclick="showTaskForm('collision_start')">COLLISION ON</button>
+                    <button class="task-btn" onclick="showTaskForm('collision_stop')">COLLISION OFF</button>
+                    <button class="task-btn task-btn--danger" onclick="submitStopTask()">STOP ALL</button>
                 </div>
             </div>
-        </div>
 
-        <!-- Motion Tab -->
-        <div id="motion" class="tab-content">
-            <h2>Motion Control</h2>
-            <div class="motion-panel">
-                <div class="control-section">
-                    <h3>Heading Control</h3>
-                    <div class="heading-control">
+            <div id="task-form-container" class="subsection" style="display: none;">
+                <h3 class="sub-title">// TASK PARAMETERS · <span id="task-form-title">TASK</span></h3>
+                <div id="task-form-fields"></div>
+                <div class="button-row">
+                    <button class="btn btn-primary" onclick="submitCurrentTask()"><span class="btn__glyph">▸</span><span class="btn__label">SUBMIT</span></button>
+                    <button class="btn btn-secondary" onclick="cancelTaskForm()"><span class="btn__glyph">×</span><span class="btn__label">CANCEL</span></button>
+                </div>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// CURRENT TASK</h3>
+                <div class="readout-card readout-card--wide">
+                    <div class="rows rows--wide">
+                        <span class="rk">[ID]</span>        <span class="rv" id="current-task-id">--</span>
+                        <span class="rk">[TYPE]</span>      <span class="rv" id="current-task-type">--</span>
+                        <span class="rk">[STATUS]</span>    <span class="rv" id="current-task-status">--</span>
+                        <span class="rk">[DUR]</span>       <span class="rv"><span id="current-task-duration">--</span> s</span>
+                    </div>
+                </div>
+                <div class="raw-block">
+                    <div class="raw-block__head">// TASK DETAILS</div>
+                    <pre id="task-status-data">{}</pre>
+                </div>
+            </div>
+        </section>
+
+        <!-- ========================================================== -->
+        <!-- 05 · STATE MACHINE                                         -->
+        <!-- ========================================================== -->
+        <section id="statemachine" class="tab-content panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// STATE MACHINE</h2>
+                <div class="panel__meta"><span class="meta__k">SCHEMA</span><span class="meta__v">EXITS[]</span></div>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// CONFIGURATION</h3>
+                <textarea id="sm-config-editor" class="config-editor" placeholder="// PASTE CONFIGURATION JSON HERE..." spellcheck="false"></textarea>
+                <div class="button-row">
+                    <button class="btn btn-primary" onclick="sendStateMachineConfig()"><span class="btn__glyph">▸</span><span class="btn__label">SEND CONFIG</span></button>
+                    <button class="btn btn-accent" onclick="validateStateMachineConfig()"><span class="btn__glyph">✓</span><span class="btn__label">VALIDATE</span></button>
+                    <button class="btn btn-secondary" onclick="loadStateMachineTemplate()"><span class="btn__glyph">+</span><span class="btn__label">LOAD TEMPLATE</span></button>
+                    <button class="btn btn-secondary" onclick="clearStateMachineConfig()"><span class="btn__glyph">×</span><span class="btn__label">CLEAR EDITOR</span></button>
+                </div>
+                <div class="button-row">
+                    <button class="btn btn-warning" id="sm-pause-resume-btn" onclick="pauseStateMachine()"><span class="btn__glyph">⏸</span><span class="btn__label">PAUSE</span></button>
+                    <button class="btn btn-danger" onclick="clearStateMachine()"><span class="btn__glyph">⏹</span><span class="btn__label">CLEAR STATE MACHINE</span></button>
+                </div>
+                <div id="sm-config-status"></div>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// RUNTIME STATUS</h3>
+                <div class="readout-card readout-card--wide">
+                    <div class="rows rows--wide">
+                        <span class="rk">[CONFIGURED]</span>   <span class="rv" id="sm-configured">--</span>
+                        <span class="rk">[STATE]</span>        <span class="rv" id="sm-current-state">--</span>
+                        <span class="rk">[DESC]</span>         <span class="rv" id="sm-state-description">--</span>
+                        <span class="rk">[T-IN-STATE]</span>   <span class="rv"><span id="sm-time-in-state">--</span> s</span>
+                        <span class="rk">[TASK DONE]</span>    <span class="rv" id="sm-task-completed">--</span>
+                        <span class="rk">[LEAF]</span>         <span class="rv" id="sm-is-leaf">--</span>
+                        <span class="rk">[EXITS]</span>        <span class="rv" id="sm-num-exits">--</span>
+                        <span class="rk">[PAUSED]</span>       <span class="rv" id="sm-paused">--</span>
+                    </div>
+                </div>
+                <div class="raw-block">
+                    <div class="raw-block__head">// RAW STATUS PACKET</div>
+                    <pre id="sm-status-data">{}</pre>
+                </div>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// QUICK REFERENCE</h3>
+                <details class="reference">
+                    <summary>AVAILABLE TASKS &amp; CONDITIONS</summary>
+                    <div class="reference__body">
+                        <p class="ref__heading">CONDITION TYPES</p>
+                        <ul class="ref__list">
+                            <li><code>always</code> — fires on every tick</li>
+                            <li><code>timer</code> — <code>{"type":"timer","duration":5.0}</code></li>
+                            <li><code>topic_value</code> — <code>{"type":"topic_value","topic":"velocity_x","operator":"&gt;","value":0.5}</code></li>
+                            <li><code>topic_message</code> — <code>{"type":"topic_message","topic":"/halt","timeout":2.0}</code></li>
+                        </ul>
+                        <p class="ref__heading">TASK TYPES</p>
+                        <ul class="ref__list">
+                            <li><code>set_led</code> · <code>roll</code> · <code>stop</code> · <code>matrix</code> · <code>heading</code> · <code>speed</code></li>
+                        </ul>
+                    </div>
+                </details>
+            </div>
+        </section>
+
+        <!-- ========================================================== -->
+        <!-- 06 · LED + MATRIX                                          -->
+        <!-- ========================================================== -->
+        <section id="matrix" class="tab-content panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// LED + MATRIX</h2>
+                <div class="panel__meta"><span class="meta__k">DEVICE</span><span class="meta__v">SPHERO BOLT</span></div>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// PRIMARY LED</h3>
+                <div class="color-controls">
+                    <div class="color-input">
+                        <label class="field__label">[ LED TYPE ]</label>
+                        <select id="led-type" class="select">
+                            <option value="main" selected>MAIN · Dome / Body</option>
+                            <option value="front">FRONT</option>
+                            <option value="back">BACK</option>
+                        </select>
+                    </div>
+                    <div class="color-input">
+                        <label class="field__label">[ R ] <span id="led-red-val">0</span></label>
+                        <input type="range" id="led-red" min="0" max="255" value="0" oninput="updateLedColorPreview()" class="range range--r">
+                    </div>
+                    <div class="color-input">
+                        <label class="field__label">[ G ] <span id="led-green-val">255</span></label>
+                        <input type="range" id="led-green" min="0" max="255" value="255" oninput="updateLedColorPreview()" class="range range--g">
+                    </div>
+                    <div class="color-input">
+                        <label class="field__label">[ B ] <span id="led-blue-val">0</span></label>
+                        <input type="range" id="led-blue" min="0" max="255" value="0" oninput="updateLedColorPreview()" class="range range--b">
+                    </div>
+                    <div class="color-preview" id="led-color-preview"></div>
+                </div>
+                <button class="btn btn-primary" onclick="sendLed()"><span class="btn__glyph">▸</span><span class="btn__label">APPLY LED</span></button>
+            </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// MATRIX PATTERNS</h3>
+                <div class="pattern-grid">
+                    <button class="pattern-btn" onclick="sendMatrix('smile')"><span class="pattern-btn__glyph">😊</span><span>SMILE</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('frown')"><span class="pattern-btn__glyph">☹</span><span>FROWN</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('heart')"><span class="pattern-btn__glyph">❤</span><span>HEART</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('star')"><span class="pattern-btn__glyph">★</span><span>STAR</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('arrow_up')"><span class="pattern-btn__glyph">↑</span><span>UP</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('arrow_down')"><span class="pattern-btn__glyph">↓</span><span>DOWN</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('arrow_left')"><span class="pattern-btn__glyph">←</span><span>LEFT</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('arrow_right')"><span class="pattern-btn__glyph">→</span><span>RIGHT</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('circle')"><span class="pattern-btn__glyph">○</span><span>CIRCLE</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('square')"><span class="pattern-btn__glyph">□</span><span>SQUARE</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('checkmark')"><span class="pattern-btn__glyph">✓</span><span>CHECK</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('cross')"><span class="pattern-btn__glyph">✕</span><span>CROSS</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('plus')"><span class="pattern-btn__glyph">+</span><span>PLUS</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('exclamation')"><span class="pattern-btn__glyph">!</span><span>ALERT</span></button>
+                    <button class="pattern-btn" onclick="sendMatrix('question')"><span class="pattern-btn__glyph">?</span><span>QUERY</span></button>
+                </div>
+
+                <h4 class="sub-title sub-title--small">// MATRIX COLOR</h4>
+                <div class="color-controls">
+                    <div class="color-input">
+                        <label class="field__label">[ R ] <span id="matrix-red-val">255</span></label>
+                        <input type="range" id="matrix-red" min="0" max="255" value="255" oninput="updateMatrixColorPreview()" class="range range--r">
+                    </div>
+                    <div class="color-input">
+                        <label class="field__label">[ G ] <span id="matrix-green-val">255</span></label>
+                        <input type="range" id="matrix-green" min="0" max="255" value="255" oninput="updateMatrixColorPreview()" class="range range--g">
+                    </div>
+                    <div class="color-input">
+                        <label class="field__label">[ B ] <span id="matrix-blue-val">255</span></label>
+                        <input type="range" id="matrix-blue" min="0" max="255" value="255" oninput="updateMatrixColorPreview()" class="range range--b">
+                    </div>
+                    <div class="color-preview" id="matrix-color-preview"></div>
+                </div>
+                <button class="btn btn-danger" onclick="clearMatrix()"><span class="btn__glyph">×</span><span class="btn__label">CLEAR MATRIX</span></button>
+            </div>
+        </section>
+
+        <!-- ========================================================== -->
+        <!-- 07 · MOTION                                                -->
+        <!-- ========================================================== -->
+        <section id="motion" class="tab-content panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// MOTION CONTROL</h2>
+                <div class="panel__meta"><span class="meta__k">MODE</span><span class="meta__v">MANUAL</span></div>
+            </div>
+
+            <div class="motion-grid">
+                <div class="subsection">
+                    <h3 class="sub-title">// HEADING</h3>
+                    <div class="compass-wrap">
                         <div class="compass">
                             <div class="compass-arrow" id="compass-arrow"></div>
                             <div class="compass-label">N</div>
+                            <div class="compass-tick" style="--a:90deg"></div>
+                            <div class="compass-tick" style="--a:180deg"></div>
+                            <div class="compass-tick" style="--a:270deg"></div>
                         </div>
-                        <div class="form-group">
-                            <label>Heading: <span id="heading-val">0</span>°</label>
-                            <input type="range" id="heading" min="0" max="359" value="0" oninput="updateHeading()">
-                        </div>
-                        <button class="btn btn-primary" onclick="sendHeading()">Set Heading</button>
+                    </div>
+                    <label class="field__label">[ HEADING ] <span id="heading-val">0</span>°</label>
+                    <input type="range" id="heading" min="0" max="359" value="0" oninput="updateHeading()" class="range range--amber">
+                    <button class="btn btn-primary" onclick="sendHeading()"><span class="btn__glyph">▸</span><span class="btn__label">SET HEADING</span></button>
+                </div>
+
+                <div class="subsection">
+                    <h3 class="sub-title">// SPEED</h3>
+                    <label class="field__label">[ SPEED ] <span id="speed-val">100</span> / 255</label>
+                    <input type="range" id="speed" min="0" max="255" value="100" oninput="updateSpeedVal()" class="range range--amber">
+                    <div class="button-row">
+                        <button class="btn btn-primary" onclick="sendSpeed()"><span class="btn__glyph">▸</span><span class="btn__label">APPLY</span></button>
+                        <button class="btn btn-danger" onclick="sendStop()"><span class="btn__glyph">■</span><span class="btn__label">STOP</span></button>
+                    </div>
+                    <div class="button-row">
+                        <button class="btn btn-secondary" onclick="resetToOrigin()"><span class="btn__glyph">⊕</span><span class="btn__label">RESET ORIGIN</span></button>
+                        <button class="btn btn-secondary" onclick="resetAim()"><span class="btn__glyph">⌖</span><span class="btn__label">RESET AIM</span></button>
                     </div>
                 </div>
 
-                <div class="control-section">
-                    <h3>Speed Control</h3>
-                    <div class="form-group">
-                        <label>Speed: <span id="speed-val">100</span> (0-255)</label>
-                        <input type="range" id="speed" min="0" max="255" value="100" oninput="updateSpeedVal()">
-                    </div>
-                    <button class="btn btn-primary" onclick="sendSpeed()">Set Speed</button>
-                    <button class="btn btn-danger" onclick="sendStop()">STOP</button>
-                    <button class="btn btn-success" onclick="resetToOrigin()">Reset to Origin</button>
-                    <button class="btn btn-success" onclick="resetAim()">Reset Aim</button>
-                </div>
-
-                <div class="control-section">
-                    <h3>Raw Motor Control</h3>
-                    <p class="info-text">Control left and right motors independently for precise maneuvering</p>
-                    <div class="motor-controls">
-                        <div class="motor-group">
-                            <h4>Left Motor</h4>
-                            <div class="form-group">
-                                <label>Mode:</label>
-                                <select id="left-motor-mode">
-                                    <option value="forward" selected>Forward</option>
-                                    <option value="reverse">Reverse</option>
-                                    <option value="brake">Brake</option>
-                                    <option value="off">Off</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Speed: <span id="left-motor-speed-val">100</span> (0-255)</label>
-                                <input type="range" id="left-motor-speed" min="0" max="255" value="100" oninput="updateLeftMotorSpeed()">
-                            </div>
-                        </div>
-                        <div class="motor-group">
-                            <h4>Right Motor</h4>
-                            <div class="form-group">
-                                <label>Mode:</label>
-                                <select id="right-motor-mode">
-                                    <option value="forward" selected>Forward</option>
-                                    <option value="reverse">Reverse</option>
-                                    <option value="brake">Brake</option>
-                                    <option value="off">Off</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>Speed: <span id="right-motor-speed-val">100</span> (0-255)</label>
-                                <input type="range" id="right-motor-speed" min="0" max="255" value="100" oninput="updateRightMotorSpeed()">
-                            </div>
-                        </div>
-                    </div>
-                    <div class="button-group">
-                        <button class="btn btn-primary" onclick="sendRawMotor()">Apply Motor Settings</button>
-                        <button class="btn btn-secondary" onclick="syncMotors()">Sync Motors (Both Forward)</button>
-                    </div>
-                    <div class="quick-patterns">
-                        <h4>Quick Patterns</h4>
-                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('spin-left')">Spin Left</button>
-                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('spin-right')">Spin Right</button>
-                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('curve-left')">Curve Left</button>
-                        <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('curve-right')">Curve Right</button>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3>Quick Move</h3>
-                    <div class="direction-pad">
-                        <button class="dir-btn" onclick="quickMove(0)">↑</button>
-                        <button class="dir-btn" onclick="quickMove(270)">←</button>
-                        <button class="dir-btn center" onclick="sendStop()">STOP</button>
-                        <button class="dir-btn" onclick="quickMove(90)">→</button>
-                        <button class="dir-btn" onclick="quickMove(180)">↓</button>
+                <div class="subsection">
+                    <h3 class="sub-title">// QUICK MOVE</h3>
+                    <div class="dpad">
+                        <button class="dpad__btn dpad__up" onclick="quickMove(0)">↑</button>
+                        <button class="dpad__btn dpad__left" onclick="quickMove(270)">←</button>
+                        <button class="dpad__btn dpad__center" onclick="sendStop()">STOP</button>
+                        <button class="dpad__btn dpad__right" onclick="quickMove(90)">→</button>
+                        <button class="dpad__btn dpad__down" onclick="quickMove(180)">↓</button>
                     </div>
                 </div>
             </div>
-        </div>
+
+            <div class="subsection">
+                <h3 class="sub-title">// RAW MOTOR · L / R</h3>
+                <p class="hint">Drive each motor independently for precise maneuvering.</p>
+                <div class="motor-grid">
+                    <div class="motor">
+                        <div class="motor__head">[ LEFT MOTOR ]</div>
+                        <label class="field__label">MODE</label>
+                        <select id="left-motor-mode" class="select">
+                            <option value="forward" selected>FORWARD</option>
+                            <option value="reverse">REVERSE</option>
+                            <option value="brake">BRAKE</option>
+                            <option value="off">OFF</option>
+                        </select>
+                        <label class="field__label">SPEED <span id="left-motor-speed-val">100</span> / 255</label>
+                        <input type="range" id="left-motor-speed" min="0" max="255" value="100" oninput="updateLeftMotorSpeed()" class="range range--amber">
+                    </div>
+                    <div class="motor">
+                        <div class="motor__head">[ RIGHT MOTOR ]</div>
+                        <label class="field__label">MODE</label>
+                        <select id="right-motor-mode" class="select">
+                            <option value="forward" selected>FORWARD</option>
+                            <option value="reverse">REVERSE</option>
+                            <option value="brake">BRAKE</option>
+                            <option value="off">OFF</option>
+                        </select>
+                        <label class="field__label">SPEED <span id="right-motor-speed-val">100</span> / 255</label>
+                        <input type="range" id="right-motor-speed" min="0" max="255" value="100" oninput="updateRightMotorSpeed()" class="range range--amber">
+                    </div>
+                </div>
+                <div class="button-row">
+                    <button class="btn btn-primary" onclick="sendRawMotor()"><span class="btn__glyph">▸</span><span class="btn__label">APPLY MOTORS</span></button>
+                    <button class="btn btn-secondary" onclick="syncMotors()"><span class="btn__glyph">⇉</span><span class="btn__label">SYNC FORWARD</span></button>
+                </div>
+                <div class="button-row">
+                    <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('spin-left')">SPIN ←</button>
+                    <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('spin-right')">SPIN →</button>
+                    <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('curve-left')">CURVE ←</button>
+                    <button class="btn btn-secondary btn-sm" onclick="setRawMotorPattern('curve-right')">CURVE →</button>
+                </div>
+            </div>
+        </section>
+
+        <footer class="footer">
+            <div class="footer__left">SCS·{{ sphero_name }} / OPERATIONAL</div>
+            <div class="footer__center">[SOCKET.IO {{ websocket_port }}] · [ROS2 ROLLING]</div>
+            <div class="footer__right">localhost:{{ websocket_port }}</div>
+        </footer>
     </div>
 
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
@@ -412,24 +472,17 @@
         window.SPHERO_NAME = "{{ sphero_name }}";
         window.WEBSOCKET_PORT = {{ websocket_port }};
 
-        // Override connectSphero to auto-connect on load
         window.addEventListener('DOMContentLoaded', function() {
-            // Simulate already connected state
-            document.getElementById('connection-status').textContent = 'Connected';
-            document.getElementById('connection-status').className = 'status-connected';
+            // Simulate already connected state for the legacy hook
+            const connEl = document.getElementById('connection-status');
+            connEl.textContent = 'CONNECTED';
+            connEl.className = 'status-connected';
             document.getElementById('state-name').textContent = window.SPHERO_NAME;
-            document.getElementById('state-connection').textContent = 'Connected';
+            document.getElementById('state-connection').textContent = 'CONNECTED';
 
-            // Enable all tabs
-            document.getElementById('state-tab').disabled = false;
-            document.getElementById('sensors-tab').disabled = false;
-            document.getElementById('plot-tab').disabled = false;
-            document.getElementById('tasks-tab').disabled = false;
-            document.getElementById('statemachine-tab').disabled = false;
-            document.getElementById('matrix-tab').disabled = false;
-            document.getElementById('motion-tab').disabled = false;
+            ['state-tab','sensors-tab','plot-tab','tasks-tab','statemachine-tab','matrix-tab','motion-tab']
+                .forEach((id) => { document.getElementById(id).disabled = false; });
 
-            // Auto-open State tab
             openTab({currentTarget: document.getElementById('state-tab')}, 'state');
         });
     </script>
