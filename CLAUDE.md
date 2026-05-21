@@ -10,370 +10,94 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **NEVER attempt to solve tasks yourself first**
 2. **ALWAYS evaluate if the task can be handled by one or more SME (Subject Matter Expert) agents:**
-   - `/agent ros2_expert` - For ROS2 nodes, topics, services, packages, launch files, multi-robot coordination
-   - `/agent arduino_expert` - For embedded systems, FreeRTOS, UWB, sensors, motor control, hardware integration
-   - `/agent web_expert` - For web interfaces, dashboards, WebSocket, APIs, responsive UI, visualizations
+   - `/agent ros2_expert` - ROS2 nodes, topics, services, packages, launch files, multi-robot coordination
+   - `/agent arduino_expert` - Embedded systems, FreeRTOS, UWB, sensors, motor control, hardware integration
+   - `/agent web_expert` - Web interfaces, dashboards, WebSocket, APIs, responsive UI, visualizations
 3. **Delegate tasks to the appropriate SME agent(s)** - Translate the user's request into a clear, meaningful task description for the agent
 4. **Present agent plans to the user** - When the agent returns with a plan, present it in a structured manner for approval
-5. **Coordinate multi-agent tasks** - If a task requires multiple agents (e.g., ROS2 + Web), coordinate between them
+5. **Coordinate multi-agent tasks** - If a task requires multiple agents, coordinate between them
 
 ### When to Delegate vs. Handle Directly
 
-**Always delegate to SME agents:**
-- ✅ Creating or modifying ROS2 packages/nodes
-- ✅ Implementing FreeRTOS tasks or hardware integration
-- ✅ Creating or modifying web interfaces
-- ✅ Adding new features or functionality
-- ✅ API or message definition work
-- ✅ State machine configurations
-- ✅ Integration work (Arduino-ROS2, Web-ROS2)
+**Always delegate to SME agents:** creating/modifying ROS2 packages or nodes, FreeRTOS/hardware integration, web interfaces, new features, API or message definition work, state machine configuration, integration work (Arduino-ROS2, Web-ROS2).
 
-**You can handle directly:**
-- ❌ Simple information queries ("What does this function do?")
-- ❌ Reading/explaining existing code
-- ❌ Troubleshooting/debugging assistance
-- ❌ Documentation questions
-- ❌ File navigation and search
-- ❌ Build/run command assistance
-
-### Task Translation Examples
-
-**User request:** "Add battery monitoring to the Sphero"
-**Your action:** Determine this is ROS2 work → `/agent ros2_expert` with: "Add battery level monitoring to sphero_instance_controller that publishes battery percentage to a new topic 'sphero/<name>/battery_level' at 1 Hz"
-
-**User request:** "Create a dashboard showing all robots"
-**Your action:** Determine this is web work → `/agent web_expert` with: "Create a web dashboard that displays status cards for multiple Sphero robots, showing battery, connection status, and current position with auto-refresh via WebSocket"
-
-**User request:** "Implement UWB positioning on Portenta"
-**Your action:** Determine this is Arduino work → `/agent arduino_expert` with: "Implement Two-Way Ranging (TWR) UWB positioning on Arduino Portenta C33 with UWB Shield using FreeRTOS tasks for ranging, calculation, and communication"
-
-**User request:** "Make the web interface mobile-friendly and add ROS2 support for new sensors"
-**Your action:** Determine this needs both agents → Delegate to `/agent web_expert` for mobile responsiveness AND `/agent ros2_expert` for sensor integration, then coordinate their plans
-
-### Your Responsibilities as Coordinator
-
-1. **Understand user intent** - Ask clarifying questions if needed
-2. **Identify the right agent(s)** - ROS2, Arduino, or Web (or multiple)
-3. **Translate requests** - Convert vague requests into specific, actionable tasks
-4. **Present plans clearly** - When agents return plans, summarize and highlight key points
-5. **Facilitate approval** - Help user review plans before agent execution
-6. **Coordinate multi-agent work** - Ensure agents' work is compatible and sequenced properly
+**Handle directly:** simple information queries, reading/explaining existing code, troubleshooting/debugging assistance, documentation questions, file navigation, build/run command assistance.
 
 ### Remember
 
 **You are the conductor, not the orchestra. Let the expert agents perform their specialized work.**
 
+## Coding Guidelines
+
+Behavioral guidelines to reduce common LLM coding mistakes. These apply when you (or a delegated SME agent) are writing code. Bias toward caution over speed; for trivial tasks, use judgment.
+
+### 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them — don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it — don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
 ## Overview
 
-This is a ROS2 workspace for controlling Sphero robots with multi-robot coordination, state machines, ArUco-based localization, and web interfaces. The workspace contains both single-robot and multi-robot packages with sophisticated task execution and game implementations.
+ROS2 Rolling workspace for multi-robot Sphero control with UWB positioning, ArUco-based localization, and a web dashboard.
 
-## Build System
+## Documentation
 
-**Build entire workspace:**
-```bash
-colcon build
-source install/setup.bash
-```
+- [`doc/package.md`](doc/package.md) - Package architecture, topic namespacing, key files, message types, state machine config
+- [`doc/development.md`](doc/development.md) - Build commands, running nodes, debugging, test scripts
+- [`doc/AGENTS.md`](doc/AGENTS.md) - SME agent workflow and detailed examples
+- Per-agent guides: [`doc/ROS2_AGENT_GUIDE.md`](doc/ROS2_AGENT_GUIDE.md), [`doc/ARDUINO_AGENT_GUIDE.md`](doc/ARDUINO_AGENT_GUIDE.md), [`doc/WEB_AGENT_GUIDE.md`](doc/WEB_AGENT_GUIDE.md)
 
-**Build specific package:**
-```bash
-colcon build --packages-select <package_name>
-source install/setup.bash
-```
-
-**Clean rebuild:**
-```bash
-rm -rf build/ install/ log/
-colcon build
-source install/setup.bash
-```
-
-## Package Architecture
-
-### Single-Robot Packages (Original Implementation)
-
-#### sphero_package
-Core low-level Sphero control package. Provides direct hardware interface via spherov2 library.
-- **Main node:** `sphero_controller_node.py`
-- **Topics:** Uses flat namespace (`/sphero/led`, `/sphero/sensors`, etc.)
-- **Use case:** Single-robot scenarios, direct hardware control
-
-#### sphero_web_interface
-Web-based control for single Sphero instance.
-- **Main node:** `web_server_node.py`
-- **Port:** 5000
-- **Features:** LED control, matrix patterns, motion control, sensor visualization
-
-#### sphero_statemachine
-Dynamic JSON-configurable state machine for single Sphero.
-- **Main nodes:** `state_machine_controller.py`, `task_executor.py`
-- **Key feature:** Topic-based transitions (timer, topic_value, topic_message conditions)
-- **Web UI:** http://localhost:5000/state_machine
-
-#### sphero_task_controller
-High-level task execution (move_to, patrol, circle, LED sequences).
-- **Main node:** `task_controller_node.py`
-- **Topics:** `/sphero/task`, `/sphero/task/status`
-
-### Multi-Robot Packages (Advanced Implementation)
-
-#### sphero_instance_controller
-**Primary multi-robot package** - designed for independent multi-robot control with namespaced topics.
-- **Architecture:** Core `Sphero` class (ROS-independent) + ROS2 node wrappers
-- **Namespacing:** All topics under `sphero/<sphero_name>/`
-- **Nodes:**
-  - `sphero_instance_device_controller_node.py` - Low-level commands
-  - `sphero_instance_task_controller_node.py` - High-level tasks
-  - `sphero_instance_statemachine_controller_node.py` - State machine
-- **Required parameter:** `sphero_name` (e.g., "SB-3660")
-- **Key insight:** Includes collision detection patching via `spherov2_collision_patch.py`
-
-#### multirobot_webserver
-Central web dashboard for managing multiple Spheros simultaneously.
-- **Main app:** `multirobot_webapp.py` (standalone Flask, not a ROS2 node)
-- **WebSocket servers:** `sphero_instance_websocket_server.py` (one per Sphero, ports 5001+)
-- **Port 5000:** Main dashboard
-- **Architecture:** Each Sphero gets dedicated WebSocket server + all three controllers
-
-#### aruco_slam
-ArUco marker-based localization for Sphero position tracking.
-- **Main node:** `aruco_slam_node.py`
-- **Marker IDs:**
-  - 0-3: Field corners (calibration)
-  - 10-13: Sphero robots (SB-3660, SB-74FB, SB-3716, SB-58EF)
-- **Topics:** `/aruco_slam/<sphero_name>/position` (geometry_msgs/PoseStamped)
-- **Coordinate system:** Origin at top-left, +X right, +Y down, units in cm
-
-#### soccer_game_controller
-Orchestrates multi-robot soccer game with ArUco calibration.
-- **Launch file:** `soccer_game.launch.py`
-- **Dependencies:** aruco_slam, multirobot_webserver, sphero_instance_controller
-- **Workflow:** Field calibration → robot detection → controller activation → positioning → demo
-
-### Game Implementations
-
-#### battleship_game
-Battleship game implementation with Sphero robots.
-- **Nodes:** `game_controller_node.py`, `human_controller_node.py`, `sphero_agent_node.py`
-- **Custom messages:** Attack, AttackResult, NewBoard
-- **Architecture:** Distributed node-based (see DESIGN.md)
-
-## Common Development Tasks
-
-### Running Single Sphero (Simple)
-```bash
-# Web interface (easiest)
-ros2 run sphero_web_interface web_server
-
-# OR direct controller
-ros2 run sphero_package sphero_controller_node.py --ros-args -p toy_name:=SB-3660
-```
-
-### Running Multi-Robot Setup
-```bash
-# Individual instances
-ros2 run sphero_instance_controller sphero_instance_device_controller_node.py --ros-args -p sphero_name:=SB-3660
-ros2 run sphero_instance_controller sphero_instance_device_controller_node.py --ros-args -p sphero_name:=SB-1234
-
-# OR use multi-robot webserver
-ros2 run multirobot_webserver multirobot_webapp
-# Then open http://localhost:5000 and add Spheros via UI
-```
-
-### State Machine Usage
-```bash
-# Single robot
-ros2 run sphero_statemachine state_machine_controller &
-ros2 run sphero_statemachine task_executor &
-# Load config via web UI at http://localhost:5000/state_machine
-
-# Multi-robot (per instance)
-ros2 run sphero_instance_controller sphero_instance_statemachine_controller_node.py --ros-args -p sphero_name:=SB-3660
-```
-
-### ArUco Localization
-```bash
-# Generate markers first
-ros2 run aruco_slam marker_generator
-
-# Run SLAM
-ros2 run aruco_slam aruco_slam_node --ros-args \
-  -p camera_id:=0 \
-  -p field_width_cm:=600.0 \
-  -p field_height_cm:=400.0
-```
-
-### Soccer Game Demo
-```bash
-ros2 launch soccer_game_controller soccer_game.launch.py
-```
-
-## Topic Namespacing Strategy
-
-**Single-robot packages:** Flat namespace `/sphero/*`
-- `/sphero/led`, `/sphero/sensors`, `/sphero/state`, `/sphero/task`
-
-**Multi-robot packages:** Per-instance namespace `sphero/<sphero_name>/*`
-- `sphero/SB-3660/led`, `sphero/SB-3660/sensors`, `sphero/SB-3660/state`
-- `sphero/SB-1234/led`, `sphero/SB-1234/sensors`, `sphero/SB-1234/state`
-
-**State machine topics:**
-- Single: `/state_machine/config`, `/state_machine/status`
-- Multi: `sphero/<sphero_name>/state_machine/config`, `sphero/<sphero_name>/state_machine/status`
-
-**ArUco topics:** `/aruco_slam/<sphero_name>/position`
-
-## Key Files to Understand
-
-### Core Implementation
-- `src/sphero_instance_controller/sphero_instance_controller/core/sphero/sphero.py` - Core Sphero class (ROS-independent)
-- `src/sphero_instance_controller/sphero_instance_controller/core/sphero/task.py` - Task definitions
-- `src/sphero_instance_controller/sphero_instance_controller/core/sphero/statemachine.py` - State machine logic
-
-### Topic-Based State Machines
-- `src/sphero_statemachine/sphero_statemachine/state_machine_controller.py` - Implements timer/topic transition conditions
-- See `TOPIC_TRANSITIONS_UPDATE.md` for transition condition documentation
-
-### Multi-Robot WebSocket
-- `src/multirobot_webserver/multirobot_webserver/multirobot_webapp.py` - Central dashboard
-- `src/sphero_instance_controller/sphero_instance_controller/sphero_instance_websocket_server.py` - Per-robot WebSocket
-
-### Localization
-- `src/aruco_slam/aruco_slam/aruco_slam_node.py` - ArUco detection and field mapping
-- `src/aruco_slam/aruco_slam/field_mapper.py` - Perspective transformation logic
-
-## Message Types
-
-### Custom Messages (sphero_instance_controller)
-- `SpheroSensor.msg` - Accelerometer, gyroscope, velocity, location data
-- `SpheroCommand.msg`, `SpheroRoll.msg`, `SpheroLed.msg`, etc.
-
-### Custom Messages (battleship_game)
-- `Attack.msg`, `AttackResult.msg`, `NewBoard.msg`
-
-### Standard ROS Messages Used
-- `std_msgs/String` - JSON-encoded commands and states
-- `sensor_msgs/BatteryState` - Battery status
-- `geometry_msgs/PoseStamped` - ArUco position tracking
-
-## State Machine Configuration
-
-State machines accept JSON configurations with:
-- **States:** name, description, entry_condition (always/timer/topic_value), task
-- **Transitions:** source, destination, trigger, condition
-- **Condition types:**
-  - `always` - Immediate entry
-  - `timer` - Duration-based
-  - `topic_value` - Topic field comparison (supports nested paths like "linear.x")
-  - `topic_message` - Any message received on topic
-
-Example templates in `src/sphero_statemachine/examples/`
-
-## Debugging Tips
-
-**Check running nodes:**
-```bash
-ros2 node list
-ros2 node info /<node_name>
-```
-
-**Monitor topics:**
-```bash
-ros2 topic list
-ros2 topic echo /sphero/state
-ros2 topic echo sphero/SB-3660/state
-ros2 topic hz /sphero/sensors
-```
-
-**Publish test commands:**
-```bash
-# Single robot
-ros2 topic pub /sphero/led std_msgs/String '{"data": "{\"red\": 255, \"green\": 0, \"blue\": 0}"}'
-
-# Multi-robot
-ros2 topic pub sphero/SB-3660/led std_msgs/String '{"data": "{\"red\": 255, \"green\": 0, \"blue\": 0}"}'
-```
-
-**Sphero connection issues:**
-```bash
-hciconfig  # Check Bluetooth is UP RUNNING
-# Reset Sphero: place on charger for 2 seconds, remove
-```
-
-**Web interface not loading:**
-```bash
-colcon build --packages-select sphero_web_interface  # Rebuild templates
-# Clear browser cache
-```
-
-## Important Implementation Details
-
-1. **Both task executor AND state machine controller required:** For state machines to execute Sphero tasks, both nodes must run simultaneously.
-
-2. **Namespacing consistency:** When working with multi-robot code, always use `sphero/<sphero_name>/` prefix. Hyphens in Sphero names become underscores in node names.
-
-3. **ArUco marker dictionary:** 4x4_50 dictionary. Markers must be flat and well-lit for detection.
-
-4. **Collision detection patching:** `spherov2_collision_patch.py` fixes upstream issues with spherov2 library collision callbacks.
-
-5. **External localization:** ArUco SLAM provides external position data via `/aruco_slam/<sphero_name>/position`. Spheros also have internal odometry from `toy.get_location()`.
-
-6. **Stall detection logic:** Task executors include timeout/stall detection for move_to tasks (see patrol method implementation).
-
-## Test Scripts
-
-Root directory contains test scripts for validating functionality:
-- `test_sphero_roll.py` - Roll command testing
-- `test_sphero_commands.py` - Command interface testing
-- `test_multi_sphero.py` - Multi-robot coordination
-- `test_aruco_detector.py` - ArUco detection validation
-
-## Documentation Files
-
-- `README.md` - Package overview and quick start
-- `DESIGN.md` - Battleship game architecture
-- `TOPIC_TRANSITIONS_UPDATE.md` - State machine transition conditions
-- Individual package READMEs in `src/*/README.md`
-- `ARCHITECTURE.md` (sphero_instance_controller) - Detailed architecture diagrams
-
-## Subject Matter Expert Agents
-
-This workspace has three persistent SME agents available. **For any implementation task, delegate to the appropriate agent rather than implementing yourself.**
-
-### Available Agents
-
-1. **ROS2 Expert** - `/agent ros2_expert`
-   - ROS2 packages, nodes, topics, services, launch files
-   - Multi-robot coordination
-   - State machines and task executors
-   - See: `ROS2_AGENT_GUIDE.md`
-
-2. **Arduino Expert** - `/agent arduino_expert`
-   - Arduino Portenta C33, UWB Shield, Stella boards
-   - FreeRTOS, embedded systems, sensors
-   - Hardware integration with ROS2
-   - See: `ARDUINO_AGENT_GUIDE.md`
-
-3. **Web Application Expert** - `/agent web_expert`
-   - Flask, WebSocket/Socket.IO, dashboards
-   - Real-time visualizations, responsive UI
-   - ROS2-web integration
-   - See: `WEB_AGENT_GUIDE.md`
-
-### How Agents Work
-
-1. Agent creates detailed plan
-2. Plan saved in `plans/<task>-<timestamp>.md`
-3. Agent asks for user approval
-4. Agent executes only after approval
-5. Agent reports results
-
-**Master guide:** See `AGENTS.md` for complete agent documentation and usage examples.
-
----
-
-## ROS2 Distribution
-
-This workspace uses ROS2 Rolling. Maintained by Siddharth Vaghela (siddharth.vaghela@tufts.edu).
-
-**Note:** All code written with assistance from Claude Code. Errors may exist in AI-generated code - users assume risk.
+Maintained by Siddharth Vaghela (siddharth.vaghela@tufts.edu).
