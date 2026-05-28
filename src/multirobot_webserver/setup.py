@@ -19,6 +19,8 @@ setup(
         # Install static files
         (os.path.join('share', package_name, 'static/css'), glob('static/css/*')),
         (os.path.join('share', package_name, 'static/js'), glob('static/js/*')),
+        # Install Foxglove Studio layouts
+        (os.path.join('share', package_name, 'foxglove'), glob('foxglove/*.json')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

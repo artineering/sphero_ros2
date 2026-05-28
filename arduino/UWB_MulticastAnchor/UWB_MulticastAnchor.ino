@@ -156,7 +156,7 @@ void setup() {
 
     // Heap-allocate so the object outlives setup()
     sessions[g] = new UWBRangingOneToMany(sessionId, anchorMac, destList);
-    sessions[g]->appParams.rangingDuration(500);
+    sessions[g]->appParams.rangingDuration(250);
     UWBSessionManager.addSession(*sessions[g]);
     delay(100);
     sessions[g]->init();

@@ -9,8 +9,13 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>sphero_instance_controller</depend>
+  <depend>multirobot_msgs</depend>
   <depend>launch_ros</depend>
+
+  <exec_depend>foxglove_bridge</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

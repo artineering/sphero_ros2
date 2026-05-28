@@ -1,0 +1,91 @@
+{
+  "configById": {
+    "3D!arena": {
+      "cameraState": {
+        "perspective": false,
+        "distance": 5,
+        "phi": 0,
+        "thetaOffset": 0,
+        "target": [0, 0, 0],
+        "targetOffset": [0, 0, 0],
+        "targetOrientation": [0, 0, 0, 1],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {
+        "/aruco_slam/.*": { "visible": true },
+        "/sphero/.*/uwb/position": { "visible": true }
+      },
+      "layers": {},
+      "publish": { "type": "point", "poseTopic": "/move_base_simple/goal", "pointTopic": "/clicked_point", "poseEstimateTopic": "/initialpose", "poseEstimateXDeviation": 0.5, "poseEstimateYDeviation": 0.5, "poseEstimateThetaDeviation": 0.2618 },
+      "imageMode": {}
+    },
+    "Plot!battery": {
+      "paths": [
+        { "value": "/sphero/.*/battery.percentage", "enabled": true, "timestampMethod": "receiveTime" }
+      ],
+      "minYValue": 0,
+      "maxYValue": 1,
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 300,
+      "foxglovePanelTitle": "Battery"
+    },
+    "Plot!sensors": {
+      "paths": [
+        { "value": "/sphero/.*/sensors.velocity_x", "enabled": true, "timestampMethod": "receiveTime" },
+        { "value": "/sphero/.*/sensors.velocity_y", "enabled": true, "timestampMethod": "receiveTime" },
+        { "value": "/sphero/.*/sensors.gyro_z", "enabled": false, "timestampMethod": "receiveTime" },
+        { "value": "/sphero/.*/sensors.accel_x", "enabled": false, "timestampMethod": "receiveTime" },
+        { "value": "/sphero/.*/sensors.accel_y", "enabled": false, "timestampMethod": "receiveTime" }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 300,
+      "foxglovePanelTitle": "Sensors"
+    },
+    "Log!rosout": {
+      "searchTerms": [],
+      "minLogLevel": 1,
+      "nameFilter": {},
+      "topicToRender": "/rosout"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": "3D!arena",
+    "second": {
+      "first": "Plot!battery",
+      "second": {
+        "first": "Plot!sensors",
+        "second": "Log!rosout",
+        "direction": "column",
+        "splitPercentage": 50
+      },
+      "direction": "column",
+      "splitPercentage": 33.3
+    },
+    "direction": "row",
+    "splitPercentage": 50
+  }
+}

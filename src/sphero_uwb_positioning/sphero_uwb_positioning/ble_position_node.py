@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """BLE passive-scan node that republishes UWB tag positions on ROS topics.
 
-Tags broadcast their computed (x_cm, y_cm) position via BLE manufacturer data.
-This node decodes the advertisement, maps tag_id -> sphero_name, and publishes
-PoseStamped per known tag plus a per-tag liveness DiagnosticArray.
+Tags broadcast four anchor distances via BLE manufacturer data. This node
+decodes the advertisement, runs 2D least-squares trilateration, applies a
+per-tag constant-velocity Kalman filter, and publishes PoseStamped per known
+tag plus a per-tag liveness DiagnosticArray.
 """
 
 import asyncio
@@ -15,6 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped
@@ -23,14 +25,16 @@ from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 
 UWB_NAME_PREFIX = "UWB-T"
 UWB_COMPANY_ID = 0xFFFF
-PAYLOAD_LEN = 5  # tag_id (1) + x_cm (2) + y_cm (2) — company id is the dict key
+PAYLOAD_LEN = 9   # tag_id (1) + dist_A0..A3 (4×uint16 LE) — company id is the dict key
+INVALID_DIST = 0xFFFF
 
 
 @dataclass
 class TagSample:
     tag_id: int
-    x_cm: int
-    y_cm: int
+    raw_dists: tuple          # (d0, d1, d2, d3) in cm; 0xFFFF = invalid
+    x_cm: float               # filtered position (set after KF update)
+    y_cm: float
     rssi_dbm: int
     ble_address: str
     last_seen_monotonic: float
@@ -38,6 +42,70 @@ class TagSample:
 
 def _name_safe(name: str) -> str:
     return name.replace("-", "_")
+
+
+def _trilaterate(anchors: np.ndarray, dists: np.ndarray) -> "tuple[float, float] | None":
+    """anchors: (N, 2) float array; dists: (N,) float array.
+    Returns (x_cm, y_cm) or None if solution fails.
+
+    Subtracts the last anchor's equation from all others to linearize the
+    quadratic system into A·[x,y]ᵀ = b (standard linear-LS trilateration).
+    """
+    n = len(anchors)
+    if n < 3:
+        return None
+    ref = anchors[-1]
+    r_ref = dists[-1]
+    A = 2.0 * (anchors[:-1] - ref)
+    b = (r_ref ** 2 - dists[:-1] ** 2
+         + anchors[:-1, 0] ** 2 - ref[0] ** 2
+         + anchors[:-1, 1] ** 2 - ref[1] ** 2)
+    result, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    return float(result[0]), float(result[1])
+
+
+class TagKalmanFilter:
+    """Constant-velocity 2D Kalman filter. State: [x, y, vx, vy]."""
+
+    def __init__(self, q_std: float, r_std: float) -> None:
+        self._q_std = q_std
+        self._r_std = r_std
+        self._x = None   # state vector (4,); None until first measurement
+        self._P = None   # covariance (4, 4)
+        self._H = np.array([[1.0, 0.0, 0.0, 0.0],
+                             [0.0, 1.0, 0.0, 0.0]])
+        self._R = r_std ** 2 * np.eye(2)
+
+    def update(self, z_x: float, z_y: float, dt: float) -> "tuple[float, float]":
+        """Predict then correct. Returns (x_est, y_est)."""
+        z = np.array([z_x, z_y])
+
+        if self._x is None:
+            # Initialize state from first measurement; skip prediction step.
+            self._x = np.array([z_x, z_y, 0.0, 0.0])
+            self._P = 1000.0 * np.eye(4)
+            return z_x, z_y
+
+        # Predict
+        F = np.array([[1.0, 0.0, dt,  0.0],
+                      [0.0, 1.0, 0.0, dt ],
+                      [0.0, 0.0, 1.0, 0.0],
+                      [0.0, 0.0, 0.0, 1.0]])
+        q = self._q_std ** 2
+        Q = q * np.array([[dt**4 / 4, 0.0,       dt**3 / 2, 0.0      ],
+                           [0.0,       dt**4 / 4, 0.0,       dt**3 / 2],
+                           [dt**3 / 2, 0.0,       dt**2,     0.0      ],
+                           [0.0,       dt**3 / 2, 0.0,       dt**2    ]])
+        x_pred = F @ self._x
+        P_pred = F @ self._P @ F.T + Q
+
+        # Correct
+        S = self._H @ P_pred @ self._H.T + self._R
+        K = P_pred @ self._H.T @ np.linalg.inv(S)
+        self._x = x_pred + K @ (z - self._H @ x_pred)
+        self._P = (np.eye(4) - K @ self._H) @ P_pred
+
+        return float(self._x[0]), float(self._x[1])
 
 
 class BlePositionNode(Node):
@@ -56,6 +124,12 @@ class BlePositionNode(Node):
         )
         self.declare_parameter("fake_mode", False)
         self.declare_parameter("fake_tag_ids", [1, 2])
+        self.declare_parameter(
+            "anchor_positions_cm",
+            [0.0, 0.0, 300.0, 0.0, 300.0, 300.0, 0.0, 300.0],
+        )
+        self.declare_parameter("process_noise_std_cm", 5.0)
+        self.declare_parameter("measurement_noise_std_cm", 15.0)
 
         self.publish_rate_hz: float = self.get_parameter("publish_rate_hz").value
         self.tag_stale_timeout_s: float = self.get_parameter("tag_stale_timeout_s").value
@@ -70,6 +144,11 @@ class BlePositionNode(Node):
         self.fake_mode: bool = self.get_parameter("fake_mode").value
         self.fake_tag_ids = list(self.get_parameter("fake_tag_ids").value)
 
+        ap = list(self.get_parameter("anchor_positions_cm").value)
+        self._anchors = np.array(ap).reshape(4, 2)
+        self._q_std: float = self.get_parameter("process_noise_std_cm").value
+        self._r_std: float = self.get_parameter("measurement_noise_std_cm").value
+
         if len(tag_ids) != len(sphero_names):
             raise ValueError(
                 f"tag_ids ({len(tag_ids)}) and sphero_names ({len(sphero_names)}) "
@@ -83,6 +162,8 @@ class BlePositionNode(Node):
         self._lock = threading.Lock()
         self._samples: dict[int, TagSample] = {}
         self._last_published: dict[int, TagSample] = {}
+        self._kfilters: dict[int, TagKalmanFilter] = {}
+        self._prev_mono: dict[int, float] = {}
 
         self._pose_pubs: dict[int, rclpy.publisher.Publisher] = {}
         for tid, name in self.tag_to_sphero.items():
@@ -156,7 +237,8 @@ class BlePositionNode(Node):
             return
 
         tag_id = payload[0]
-        x_cm, y_cm = struct.unpack("<hh", payload[1:5])
+        raw_dists = struct.unpack("<HHHH", payload[1:9])
+        # raw_dists[i] is distance_cm to anchor i, or 0xFFFF if invalid
 
         if tag_id not in self.tag_to_sphero:
             self.get_logger().debug(
@@ -165,18 +247,40 @@ class BlePositionNode(Node):
             )
             return
 
+        valid_mask = [d != INVALID_DIST for d in raw_dists]
+        valid_anchors = self._anchors[valid_mask]
+        valid_dists = np.array([d for d, ok in zip(raw_dists, valid_mask) if ok], dtype=float)
+
+        if len(valid_anchors) < 3:
+            return  # keep previous KF estimate
+
+        result = _trilaterate(valid_anchors, valid_dists)
+        if result is None:
+            return
+
+        x_raw, y_raw = result
+        now_mono = time.monotonic()
+        # Use 0.25 s as the first-step dt when no prior sample exists for this tag.
+        dt = now_mono - self._prev_mono[tag_id] if tag_id in self._prev_mono else 0.25
+        self._prev_mono[tag_id] = now_mono
+
+        kf = self._kfilters.setdefault(tag_id, TagKalmanFilter(self._q_std, self._r_std))
+        x_filt, y_filt = kf.update(x_raw, y_raw, dt)
+
         sample = TagSample(
             tag_id=tag_id,
-            x_cm=int(x_cm),
-            y_cm=int(y_cm),
+            raw_dists=raw_dists,
+            x_cm=x_filt,
+            y_cm=y_filt,
             rssi_dbm=int(advertisement_data.rssi),
             ble_address=device.address,
-            last_seen_monotonic=time.monotonic(),
+            last_seen_monotonic=now_mono,
         )
         with self._lock:
             self._samples[tag_id] = sample
 
     def _fake_callback(self) -> None:
+        # Bypass trilateration+KF — fake_mode is for UI/publish testing only.
         t = time.monotonic() - self._fake_t0
         now = time.monotonic()
         with self._lock:
@@ -188,8 +292,9 @@ class BlePositionNode(Node):
                 y = 150.0 + 100.0 * math.cos(0.2 * t + phase)
                 self._samples[tid] = TagSample(
                     tag_id=tid,
-                    x_cm=int(x),
-                    y_cm=int(y),
+                    raw_dists=(INVALID_DIST, INVALID_DIST, INVALID_DIST, INVALID_DIST),
+                    x_cm=x,
+                    y_cm=y,
                     rssi_dbm=-50,
                     ble_address=f"FA:KE:00:00:00:{tid:02X}",
                     last_seen_monotonic=now,
@@ -265,6 +370,10 @@ class BlePositionNode(Node):
                     KeyValue(key="rssi_dbm", value=str(sample.rssi_dbm)),
                     KeyValue(key="ble_address", value=sample.ble_address),
                     KeyValue(key="age_s", value=f"{age:.3f}"),
+                    KeyValue(key="dist_A0_cm", value=str(sample.raw_dists[0])),
+                    KeyValue(key="dist_A1_cm", value=str(sample.raw_dists[1])),
+                    KeyValue(key="dist_A2_cm", value=str(sample.raw_dists[2])),
+                    KeyValue(key="dist_A3_cm", value=str(sample.raw_dists[3])),
                 ]
             msg.status.append(status)
         self._diag_pub.publish(msg)
