@@ -38,6 +38,11 @@
                     <span class="dot" id="arucoDot" data-state="offline"></span>
                     <span class="chip__value" id="arucoLabel">OFFLINE</span>
                 </div>
+                <div class="chip chip--state" title="UWB positioning">
+                    <span class="chip__label">UWB</span>
+                    <span class="dot" id="uwbDot" data-state="offline"></span>
+                    <span class="chip__value" id="uwbLabel">OFFLINE</span>
+                </div>
                 <div class="chip chip--state" title="Backend health">
                     <span class="chip__label">LINK</span>
                     <span class="dot" id="linkDot" data-state="online"></span>
@@ -65,6 +70,14 @@
             <button class="action action--ghost" id="arucoStopBtn" hidden>
                 <span class="action__glyph">■</span>
                 <span class="action__label">STOP ARUCO</span>
+            </button>
+            <button class="action action--accent" id="uwbStartBtn">
+                <span class="action__glyph">◎</span>
+                <span class="action__label">START UWB</span>
+            </button>
+            <button class="action action--ghost" id="uwbStopBtn" hidden>
+                <span class="action__glyph">■</span>
+                <span class="action__label">STOP UWB</span>
             </button>
             <span class="ribbon__hint">DEPLOY → enter callsign → unit binds to next channel</span>
         </section>
@@ -127,6 +140,78 @@
         </section>
 
         <!-- ============================================================ -->
+        <!-- POSITIONING — UWB panel                                      -->
+        <!-- ============================================================ -->
+        <section class="panel panel--narrow">
+            <div class="panel__head">
+                <h2 class="panel__title">// POSITIONING</h2>
+                <div class="panel__meta">
+                    <span class="meta__row"><span class="meta__k">SUBSYSTEM</span><span class="meta__v">UWB</span></span>
+                </div>
+            </div>
+
+            <div class="loc__readout">
+                <div class="readout">
+                    <span class="readout__k">[STATE]</span>
+                    <span class="readout__v" id="uwbStateText">OFFLINE</span>
+                </div>
+                <div class="readout">
+                    <span class="readout__k">[ANCHORS]</span>
+                    <span class="readout__v" id="uwbAnchorsText">UNSET</span>
+                </div>
+                <div class="readout">
+                    <span class="readout__k">[MODE]</span>
+                    <span class="readout__v" id="uwbModeText">—</span>
+                </div>
+                <div class="readout">
+                    <span class="readout__k">[ASSIGNED]</span>
+                    <span class="readout__v" id="uwbAssignedText">0</span>
+                </div>
+            </div>
+
+            <div class="anchors">
+                <div class="anchors__grid">
+                    <div class="anchor">
+                        <span class="anchor__id">A0</span>
+                        <label class="anchor__field"><span>X</span>
+                            <input type="number" id="anchorA0x" step="0.1" inputmode="decimal" class="readout__input"></label>
+                        <label class="anchor__field"><span>Y</span>
+                            <input type="number" id="anchorA0y" step="0.1" inputmode="decimal" class="readout__input"></label>
+                    </div>
+                    <div class="anchor">
+                        <span class="anchor__id">A1</span>
+                        <label class="anchor__field"><span>X</span>
+                            <input type="number" id="anchorA1x" step="0.1" inputmode="decimal" class="readout__input"></label>
+                        <label class="anchor__field"><span>Y</span>
+                            <input type="number" id="anchorA1y" step="0.1" inputmode="decimal" class="readout__input"></label>
+                    </div>
+                    <div class="anchor">
+                        <span class="anchor__id">A2</span>
+                        <label class="anchor__field"><span>X</span>
+                            <input type="number" id="anchorA2x" step="0.1" inputmode="decimal" class="readout__input"></label>
+                        <label class="anchor__field"><span>Y</span>
+                            <input type="number" id="anchorA2y" step="0.1" inputmode="decimal" class="readout__input"></label>
+                    </div>
+                    <div class="anchor">
+                        <span class="anchor__id">A3</span>
+                        <label class="anchor__field"><span>X</span>
+                            <input type="number" id="anchorA3x" step="0.1" inputmode="decimal" class="readout__input"></label>
+                        <label class="anchor__field"><span>Y</span>
+                            <input type="number" id="anchorA3y" step="0.1" inputmode="decimal" class="readout__input"></label>
+                    </div>
+                </div>
+                <div class="anchors__foot">
+                    <label class="anchors__fake">
+                        <input type="checkbox" id="uwbFakeMode">
+                        <span>FAKE MODE</span>
+                    </label>
+                    <span class="loc__hint">Anchor coordinates in cm. Configure before starting positioning.</span>
+                    <button class="action action--primary" id="saveAnchorsBtn">SAVE ANCHORS</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
         <!-- FOOTER                                                       -->
         <!-- ============================================================ -->
         <footer class="footer">
@@ -147,7 +232,10 @@
                 <button class="modal__close close" aria-label="Close">×</button>
             </div>
             <div class="modal__body">
-                <label for="spheroNameInput" class="field__label">[ CALLSIGN ]</label>
+                <label for="tagIdSelect" class="field__label">[ UWB TAG ]</label>
+                <select id="tagIdSelect" class="field" required></select>
+                <p class="field__hint">Each unit binds to one UWB tag (1–16). Assigned tags are disabled.</p>
+                <label for="spheroNameInput" class="field__label" style="margin-top:16px;">[ CALLSIGN ]</label>
                 <input type="text" id="spheroNameInput" placeholder="SB-3660" class="field" autocomplete="off" spellcheck="false">
                 <p class="field__hint">Use the engraved Sphero ID (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). The next available channel will be assigned automatically.</p>
             </div>

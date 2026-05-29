@@ -16,6 +16,7 @@
   <depend>launch_ros</depend>
 
   <exec_depend>foxglove_bridge</exec_depend>
+  <exec_depend>sphero_uwb_positioning</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

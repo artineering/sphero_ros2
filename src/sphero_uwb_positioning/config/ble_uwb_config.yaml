@@ -6,7 +6,6 @@ uwb_ble_position_node:
     ble_adapter: "hci0"
     scan_active: true
     scan_restart_interval_s: 60.0
-    tag_ids:     [1, 2, 3, 4]
-    sphero_names: ["SB-3660", "SB-74FB", "SB-3716", "SB-58EF"]
+    tag_ids:     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     fake_mode: false
     fake_tag_ids: [1, 2]

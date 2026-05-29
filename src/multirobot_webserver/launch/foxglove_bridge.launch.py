@@ -30,6 +30,7 @@ def generate_launch_description():
                     '/sphero/.*',
                     '/sphero_fleet/.*',
                     '/aruco_slam/.*',
+                    '/uwb/.*',
                     '/rosout',
                     '/parameter_events',
                     '/tf',

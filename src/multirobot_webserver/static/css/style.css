@@ -650,6 +650,81 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
 }
 
 /* ============================================================
+   Select field (modal tag picker)
+   ============================================================ */
+select.field {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 36px;
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--fg-2) 50%),
+        linear-gradient(135deg, var(--fg-2) 50%, transparent 50%);
+    background-position:
+        calc(100% - 18px) calc(50% - 2px),
+        calc(100% - 13px) calc(50% - 2px);
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    cursor: pointer;
+}
+select.field option { background: var(--bg-1); color: var(--fg); }
+select.field option:disabled { color: var(--fg-3); }
+
+/* ============================================================
+   UWB anchor configuration
+   ============================================================ */
+.anchors { margin-top: 18px; }
+.anchors__grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+}
+.anchor {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: var(--rad);
+}
+.anchor__id {
+    color: var(--amber);
+    font-family: var(--mono);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    min-width: 26px;
+}
+.anchor__field {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--fg-3);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+}
+.anchor__field .readout__input { width: 72px; }
+.anchors__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+}
+.anchors__fake {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--fg-1);
+    font-size: 10.5px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    cursor: pointer;
+}
+.anchors__fake input { accent-color: var(--amber); width: 14px; height: 14px; cursor: pointer; }
+.anchors__foot .loc__hint { text-align: left; flex: 1; min-width: 180px; }
+
+/* ============================================================
    Responsive
    ============================================================ */
 @media (max-width: 720px) {
@@ -661,4 +736,5 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
     .footer__center, .footer__right { text-align: left; }
     .localization { flex-direction: column; align-items: flex-start; }
     .loc__hint { text-align: left; }
+    .anchors__grid { grid-template-columns: 1fr; }
 }

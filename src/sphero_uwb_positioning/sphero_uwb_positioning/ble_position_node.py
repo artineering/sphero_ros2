@@ -3,8 +3,8 @@
 
 Tags broadcast four anchor distances via BLE manufacturer data. This node
 decodes the advertisement, runs 2D least-squares trilateration, applies a
-per-tag constant-velocity Kalman filter, and publishes PoseStamped per known
-tag plus a per-tag liveness DiagnosticArray.
+per-tag constant-velocity Kalman filter, and publishes PoseStamped per active
+tag id (on uwb/tag_<id>/position) plus a per-tag liveness DiagnosticArray.
 """
 
 import asyncio
@@ -38,10 +38,6 @@ class TagSample:
     rssi_dbm: int
     ble_address: str
     last_seen_monotonic: float
-
-
-def _name_safe(name: str) -> str:
-    return name.replace("-", "_")
 
 
 def _trilaterate(anchors: np.ndarray, dists: np.ndarray) -> "tuple[float, float] | None":
@@ -118,10 +114,7 @@ class BlePositionNode(Node):
         self.declare_parameter("ble_adapter", "hci0")
         self.declare_parameter("scan_active", True)
         self.declare_parameter("scan_restart_interval_s", 60.0)
-        self.declare_parameter("tag_ids", [1, 2, 3, 4])
-        self.declare_parameter(
-            "sphero_names", ["SB-3660", "SB-74FB", "SB-3716", "SB-58EF"]
-        )
+        self.declare_parameter("tag_ids", list(range(1, 17)))
         self.declare_parameter("fake_mode", False)
         self.declare_parameter("fake_tag_ids", [1, 2])
         self.declare_parameter(
@@ -140,7 +133,6 @@ class BlePositionNode(Node):
             "scan_restart_interval_s"
         ).value
         tag_ids = list(self.get_parameter("tag_ids").value)
-        sphero_names = list(self.get_parameter("sphero_names").value)
         self.fake_mode: bool = self.get_parameter("fake_mode").value
         self.fake_tag_ids = list(self.get_parameter("fake_tag_ids").value)
 
@@ -149,15 +141,7 @@ class BlePositionNode(Node):
         self._q_std: float = self.get_parameter("process_noise_std_cm").value
         self._r_std: float = self.get_parameter("measurement_noise_std_cm").value
 
-        if len(tag_ids) != len(sphero_names):
-            raise ValueError(
-                f"tag_ids ({len(tag_ids)}) and sphero_names ({len(sphero_names)}) "
-                "must have the same length"
-            )
-
-        self.tag_to_sphero: dict[int, str] = {
-            int(tid): str(name) for tid, name in zip(tag_ids, sphero_names)
-        }
+        self._tag_ids: list[int] = [int(tid) for tid in tag_ids]
 
         self._lock = threading.Lock()
         self._samples: dict[int, TagSample] = {}
@@ -166,10 +150,12 @@ class BlePositionNode(Node):
         self._prev_mono: dict[int, float] = {}
 
         self._pose_pubs: dict[int, rclpy.publisher.Publisher] = {}
-        for tid, name in self.tag_to_sphero.items():
-            topic = f"sphero/{_name_safe(name)}/uwb/position"
+        for tid in self._tag_ids:
+            # ROS topic name tokens may not start with a digit, so the tag id
+            # token is prefixed: uwb/tag_<id>/position.
+            topic = f"uwb/tag_{tid}/position"
             self._pose_pubs[tid] = self.create_publisher(PoseStamped, topic, 10)
-            self.get_logger().info(f"Tag {tid} -> {name} -> {topic}")
+            self.get_logger().info(f"Tag {tid} -> {topic}")
 
         diag_qos = QoSProfile(depth=10, durability=QoSDurabilityPolicy.VOLATILE)
         self._diag_pub = self.create_publisher(DiagnosticArray, "/diagnostics", diag_qos)
@@ -240,9 +226,9 @@ class BlePositionNode(Node):
         raw_dists = struct.unpack("<HHHH", payload[1:9])
         # raw_dists[i] is distance_cm to anchor i, or 0xFFFF if invalid
 
-        if tag_id not in self.tag_to_sphero:
+        if tag_id not in self._pose_pubs:
             self.get_logger().debug(
-                f"Ignoring unknown tag_id={tag_id} from {device.address}",
+                f"Ignoring inactive tag_id={tag_id} from {device.address}",
                 throttle_duration_sec=5.0,
             )
             return
@@ -285,7 +271,7 @@ class BlePositionNode(Node):
         now = time.monotonic()
         with self._lock:
             for i, tid in enumerate(self.fake_tag_ids):
-                if tid not in self.tag_to_sphero:
+                if tid not in self._pose_pubs:
                     continue
                 phase = i * (math.pi / 2.0)
                 x = 150.0 + 100.0 * math.sin(0.3 * t + phase)
@@ -306,7 +292,7 @@ class BlePositionNode(Node):
         now_mono = time.monotonic()
         ros_now = self.get_clock().now().to_msg()
 
-        for tid in self.tag_to_sphero:
+        for tid in self._pose_pubs:
             sample = samples_snapshot.get(tid)
             if sample is not None:
                 self._last_published[tid] = sample
@@ -328,8 +314,7 @@ class BlePositionNode(Node):
             age = now_mono - source.last_seen_monotonic
             if age > self.tag_stale_timeout_s and sample is not None:
                 self.get_logger().warning(
-                    f"Tag {tid} ({self.tag_to_sphero[tid]}) is stale "
-                    f"({age:.1f}s since last adv)",
+                    f"Tag {tid} is stale ({age:.1f}s since last adv)",
                     throttle_duration_sec=5.0,
                 )
 
@@ -341,9 +326,9 @@ class BlePositionNode(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.frame_id
 
-        for tid, sphero_name in self.tag_to_sphero.items():
+        for tid in self._pose_pubs:
             status = DiagnosticStatus()
-            status.name = f"uwb_tag_{tid}_{_name_safe(sphero_name)}"
+            status.name = f"uwb_tag_{tid}"
             status.hardware_id = f"tag_{tid}"
 
             sample = samples_snapshot.get(tid) or self._last_published.get(tid)
@@ -352,7 +337,6 @@ class BlePositionNode(Node):
                 status.message = "never seen"
                 status.values = [
                     KeyValue(key="tag_id", value=str(tid)),
-                    KeyValue(key="sphero_name", value=sphero_name),
                 ]
             else:
                 age = now_mono - sample.last_seen_monotonic
@@ -364,7 +348,6 @@ class BlePositionNode(Node):
                     status.message = f"live ({age:.2f}s old)"
                 status.values = [
                     KeyValue(key="tag_id", value=str(tid)),
-                    KeyValue(key="sphero_name", value=sphero_name),
                     KeyValue(key="x_cm", value=str(sample.x_cm)),
                     KeyValue(key="y_cm", value=str(sample.y_cm)),
                     KeyValue(key="rssi_dbm", value=str(sample.rssi_dbm)),

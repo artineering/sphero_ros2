@@ -23,9 +23,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseStamped
 from sphero_instance_controller.msg import SpheroSensor
 from multirobot_msgs.msg import FleetRobot, FleetState
+
+# UWB tag pool: 16 tags, ids 1-16.
+UWB_TAG_IDS = list(range(1, 17))
 
 
 class FleetNode(Node):
@@ -39,14 +42,24 @@ class FleetNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
         )
         self.publisher = self.create_publisher(FleetState, '/sphero_fleet/robots', latched)
+        # QoS for UWB tag subscriptions: depth-10 VOLATILE to match the
+        # BLE node's default PoseStamped publisher profile.
+        self._uwb_qos = QoSProfile(
+            depth=10,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+        )
         # robots[name] = {'name_safe', 'status', 'added_at', 'last_seen',
-        #                 'battery', 'x', 'y', 'heading', 'sensor_sub'}
+        #                 'battery', 'x', 'y', 'heading', 'tag_id',
+        #                 'sensor_sub', 'uwb_sub'}
         self.robots: Dict[str, Dict] = {}
+        # tag_id -> sphero name (live assignments)
+        self.tag_assignments_map: Dict[int, str] = {}
         self.aruco_slam_running = False
         self._lock = threading.Lock()
         self.timer = self.create_timer(1.0, self._publish_fleet_state)
 
-    def add_robot(self, name: str, name_safe: str):
+    def add_robot(self, name: str, name_safe: str, tag_id: int = 0):
         with self._lock:
             if name in self.robots:
                 return
@@ -56,6 +69,15 @@ class FleetNode(Node):
                 lambda msg, n=name: self._on_sensor(n, msg),
                 10,
             )
+            uwb_sub = None
+            if tag_id:
+                uwb_sub = self.create_subscription(
+                    PoseStamped,
+                    f'/uwb/tag_{tag_id}/position',
+                    lambda msg, n=name: self._on_uwb(n, msg),
+                    self._uwb_qos,
+                )
+                self.tag_assignments_map[tag_id] = name
             self.robots[name] = {
                 'name_safe': name_safe,
                 'status': 'running',
@@ -65,16 +87,35 @@ class FleetNode(Node):
                 'x': 0.0,
                 'y': 0.0,
                 'heading': 0,
+                'tag_id': tag_id,
                 'sensor_sub': sub,
+                'uwb_sub': uwb_sub,
             }
         self._publish_fleet_state()
 
     def remove_robot(self, name: str):
         with self._lock:
             entry = self.robots.pop(name, None)
+            if entry is not None:
+                tag_id = entry.get('tag_id', 0)
+                if tag_id and self.tag_assignments_map.get(tag_id) == name:
+                    del self.tag_assignments_map[tag_id]
         if entry is not None:
             self.destroy_subscription(entry['sensor_sub'])
+            if entry.get('uwb_sub') is not None:
+                self.destroy_subscription(entry['uwb_sub'])
             self._publish_fleet_state()
+
+    def free_tag_ids(self) -> List[int]:
+        """Tag ids (1-16) not currently assigned to a robot."""
+        with self._lock:
+            assigned = set(self.tag_assignments_map.keys())
+        return [tid for tid in UWB_TAG_IDS if tid not in assigned]
+
+    def tag_assignments(self) -> Dict[int, str]:
+        """Snapshot of the live tag_id -> sphero name map."""
+        with self._lock:
+            return dict(self.tag_assignments_map)
 
     def set_robot_status(self, name: str, status: str):
         with self._lock:
@@ -85,15 +126,24 @@ class FleetNode(Node):
         self.aruco_slam_running = running
 
     def _on_sensor(self, name: str, msg: SpheroSensor):
+        # Pose (x/y) now comes from UWB (_on_uwb); sensor supplies
+        # battery + heading only.
         with self._lock:
             entry = self.robots.get(name)
             if entry is None:
                 return
             entry['last_seen'] = time.time()
             entry['battery'] = int(msg.battery_percentage)
-            entry['x'] = float(msg.x)
-            entry['y'] = float(msg.y)
             entry['heading'] = int(msg.yaw)
+
+    def _on_uwb(self, name: str, msg: PoseStamped):
+        # BLE node publishes in cm; convert to meters once here.
+        with self._lock:
+            entry = self.robots.get(name)
+            if entry is None:
+                return
+            entry['x'] = float(msg.pose.position.x) / 100.0
+            entry['y'] = float(msg.pose.position.y) / 100.0
 
     def _publish_fleet_state(self):
         msg = FleetState()
@@ -108,6 +158,7 @@ class FleetNode(Node):
                 robot.battery_percentage = entry['battery']
                 robot.pose = Point(x=entry['x'], y=entry['y'], z=0.0)
                 robot.heading = entry['heading']
+                robot.tag_id = entry['tag_id']
                 robot.added_at = entry['added_at']
                 robot.last_seen = entry['last_seen']
                 msg.robots.append(robot)
@@ -134,22 +185,45 @@ class SpheroInstanceManager:
         self.aruco_slam_process: Optional[subprocess.Popen] = None
         self.aruco_slam_enabled = False
         self.foxglove_bridge_process: Optional[subprocess.Popen] = None
+        # UWB positioning (BLE node) lifecycle
+        self.uwb_process: Optional[subprocess.Popen] = None
+        self.uwb_fake_mode = False
+        # Flat 8-float list (4 anchors x (x,y) in cm); None until configured.
+        self.anchor_positions_cm: Optional[List[float]] = None
+        self.uwb_tag_ids = list(UWB_TAG_IDS)
 
-    def add_sphero(self, sphero_name: str) -> Dict:
+    def add_sphero(self, sphero_name: str, tag_id: int) -> Dict:
         """
         Add a new Sphero instance and launch its WebSocket server.
 
         Args:
             sphero_name: Name of the Sphero (e.g., 'SB-3660')
+            tag_id: UWB tag id (1-16) that drives this Sphero's pose. Required.
 
         Returns:
             Dictionary with instance information
         """
         if sphero_name in self.instances:
+            existing = self.instances[sphero_name]
             return {
                 'success': False,
                 'message': f'Sphero {sphero_name} already exists',
-                'instance': self.instances[sphero_name]
+                'instance': {k: v for k, v in existing.items() if k != 'process'}
+            }
+
+        # A Sphero requires a valid, free tag id to join.
+        if tag_id not in self.uwb_tag_ids:
+            return {
+                'success': False,
+                'message': f'tag_id {tag_id} out of range (1-16)',
+                'instance': None
+            }
+        if self.fleet_node is not None and tag_id not in self.fleet_node.free_tag_ids():
+            assigned_to = self.fleet_node.tag_assignments().get(tag_id, '?')
+            return {
+                'success': False,
+                'message': f'tag_id {tag_id} already assigned to {assigned_to}',
+                'instance': None
             }
 
         try:
@@ -192,9 +266,12 @@ class SpheroInstanceManager:
             # Check if process is still running
             if process.poll() is None:
                 instance_info['status'] = 'running'
-                print(f"✓ {sphero_name} added successfully on port {port}")
+                print(f"✓ {sphero_name} added successfully on port {port} (tag {tag_id})")
+                instance_info['tag_id'] = tag_id
                 if self.fleet_node is not None:
-                    self.fleet_node.add_robot(sphero_name, sphero_name.replace('-', '_'))
+                    self.fleet_node.add_robot(
+                        sphero_name, sphero_name.replace('-', '_'), tag_id
+                    )
                 return {
                     'success': True,
                     'message': f'Sphero {sphero_name} added successfully',
@@ -412,6 +489,87 @@ class SpheroInstanceManager:
             return False
         return self.aruco_slam_process.poll() is None
 
+    def set_anchor_positions(self, coords: List[Dict]) -> Dict:
+        """
+        Store the 4-anchor coordinate map (A0..A3, x/y in cm).
+
+        Args:
+            coords: list of exactly 4 {'x', 'y'} dicts, in cm.
+
+        Returns:
+            Dictionary with result.
+        """
+        if not isinstance(coords, list) or len(coords) != 4:
+            return {'success': False, 'message': 'expected exactly 4 anchors'}
+
+        try:
+            flat: List[float] = []
+            for a in coords:
+                flat.append(float(a['x']))
+                flat.append(float(a['y']))
+        except (KeyError, TypeError, ValueError):
+            return {'success': False, 'message': 'each anchor needs numeric x and y'}
+
+        self.anchor_positions_cm = flat
+        if self.is_uwb_running():
+            return {'success': True, 'message': 'Stored; stop/start positioning to apply'}
+        return {'success': True, 'message': 'Anchor map stored'}
+
+    def start_uwb(self, fake_mode: bool = False) -> Dict:
+        """Start the BLE positioning node as a child process (Foxglove-style)."""
+        if self.is_uwb_running():
+            return {'success': False, 'message': 'UWB positioning already running'}
+        if self.anchor_positions_cm is None:
+            return {'success': False, 'message': 'anchors not configured'}
+
+        anchors_arg = '[' + ','.join(str(v) for v in self.anchor_positions_cm) + ']'
+        tag_ids_arg = '[' + ','.join(str(t) for t in self.uwb_tag_ids) + ']'
+        cmd = [
+            'ros2', 'run', 'sphero_uwb_positioning', 'ble_position_node',
+            '--ros-args',
+            '-p', f'anchor_positions_cm:={anchors_arg}',
+            '-p', f'tag_ids:={tag_ids_arg}',
+        ]
+        if fake_mode:
+            cmd += ['-p', 'fake_mode:=true']
+
+        print(f"Starting UWB positioning node (fake_mode={fake_mode})...")
+        self.uwb_process = subprocess.Popen(cmd)
+        self.uwb_fake_mode = fake_mode
+
+        time.sleep(2)
+        if self.uwb_process.poll() is None:
+            print("UWB positioning node started")
+            return {'success': True, 'message': 'UWB positioning started'}
+
+        self.uwb_process = None
+        self.uwb_fake_mode = False
+        return {'success': False, 'message': 'UWB positioning process died on startup'}
+
+    def stop_uwb(self) -> Dict:
+        """Stop the BLE positioning node."""
+        if not self.is_uwb_running():
+            return {'success': False, 'message': 'UWB positioning is not running'}
+
+        print("Stopping UWB positioning node...")
+        self.uwb_process.terminate()
+        try:
+            self.uwb_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print("   UWB positioning did not terminate, killing...")
+            self.uwb_process.kill()
+            self.uwb_process.wait()
+        self.uwb_process = None
+        self.uwb_fake_mode = False
+        print("UWB positioning node stopped")
+        return {'success': True, 'message': 'UWB positioning stopped'}
+
+    def is_uwb_running(self) -> bool:
+        """Check if the UWB positioning node is currently running."""
+        if self.uwb_process is None:
+            return False
+        return self.uwb_process.poll() is None
+
     def start_foxglove_bridge(self) -> Dict:
         """Start the foxglove_bridge for Foxglove Studio monitoring."""
         if self.foxglove_bridge_process is not None and self.foxglove_bridge_process.poll() is None:
@@ -452,6 +610,10 @@ class SpheroInstanceManager:
         if self.aruco_slam_process is not None:
             print("Shutting down ArUco SLAM...")
             self.stop_aruco_slam()
+
+        if self.uwb_process is not None:
+            print("Shutting down UWB positioning...")
+            self.stop_uwb()
 
         if self.foxglove_bridge_process is not None:
             self.stop_foxglove_bridge()
@@ -503,7 +665,7 @@ def get_sphero(sphero_name):
 
 @app.route('/api/spheros', methods=['POST'])
 def add_sphero():
-    """Add a new Sphero instance."""
+    """Add a new Sphero instance. Requires a valid, free tag_id (1-16)."""
     data = request.get_json()
 
     if not data or 'sphero_name' not in data:
@@ -512,8 +674,22 @@ def add_sphero():
             'message': 'Missing sphero_name in request'
         }), 400
 
+    if 'tag_id' not in data:
+        return jsonify({
+            'success': False,
+            'message': 'Missing tag_id in request'
+        }), 400
+
+    try:
+        tag_id = int(data['tag_id'])
+    except (TypeError, ValueError):
+        return jsonify({
+            'success': False,
+            'message': 'tag_id must be an integer (1-16)'
+        }), 400
+
     sphero_name = data['sphero_name']
-    result = manager.add_sphero(sphero_name)
+    result = manager.add_sphero(sphero_name, tag_id)
 
     if result['success']:
         return jsonify(result), 201
@@ -576,11 +752,96 @@ def aruco_slam_status():
     })
 
 
+@app.route('/api/uwb/tags', methods=['GET'])
+def uwb_tags():
+    """Report the UWB tag pool: all ids, free ids, and current assignments."""
+    if manager.fleet_node is None:
+        free = list(UWB_TAG_IDS)
+        assigned: Dict[str, str] = {}
+    else:
+        free = manager.fleet_node.free_tag_ids()
+        assigned = {str(k): v for k, v in manager.fleet_node.tag_assignments().items()}
+    return jsonify({
+        'success': True,
+        'all': list(UWB_TAG_IDS),
+        'free': free,
+        'assigned': assigned,
+    })
+
+
+@app.route('/api/uwb/anchors', methods=['GET'])
+def get_uwb_anchors():
+    """Return the currently stored anchor map (in cm), or null if unset."""
+    flat = manager.anchor_positions_cm
+    if flat is None:
+        return jsonify({'success': True, 'anchors_cm': None, 'configured': False})
+    anchors = [{'x': flat[i], 'y': flat[i + 1]} for i in range(0, len(flat), 2)]
+    return jsonify({'success': True, 'anchors_cm': anchors, 'configured': True})
+
+
+@app.route('/api/uwb/anchors', methods=['POST'])
+def set_uwb_anchors():
+    """Store the 4-anchor coordinate map (A0..A3, x/y in cm)."""
+    data = request.get_json() or {}
+    coords = data.get('anchors_cm')
+    result = manager.set_anchor_positions(coords)
+
+    if result['success']:
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/api/uwb/start', methods=['POST'])
+def start_uwb():
+    """Start the UWB positioning node (requires anchors configured)."""
+    data = request.get_json() or {}
+    fake_mode = bool(data.get('fake_mode', False))
+    result = manager.start_uwb(fake_mode)
+
+    if result['success']:
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/api/uwb/stop', methods=['POST'])
+def stop_uwb():
+    """Stop the UWB positioning node."""
+    result = manager.stop_uwb()
+
+    if result['success']:
+        return jsonify(result), 200
+    else:
+        return jsonify(result), 400
+
+
+@app.route('/api/uwb/status', methods=['GET'])
+def uwb_status():
+    """Get UWB positioning status (for polling)."""
+    assigned_count = (
+        len(manager.fleet_node.tag_assignments())
+        if manager.fleet_node is not None else 0
+    )
+    return jsonify({
+        'success': True,
+        'running': manager.is_uwb_running(),
+        'anchors_configured': manager.anchor_positions_cm is not None,
+        'fake_mode': manager.uwb_fake_mode,
+        'assigned_count': assigned_count,
+    })
+
+
 _ros_executor: Optional[MultiThreadedExecutor] = None
+_shutting_down = False
 
 
 def signal_handler(sig, frame):
-    """Handle shutdown signal."""
+    """Handle shutdown signal (idempotent — re-entrant SIGINT from ros2 launch is ignored)."""
+    global _shutting_down
+    if _shutting_down:
+        return
+    _shutting_down = True
     print("\nShutting down multi-robot web server...")
     manager.shutdown_all()
     if _ros_executor is not None:

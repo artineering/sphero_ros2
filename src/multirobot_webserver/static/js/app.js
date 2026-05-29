@@ -12,6 +12,8 @@ class ControlStation {
         this.pendingDetach = null;
         this.bootedAt = Date.now();
         this.aruco = { running: false, enabled: false };
+        this.uwb = { running: false, anchorsConfigured: false, fakeMode: false, assignedCount: 0 };
+        this.uwbTags = { all: [], free: [], assigned: {} };
         this.linkOk = true;
         this.lastSyncAt = null;
         this.init();
@@ -27,23 +29,40 @@ class ControlStation {
         // ArUco status polling — every 4s
         this.refreshAruco();
         setInterval(() => this.refreshAruco(), 4000);
+        // UWB status polling — every 4s
+        this.refreshUwb();
+        setInterval(() => this.refreshUwb(), 4000);
+        // Prefill anchor inputs once on load
+        this.refreshAnchors();
     }
 
     bindActions() {
-        $('#addSpheroBtn').addEventListener('click', () => this.openModal('addSpheroModal', 'spheroNameInput'));
-        $('#refreshBtn').addEventListener('click', () => { this.refresh(); this.refreshAruco(); });
+        $('#addSpheroBtn').addEventListener('click', () => {
+            this.openModal('addSpheroModal', 'spheroNameInput');
+            this.refreshUwbTags();
+        });
+        $('#refreshBtn').addEventListener('click', () => { this.refresh(); this.refreshAruco(); this.refreshUwb(); });
         $('#arucoStartBtn').addEventListener('click', () => this.startAruco());
         $('#arucoStopBtn').addEventListener('click', () => this.stopAruco());
+        $('#uwbStartBtn').addEventListener('click', () => this.startUwb());
+        $('#uwbStopBtn').addEventListener('click', () => this.stopUwb());
+        $('#saveAnchorsBtn').addEventListener('click', () => this.saveAnchors());
 
         // Deploy modal
         const confirmAdd = $('#confirmAddBtn');
         const cancelAdd = $('#cancelBtn');
         const nameInput = $('#spheroNameInput');
+        const tagSelect = $('#tagIdSelect');
         confirmAdd.addEventListener('click', () => {
             const name = nameInput.value.trim();
-            if (!name) return;
-            this.deploySphero(name);
-            this.closeModal('addSpheroModal');
+            if (!name) { this.toast('Enter a callsign first.', 'error', 'DEPLOY'); return; }
+            const opt = tagSelect.options[tagSelect.selectedIndex];
+            if (!tagSelect.value || (opt && opt.disabled)) {
+                this.toast('Select a free UWB tag.', 'error', 'DEPLOY');
+                return;
+            }
+            const tagId = parseInt(tagSelect.value, 10);
+            this.deploySphero(name, tagId);
         });
         cancelAdd.addEventListener('click', () => this.closeModal('addSpheroModal'));
         nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmAdd.click(); });
@@ -108,18 +127,21 @@ class ControlStation {
         }
     }
 
-    async deploySphero(name) {
+    async deploySphero(name, tagId) {
         try {
             const r = await fetch('/api/spheros', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sphero_name: name }),
+                body: JSON.stringify({ sphero_name: name, tag_id: tagId }),
             });
             const data = await r.json();
             if (data.success) {
-                this.toast(`Unit ${name} bound to channel ${data.instance?.port ?? '?'}`, 'success', 'DEPLOY');
+                this.toast(`Unit ${name} bound to channel ${data.instance?.port ?? '?'} (tag ${data.instance?.tag_id ?? tagId})`, 'success', 'DEPLOY');
+                this.closeModal('addSpheroModal');
                 this.refresh();
+                this.refreshUwbTags();
             } else {
+                // Keep the modal open so the operator can correct the error.
                 this.toast(`Deploy failed: ${data.message}`, 'error', 'DEPLOY');
             }
         } catch (err) {
@@ -187,6 +209,208 @@ class ControlStation {
         } catch (err) {
             this.toast('ArUco uplink lost.', 'error', 'ARUCO');
         }
+    }
+
+    /* -------------------------------------------------------- UWB API */
+    async refreshUwb() {
+        try {
+            const r = await fetch('/api/uwb/status');
+            const data = await r.json();
+            this.uwb = {
+                running: !!data.running,
+                anchorsConfigured: !!data.anchors_configured,
+                fakeMode: !!data.fake_mode,
+                assignedCount: data.assigned_count || 0,
+            };
+            this.renderUwb();
+        } catch (err) {
+            // Silent — link state is covered by /api/spheros polling.
+        }
+        this.refreshUwbTags();
+    }
+
+    async refreshUwbTags() {
+        try {
+            const r = await fetch('/api/uwb/tags');
+            const data = await r.json();
+            if (data.success) {
+                this.uwbTags = {
+                    all: data.all || [],
+                    free: data.free || [],
+                    assigned: data.assigned || {},
+                };
+                if ($('#addSpheroModal').classList.contains('show')) {
+                    this.populateTagSelect();
+                }
+            }
+        } catch (err) {
+            // Silent.
+        }
+    }
+
+    populateTagSelect() {
+        const select = $('#tagIdSelect');
+        const confirmBtn = $('#confirmAddBtn');
+        select.innerHTML = '';
+
+        if (!this.uwbTags.all.length || !this.uwbTags.free.length) {
+            const ph = document.createElement('option');
+            ph.value = '';
+            ph.disabled = true;
+            ph.selected = true;
+            ph.textContent = this.uwbTags.all.length ? 'no free tags' : 'loading…';
+            select.appendChild(ph);
+            confirmBtn.disabled = true;
+            return;
+        }
+
+        confirmBtn.disabled = false;
+        const firstFree = this.uwbTags.free[0];
+        this.uwbTags.all.forEach((id) => {
+            const opt = document.createElement('option');
+            opt.value = String(id);
+            const owner = this.uwbTags.assigned[String(id)];
+            if (owner) {
+                opt.disabled = true;
+                opt.textContent = `${id} · ${owner}`;
+            } else {
+                opt.textContent = String(id);
+            }
+            if (id === firstFree) opt.selected = true;
+            select.appendChild(opt);
+        });
+    }
+
+    async refreshAnchors() {
+        try {
+            const r = await fetch('/api/uwb/anchors');
+            const data = await r.json();
+            if (data.success && data.configured && Array.isArray(data.anchors_cm)) {
+                data.anchors_cm.forEach((a, i) => {
+                    const xi = $(`#anchorA${i}x`);
+                    const yi = $(`#anchorA${i}y`);
+                    if (xi && a && a.x != null) xi.value = a.x;
+                    if (yi && a && a.y != null) yi.value = a.y;
+                });
+            }
+        } catch (err) {
+            // Silent.
+        }
+    }
+
+    async saveAnchors() {
+        const anchors = [];
+        for (let i = 0; i < 4; i++) {
+            const x = parseFloat($(`#anchorA${i}x`).value);
+            const y = parseFloat($(`#anchorA${i}y`).value);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) {
+                this.toast(`Anchor A${i} needs numeric X and Y.`, 'error', 'UWB');
+                return;
+            }
+            anchors.push({ x, y });
+        }
+        try {
+            const r = await fetch('/api/uwb/anchors', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ anchors_cm: anchors }),
+            });
+            const data = await r.json();
+            if (data.success) {
+                this.toast(data.message, 'success', 'UWB');
+                this.refreshUwb();
+                this.refreshAnchors();
+            } else {
+                this.toast(`Anchor save failed: ${data.message}`, 'error', 'UWB');
+            }
+        } catch (err) {
+            this.toast('UWB uplink lost.', 'error', 'UWB');
+        }
+    }
+
+    async startUwb() {
+        if (!this.uwb.anchorsConfigured) {
+            this.toast('Configure anchors first.', 'error', 'UWB');
+            return;
+        }
+        const fakeMode = $('#uwbFakeMode').checked;
+        try {
+            const r = await fetch('/api/uwb/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fake_mode: fakeMode }),
+            });
+            const data = await r.json();
+            if (data.success) {
+                this.toast(`UWB positioning online${fakeMode ? ' (fake)' : ''}`, 'success', 'UWB');
+                this.refreshUwb();
+            } else {
+                this.toast(`UWB start failed: ${data.message}`, 'error', 'UWB');
+            }
+        } catch (err) {
+            this.toast('UWB uplink lost.', 'error', 'UWB');
+        }
+    }
+
+    async stopUwb() {
+        try {
+            const r = await fetch('/api/uwb/stop', { method: 'POST' });
+            const data = await r.json();
+            if (data.success) {
+                this.toast('UWB positioning offline', 'success', 'UWB');
+                this.refreshUwb();
+            } else {
+                this.toast(`UWB stop failed: ${data.message}`, 'error', 'UWB');
+            }
+        } catch (err) {
+            this.toast('UWB uplink lost.', 'error', 'UWB');
+        }
+    }
+
+    renderUwb() {
+        const dot = $('#uwbDot');
+        const label = $('#uwbLabel');
+        const stateText = $('#uwbStateText');
+        const anchorsText = $('#uwbAnchorsText');
+        const modeText = $('#uwbModeText');
+        const assignedText = $('#uwbAssignedText');
+        const startBtn = $('#uwbStartBtn');
+        const stopBtn = $('#uwbStopBtn');
+
+        if (this.uwb.running) {
+            dot.dataset.state = 'online';
+            label.textContent = 'ONLINE';
+            stateText.textContent = 'RUNNING';
+            stateText.style.color = 'var(--green)';
+            startBtn.hidden = true;
+            stopBtn.hidden = false;
+        } else {
+            dot.dataset.state = 'offline';
+            label.textContent = 'OFFLINE';
+            stateText.textContent = 'OFFLINE';
+            stateText.style.color = 'var(--fg-2)';
+            startBtn.hidden = false;
+            stopBtn.hidden = true;
+            startBtn.disabled = !this.uwb.anchorsConfigured;
+        }
+
+        if (this.uwb.anchorsConfigured) {
+            anchorsText.textContent = 'CONFIGURED';
+            anchorsText.style.color = 'var(--green)';
+        } else {
+            anchorsText.textContent = 'UNSET';
+            anchorsText.style.color = 'var(--amber)';
+        }
+
+        if (this.uwb.running) {
+            modeText.textContent = this.uwb.fakeMode ? 'FAKE' : 'LIVE';
+            modeText.style.color = this.uwb.fakeMode ? 'var(--amber)' : 'var(--fg)';
+        } else {
+            modeText.textContent = '—';
+            modeText.style.color = 'var(--fg-2)';
+        }
+
+        assignedText.textContent = this.uwb.assignedCount;
     }
 
     /* -------------------------------------------------------- render: fleet */

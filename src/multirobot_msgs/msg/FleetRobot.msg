@@ -4,5 +4,6 @@ string status
 uint8 battery_percentage
 geometry_msgs/Point pose
 int16 heading
+uint8 tag_id
 float64 added_at
 float64 last_seen
