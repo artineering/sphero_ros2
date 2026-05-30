@@ -180,6 +180,92 @@ ros2 run aruco_slam aruco_slam_node
 ros2 topic echo /aruco_slam/SB-3660/position
 ```
 
+## Matrix-Marker Positioning (Active LED Markers)
+
+In addition to the printed-ArUco workflow above, this package provides a second
+positioning source that uses the Spheros' own 8x8 LED matrix as an active,
+emissive marker. Instead of attaching a printed tag, each robot displays an
+assigned `(hue, fill)` marker that the camera classifies to recover its identity
+and field position. This is useful for bare Spheros (no printed markers) that
+yaw freely, since both marker primitives are rotation-invariant.
+
+### How it differs from ArUco SLAM
+
+- **Marker identity**: an assigned `(hue, fill)` pair instead of an ArUco ID.
+  Identity space = 8 hues x 2 fills (`filled`, `ring`) = 16 markers.
+- **Field calibration**: a **blue-tape arena boundary** is detected and used as
+  the four field corners, replacing the printed corner markers (0-3). The
+  perspective transform (FieldMapper) is otherwise shared with ArUco SLAM.
+- **LED ownership**: the node writes only the robot's matrix marker and the
+  `type:"main"` LED (color boost). The front/back aim LEDs are owned by the
+  state-machine layer and are never touched.
+- **Pose output**: poses are published on the neutral localization contract
+  topic `/localization/<name_safe>/position` (hyphens in names become
+  underscores), distinct from the ArUco `/aruco_slam/<name>/position` topics.
+
+### Hue Palette
+
+Eight emissive hues are used (chosen for separability; white / near-off avoided
+to prevent bloom washout): Red, Orange, Yellow, Green, Cyan, Blue, Magenta,
+Purple. Each is paired with a fill of `filled` (solid 8x8) or `ring` (the
+`circle` pattern), giving 16 distinct markers.
+
+### Run the Matrix SLAM Node
+
+Via the dev launch file (uses `config/matrix_positioning.yaml`, including the
+dev `robot_table` fallback assignments):
+
+```bash
+ros2 launch aruco_slam matrix_positioning.launch.py
+```
+
+Or directly:
+
+```bash
+ros2 run aruco_slam matrix_slam_node --ros-args \
+  -p camera_id:=0 -p field_width_cm:=300.0 -p field_height_cm:=200.0
+```
+
+In production the marker assignments are supplied by the webserver via the
+`marker_assignments` string parameter (a JSON list of
+`{"name", "hue", "fill"}` entries). When that parameter is empty, the node falls
+back to the dev `robot_table` config (a list of `"name:hue:fill"` strings).
+
+### Calibrate the Color Model (optional)
+
+`color_calibrator` cycles the fleet through each hue, samples the observed
+emissive blob under the camera locks, and writes learned hue centroids to
+`config/color_model.yaml`. It warns if any two hue centroids overlap within
+their radius. The matrix node loads this model via the `color_model_path`
+parameter, falling back to nominal palette HSV when absent.
+
+```bash
+ros2 run aruco_slam color_calibrator --ros-args \
+  -p robot_names:="['SB-3660','SB-74FB']" -p camera_id:=0
+```
+
+### Key Matrix Node Parameters
+
+- `marker_assignments` (string): production JSON assignment list (see above)
+- `robot_table` (list): dev-only fallback `"name:hue:fill"` assignments
+- `color_model_path` (string): path to learned hue centroids YAML
+- `drive_main_led` (bool): also drive each robot's main LED to its hue (default: true)
+- `led_brightness_scale` (float): dims marker/LED RGB to preserve hue (default: 0.4)
+- `blue_lower_hsv` / `blue_upper_hsv` (list): HSV range for blue-tape boundary
+- `boundary_min_area_frac` (float): minimum boundary area as a fraction of frame
+- Camera locks: `lock_white_balance`, `wb_temperature`, `lock_exposure`,
+  `exposure`, `lock_autofocus`
+- Blob / fill thresholds: `min_blob_area_px`, `max_blob_area_px`,
+  `ring_center_frac`, `ring_contrast_thresh`, `brightness_thresh`
+
+### Matrix Node Topics
+
+- Publishes `sphero/<name_safe>/matrix` — assigns each robot's marker
+- Publishes `sphero/<name_safe>/led` (type `main` only) — hue color boost
+- Publishes `/localization/<name_safe>/position` (geometry_msgs/PoseStamped, cm)
+- Reuses the ArUco diagnostics topics `/aruco_slam/calibration_status`,
+  `/aruco_slam/all_markers`, and `/aruco_slam/camera_feed`
+
 ## Future Enhancements
 
 - [ ] Orientation (theta) calculation from marker rotation

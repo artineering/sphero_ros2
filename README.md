@@ -60,9 +60,24 @@ sphero/SB-3660/
 └── state_machine/{config,status}              (FSM)
 
 /aruco_slam/<sphero_name>/position             (PoseStamped, cm)
+/localization/<sphero_name>/position           (PoseStamped, cm — neutral contract)
 ```
 
 Hyphens in Sphero names become underscores in ROS2 node names.
+
+### Positioning Sources
+
+The webserver selects a positioning source per fleet from `none`, `aruco`,
+`matrix`, or `uwb`:
+
+- `none` — no external localization
+- `aruco` — printed ArUco markers (`aruco_slam`), publishes `/aruco_slam/<name>/position`
+- `matrix` — active LED-matrix markers (`aruco_slam` matrix node), publishes the
+  neutral `/localization/<name>/position` contract
+- `uwb` — UWB ranging (`sphero_uwb_positioning`)
+
+See [`src/aruco_slam/README.md`](src/aruco_slam/README.md) for the ArUco and
+matrix-marker workflows.
 
 ## Repo Layout
 

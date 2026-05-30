@@ -67,6 +67,94 @@ A comprehensive web-based interface for managing and controlling multiple Sphero
   - Real-time state updates
   - Command publishing to ROS2 topics
 
+## Positioning Sources
+
+The webserver can drive exactly one positioning source at a time. The three real
+sources (`aruco`, `matrix`, `uwb`) all publish the shared
+`/localization/<name>/position` contract, so only one may run at once
+(single-active-publisher rule). A fourth pseudo-source, `none`, runs no
+localization at all (leaving the camera free).
+
+| Source   | Description |
+|----------|-------------|
+| `none`   | Default. No positioning runs; nothing publishes `/localization/*`. |
+| `aruco`  | ArUco-marker SLAM (camera-based). |
+| `matrix` | LED-matrix marker positioning (camera-based). |
+| `uwb`    | UWB anchor/tag positioning. |
+
+### Startup behavior
+
+The initial source is read from the `POSITIONING_SOURCE` environment variable
+(default `none`) when the app starts:
+
+- `none` — nothing is started; pick a source from the UI/API.
+- `uwb` — selected but **not** auto-started, because UWB needs its anchor
+  coordinates configured first. Configure anchors, then start it via the UI/API.
+- `aruco` / `matrix` — started automatically at boot.
+
+The active source can be changed at runtime through the dashboard's positioning-
+source ribbon or the `POST /api/positioning_source` endpoint. Switching sources
+starts the chosen one and stops the other two.
+
+On startup the webserver also self-starts a `foxglove_bridge`
+(`ws://<host>:8765`) for Foxglove Studio monitoring; it is stopped on shutdown.
+
+## Distributed Workers / Worker Registry
+
+The coordinator can spawn Sphero instance trees on remote RPi4 BLE worker nodes
+instead of locally. Each worker runs the
+[`sphero_worker_agent`](../sphero_worker_agent/README.md) HTTP launcher agent,
+which the coordinator calls to spawn, remove, and inspect Sphero trees.
+
+### Worker registry
+
+On startup the coordinator loads `config/workers.yaml` (installed to the package
+share directory) into a `WorkerRegistry`. If the file is absent, no registry is
+loaded and `add_sphero` keeps spawning locally (the original single-host flow is
+unchanged).
+
+When a registry **is** loaded, `add_sphero` selects the least-loaded online
+worker — the one with the most free BLE slots — with a deterministic tie-break
+by config order then name, and rejects new spawns when every online worker is at
+capacity. The registry tracks each worker's live Sphero `count`, `capacity`
+(default 4 BLE links per Pi), and `online` flag in memory, and accounts a slot
+on `assign` / off `release`.
+
+### `config/workers.yaml`
+
+```yaml
+# Shared launcher-agent settings.
+agent:
+  token: '<bearer-token>'        # SPHERO_AGENT_TOKEN env overrides this
+
+workers:
+  - name: rpi4-node01            # unique worker id (also the tie-break key)
+    host: 10.0.0.11              # worker hostname/IP on the dedicated LAN
+    ssh_user: svaghela           # used by deploy/sync scripts only, not the agent
+    port: 8181                   # worker launcher-agent HTTP port (default 8181)
+    capacity: 4                  # max simultaneous Spheros / BLE links (default 4)
+    # online: true               # optional; set false to exclude a worker
+  - name: rpi4-node02
+    host: 10.0.0.12
+    ...
+```
+
+Per-worker fields: `name` (required, unique), `host`, `ssh_user`, `port`
+(default `8181`), `capacity` (default `4`), `online` (default `true`). The
+shared `agent.token` is the bearer token presented to every worker agent; the
+`SPHERO_AGENT_TOKEN` environment variable overrides it at runtime so the secret
+can stay out of the repo.
+
+### Remote spawn wiring
+
+When a registry is loaded, adding a Sphero calls the selected worker's agent over
+HTTP (`POST {worker}/spawn` with `{name, port, external_localization}`), and
+removing it calls `DELETE {worker}/spawn/<name>`. Per-worker liveness is derived
+from a cached `GET {worker}/status` so a dead or slow Pi can never stall the
+webserver. See the
+[`sphero_worker_agent` README](../sphero_worker_agent/README.md) for the agent
+HTTP API and per-Pi setup.
+
 ## Installation
 
 ### Prerequisites
@@ -110,6 +198,15 @@ The system will:
 ### Accessing Individual Controller
 
 Click the "**Open Controller**" button on any Sphero card to open its dedicated controller interface in a new tab.
+
+### Selecting a Positioning Source
+
+Use the **Positioning Source** ribbon to switch the active source with one click:
+**NONE**, **ARUCO**, **MATRIX**, or **UWB**. The active source is highlighted and
+also shown in the header **SOURCE** status chip. Only one source publishes
+`/localization` at a time; selecting a new source stops the previous one. UWB
+requires its anchor coordinates to be configured (in the positioning panel)
+before it can start. See [Positioning Sources](#positioning-sources).
 
 ### Removing a Sphero
 
@@ -171,6 +268,72 @@ GET /api/spheros/{sphero_name}
 GET /health
 ```
 
+### Get Positioning Source
+```http
+GET /api/positioning_source
+```
+**Response:**
+```json
+{
+  "success": true,
+  "source": "matrix",
+  "sources": ["none", "aruco", "matrix", "uwb"],
+  "running": { "aruco": false, "matrix": true, "uwb": false }
+}
+```
+
+### Set Positioning Source
+```http
+POST /api/positioning_source
+Content-Type: application/json
+
+{
+  "source": "matrix"
+}
+```
+Selects the active source, starting it and stopping the other two
+(single-active-publisher rule). `source` must be one of `none`, `aruco`,
+`matrix`, `uwb`. Returns `200` with the resolved `source` on success, `400`
+otherwise. See [Positioning Sources](#positioning-sources).
+
+### Get Workers
+```http
+GET /api/workers
+```
+Snapshot of the worker registry (only meaningful when `config/workers.yaml` is
+present). Refreshes each worker's `online` flag from its cached agent `/status`.
+**Response:**
+```json
+{
+  "success": true,
+  "registry_loaded": true,
+  "workers": [
+    {
+      "name": "rpi4-node01",
+      "host": "10.0.0.11",
+      "port": 8181,
+      "capacity": 4,
+      "count": 1,
+      "free": 3,
+      "online": true
+    }
+  ],
+  "total_capacity": 16,
+  "total_count": 1
+}
+```
+When no registry is loaded, `registry_loaded` is `false` and `workers` is empty.
+See [Distributed Workers](#distributed-workers--worker-registry).
+
+> **Note:** The Add Sphero endpoint (`POST /api/spheros`) now also requires a
+> `tag_id` field (integer, 1–16) in addition to `sphero_name`. When a worker
+> registry is loaded, the instance is spawned on the least-loaded remote worker
+> instead of locally.
+
+> The webserver additionally exposes positioning-source control endpoints under
+> `/api/aruco_slam/*`, `/api/uwb/*` (start/stop/status, anchors, tags), and
+> `/api/markers`. These are primarily driven by the dashboard UI.
+
 ## WebSocket Events (Instance Server)
 
 Each Sphero instance WebSocket server supports these events:
@@ -214,7 +377,10 @@ multirobot_webserver/
 ├── multirobot_webserver/
 │   ├── __init__.py
 │   ├── multirobot_webapp.py              # Main web application
+│   ├── worker_registry.py                # Distributed BLE worker registry + selection
 │   └── sphero_instance_websocket_server.py  # WebSocket server node
+├── config/
+│   └── workers.yaml                      # Distributed worker definitions (installed to share/)
 ├── templates/
 │   └── index.html                        # Main dashboard UI
 ├── static/
@@ -222,6 +388,8 @@ multirobot_webserver/
 │   │   └── style.css                     # Styling
 │   └── js/
 │       └── app.js                        # Frontend logic
+├── test/
+│   └── test_worker_registry.py           # Worker registry unit tests
 ├── package.xml
 ├── setup.py
 ├── setup.cfg
@@ -245,6 +413,13 @@ Each Sphero uses namespaced topics:
 /sphero/SB-3660/state_machine/config
 ... (and more)
 ```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSITIONING_SOURCE` | `none` | Initial positioning source brought up at startup. One of `none`, `aruco`, `matrix`, `uwb` (case-insensitive; unknown values fall back to `none`). See [Positioning Sources](#positioning-sources). |
+| `SPHERO_AGENT_TOKEN` | _(from `config/workers.yaml`)_ | Bearer token the coordinator presents to every worker launcher agent (`Authorization: Bearer <token>`). Overrides the `agent.token` value in `workers.yaml` so the secret can stay out of the repo. Empty means no auth header (dev mode). See [Distributed Workers](#distributed-workers--worker-registry). |
 
 ## Example Workflow
 
