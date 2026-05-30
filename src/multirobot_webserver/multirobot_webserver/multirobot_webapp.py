@@ -728,6 +728,103 @@ class SpheroInstanceManager:
                 'message': f'Error: {str(e)}'
             }
 
+    def _free_tag_ids(self) -> List[int]:
+        """
+        Authoritative free UWB tag ids (1-16). Delegates to fleet_node when
+        present; otherwise derives from tag_ids already tracked on local
+        instances so the no-fleet_node path still avoids in-batch collisions.
+        """
+        if self.fleet_node is not None:
+            return self.fleet_node.free_tag_ids()
+        used = {inst.get('tag_id') for inst in self.instances.values()}
+        return [tid for tid in self.uwb_tag_ids if tid not in used]
+
+    def add_spheros_batch(self, names: List[str]) -> Dict:
+        """
+        Deploy several Spheros in one call, auto-assigning the next free UWB
+        tag to each. Tags are recomputed per-iteration so a successful add
+        within this batch removes its tag from the pool before the next name is
+        processed (no intra-batch collision). Per-item results carry the
+        assigned tag/port on success or a failure reason.
+
+        Args:
+            names: Raw callsigns; normalized here (strip, drop blanks, dedupe
+                preserving first-seen order).
+
+        Returns: {success, deployed, failed, results:[{name, success,
+                  tag_id?, port?, reason?}]}
+        """
+        seen = set()
+        ordered: List[str] = []
+        for raw in names:
+            name = str(raw).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+
+        results: List[Dict] = []
+        deployed = 0
+        for name in ordered:
+            if name in self.instances:
+                results.append({'name': name, 'success': False,
+                                'reason': f'{name} already deployed'})
+                continue
+            free = self._free_tag_ids()
+            if not free:
+                results.append({'name': name, 'success': False,
+                                'reason': 'no free UWB tags'})
+                continue
+            tag_id = free[0]
+            res = self.add_sphero(name, tag_id)
+            if res.get('success'):
+                deployed += 1
+                inst = res.get('instance') or {}
+                results.append({
+                    'name': name,
+                    'success': True,
+                    'tag_id': inst.get('tag_id', tag_id),
+                    'port': inst.get('port'),
+                })
+            else:
+                results.append({'name': name, 'success': False,
+                                'reason': res.get('message', 'deploy failed')})
+
+        return {
+            'success': True,
+            'deployed': deployed,
+            'failed': len(results) - deployed,
+            'results': results,
+        }
+
+    def remove_spheros_batch(self, names: List[str]) -> Dict:
+        """
+        Detach several Spheros in one call. Thin loop over remove_sphero;
+        per-item results mirror add_spheros_batch.
+
+        Returns: {success, removed, failed, results:[{name, success, reason?}]}
+        """
+        results: List[Dict] = []
+        removed = 0
+        for raw in names:
+            name = str(raw).strip()
+            if not name:
+                continue
+            res = self.remove_sphero(name)
+            if res.get('success'):
+                removed += 1
+                results.append({'name': name, 'success': True})
+            else:
+                results.append({'name': name, 'success': False,
+                                'reason': res.get('message', 'detach failed')})
+
+        return {
+            'success': True,
+            'removed': removed,
+            'failed': len(results) - removed,
+            'results': results,
+        }
+
     def get_all_instances(self) -> List[Dict]:
         """
         Get information about all Sphero instances.
@@ -1289,6 +1386,54 @@ def add_sphero():
         return jsonify(result), 201
     else:
         return jsonify(result), 400
+
+
+@app.route('/api/spheros/batch', methods=['POST'])
+def add_spheros_batch():
+    """Deploy several Spheros at once with server-assigned UWB tags.
+
+    Request: {names: [...]}. Per-item failures are reported in `results`
+    rather than as HTTP errors; 400 only if `names` is missing/not a
+    list/empty after normalization.
+    """
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data.get('names'), list):
+        return jsonify({
+            'success': False,
+            'message': 'Missing names list in request',
+        }), 400
+
+    names = [str(n).strip() for n in data['names'] if str(n).strip()]
+    if not names:
+        return jsonify({
+            'success': False,
+            'message': 'No callsigns provided',
+        }), 400
+
+    return jsonify(manager.add_spheros_batch(names)), 200
+
+
+@app.route('/api/spheros/batch_delete', methods=['POST'])
+def remove_spheros_batch():
+    """Detach several Spheros at once.
+
+    Request: {names: [...]}. Per-item failures are reported in `results`.
+    """
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data.get('names'), list):
+        return jsonify({
+            'success': False,
+            'message': 'Missing names list in request',
+        }), 400
+
+    names = [str(n).strip() for n in data['names'] if str(n).strip()]
+    if not names:
+        return jsonify({
+            'success': False,
+            'message': 'No callsigns provided',
+        }), 400
+
+    return jsonify(manager.remove_spheros_batch(names)), 200
 
 
 @app.route('/api/spheros/<sphero_name>', methods=['DELETE'])

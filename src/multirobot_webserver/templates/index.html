@@ -112,6 +112,17 @@
         <section class="panel">
             <div class="panel__head">
                 <h2 class="panel__title">// FLEET</h2>
+                <div class="fleet__select" id="fleetSelectBar" hidden>
+                    <span class="fleet__count" id="selectedCount">[ 0 SELECTED ]</span>
+                    <button class="action action--danger" id="detachSelectedBtn" disabled>
+                        <span class="action__glyph">×</span>
+                        <span class="action__label">DETACH SELECTED</span>
+                    </button>
+                    <button class="action action--danger" id="detachAllBtn">
+                        <span class="action__glyph">⊗</span>
+                        <span class="action__label">DETACH ALL</span>
+                    </button>
+                </div>
                 <div class="panel__meta">
                     <span class="meta__row"><span class="meta__k">CAPACITY</span><span class="meta__v"><span id="capacityFill">0</span>/∞</span></span>
                     <span class="meta__sep">·</span>
@@ -252,20 +263,18 @@
         <div class="modal__panel">
             <div class="modal__head">
                 <span class="modal__tag">[ DEPLOY ]</span>
-                <h3 class="modal__title">BIND NEW UNIT</h3>
+                <h3 class="modal__title">BIND NEW UNITS</h3>
                 <button class="modal__close close" aria-label="Close">×</button>
             </div>
             <div class="modal__body">
-                <label for="tagIdSelect" class="field__label">[ UWB TAG ]</label>
-                <select id="tagIdSelect" class="field" required></select>
-                <p class="field__hint">Each unit binds to one UWB tag (1–16). Assigned tags are disabled.</p>
-                <label for="spheroNameInput" class="field__label" style="margin-top:16px;">[ CALLSIGN ]</label>
-                <input type="text" id="spheroNameInput" placeholder="SB-3660" class="field" autocomplete="off" spellcheck="false">
-                <p class="field__hint">Use the engraved Sphero ID (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). The next available channel will be assigned automatically.</p>
+                <label for="spheroNamesInput" class="field__label">[ CALLSIGNS ]</label>
+                <textarea id="spheroNamesInput" class="field" rows="6" autocomplete="off" spellcheck="false" placeholder="SB-3660&#10;SB-58EF"></textarea>
+                <p class="field__hint">One callsign per line (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). UWB tags (1–16) and channels are auto-assigned to free slots.</p>
+                <p class="field__hint"><span id="batchSummary">0 callsigns · — tags free</span></p>
             </div>
             <div class="modal__foot">
                 <button id="cancelBtn" class="action action--ghost">CANCEL</button>
-                <button id="confirmAddBtn" class="action action--primary">DEPLOY</button>
+                <button id="confirmAddBtn" class="action action--primary">DEPLOY ALL</button>
             </div>
         </div>
     </div>

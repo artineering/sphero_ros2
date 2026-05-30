@@ -10,6 +10,8 @@ class ControlStation {
     constructor() {
         this.spheros = [];
         this.pendingDetach = null;
+        this.pendingBatchDetach = null;
+        this.selected = new Set();
         this.bootedAt = Date.now();
         this.aruco = { running: false, enabled: false };
         this.uwb = { running: false, anchorsConfigured: false, fakeMode: false, assignedCount: 0 };
@@ -42,8 +44,9 @@ class ControlStation {
 
     bindActions() {
         $('#addSpheroBtn').addEventListener('click', () => {
-            this.openModal('addSpheroModal', 'spheroNameInput');
+            this.openModal('addSpheroModal', 'spheroNamesInput');
             this.refreshUwbTags();
+            this.updateBatchSummary();
         });
         $('#refreshBtn').addEventListener('click', () => { this.refresh(); this.refreshAruco(); this.refreshUwb(); });
         $('#arucoStartBtn').addEventListener('click', () => this.startAruco());
@@ -58,30 +61,32 @@ class ControlStation {
         // Deploy modal
         const confirmAdd = $('#confirmAddBtn');
         const cancelAdd = $('#cancelBtn');
-        const nameInput = $('#spheroNameInput');
-        const tagSelect = $('#tagIdSelect');
+        const namesInput = $('#spheroNamesInput');
         confirmAdd.addEventListener('click', () => {
-            const name = nameInput.value.trim();
-            if (!name) { this.toast('Enter a callsign first.', 'error', 'DEPLOY'); return; }
-            const opt = tagSelect.options[tagSelect.selectedIndex];
-            if (!tagSelect.value || (opt && opt.disabled)) {
-                this.toast('Select a free UWB tag.', 'error', 'DEPLOY');
-                return;
-            }
-            const tagId = parseInt(tagSelect.value, 10);
-            this.deploySphero(name, tagId);
+            const names = this.parseCallsigns(namesInput.value);
+            if (!names.length) { this.toast('Enter at least one callsign.', 'error', 'DEPLOY'); return; }
+            this.deploySpheros(names);
         });
         cancelAdd.addEventListener('click', () => this.closeModal('addSpheroModal'));
-        nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmAdd.click(); });
+        namesInput.addEventListener('input', () => this.updateBatchSummary());
 
         // Detach modal
         $('#confirmRemoveBtn').addEventListener('click', () => {
-            if (this.pendingDetach) {
+            if (this.pendingBatchDetach) {
+                const names = this.pendingBatchDetach;
+                this.pendingBatchDetach = null;
+                this.detachSpheros(names);
+                this.closeModal('confirmRemoveModal');
+            } else if (this.pendingDetach) {
                 this.detachSphero(this.pendingDetach);
                 this.closeModal('confirmRemoveModal');
             }
         });
         $('#cancelRemoveBtn').addEventListener('click', () => this.closeModal('confirmRemoveModal'));
+
+        // Batch detach controls (fleet selection bar)
+        $('#detachSelectedBtn').addEventListener('click', () => this.requestBatchDetach([...this.selected]));
+        $('#detachAllBtn').addEventListener('click', () => this.requestBatchDetach(this.spheros.map((s) => s.name)));
 
         // Generic close-on-X / outside-click
         $$('.modal .close').forEach((btn) => {
@@ -134,25 +139,98 @@ class ControlStation {
         }
     }
 
-    async deploySphero(name, tagId) {
+    // Split a textarea blob into clean callsigns: one per line, trimmed,
+    // blanks dropped, deduped preserving first-seen order (server is the
+    // authoritative tag/dup arbiter — this is just client-side tidy-up).
+    parseCallsigns(text) {
+        const seen = new Set();
+        const out = [];
+        (text || '').split('\n').forEach((line) => {
+            const name = line.trim();
+            if (name && !seen.has(name)) { seen.add(name); out.push(name); }
+        });
+        return out;
+    }
+
+    updateBatchSummary() {
+        const el = $('#batchSummary');
+        if (!el) return;
+        const n = this.parseCallsigns($('#spheroNamesInput').value).length;
+        const free = this.uwbTags.free.length;
+        el.textContent = `${n} callsign${n === 1 ? '' : 's'} · ${free} tag${free === 1 ? '' : 's'} free`;
+    }
+
+    async deploySpheros(names) {
+        // Friendly pre-warn for names already deployed (server stays authoritative).
+        const existing = new Set(this.spheros.map((s) => s.name));
+        const dupes = names.filter((n) => existing.has(n));
+        if (dupes.length) {
+            this.toast(`Already deployed: ${this.truncateNames(dupes)}`, 'info', 'DEPLOY');
+        }
         try {
-            const r = await fetch('/api/spheros', {
+            const r = await fetch('/api/spheros/batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sphero_name: name, tag_id: tagId }),
+                body: JSON.stringify({ names }),
             });
             const data = await r.json();
-            if (data.success) {
-                this.toast(`Unit ${name} bound to channel ${data.instance?.port ?? '?'} (tag ${data.instance?.tag_id ?? tagId})`, 'success', 'DEPLOY');
+            if (!data.success) {
+                this.toast(`Deploy failed: ${data.message || 'bad request'}`, 'error', 'DEPLOY');
+                return;
+            }
+            this.summarizeBatch(data, 'DEPLOY', 'deployed');
+            this.refresh();
+            this.refreshUwbTags();
+            // Full success → close; partial → keep open with the failed lines.
+            if (data.failed === 0) {
                 this.closeModal('addSpheroModal');
-                this.refresh();
-                this.refreshUwbTags();
             } else {
-                // Keep the modal open so the operator can correct the error.
-                this.toast(`Deploy failed: ${data.message}`, 'error', 'DEPLOY');
+                const failed = (data.results || []).filter((x) => !x.success).map((x) => x.name);
+                $('#spheroNamesInput').value = failed.join('\n');
+                this.updateBatchSummary();
             }
         } catch (err) {
             this.toast('Deploy uplink lost.', 'error', 'DEPLOY');
+        }
+    }
+
+    // One summary toast for a batch result. `verb` is the success past-tense
+    // word ('deployed'/'removed'); `data.{deployed|removed, failed, results}`.
+    summarizeBatch(data, tag, verb) {
+        const okCount = verb === 'deployed' ? data.deployed : data.removed;
+        if (!data.failed) {
+            this.toast(`${okCount} ${verb}`, 'success', tag);
+            return;
+        }
+        const reasons = (data.results || [])
+            .filter((x) => !x.success)
+            .map((x) => `${x.name} (${x.reason || 'failed'})`);
+        this.toast(`${okCount} ${verb}, ${data.failed} failed: ${this.truncateNames(reasons)}`, 'error', tag);
+    }
+
+    truncateNames(list, max = 3) {
+        if (list.length <= max) return list.join('; ');
+        return `${list.slice(0, max).join('; ')} +${list.length - max} more`;
+    }
+
+    async detachSpheros(names) {
+        try {
+            const r = await fetch('/api/spheros/batch_delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ names }),
+            });
+            const data = await r.json();
+            if (!data.success) {
+                this.toast(`Detach failed: ${data.message || 'bad request'}`, 'error', 'DETACH');
+                return;
+            }
+            (data.results || []).forEach((x) => { if (x.success) this.selected.delete(x.name); });
+            this.summarizeBatch(data, 'DETACH', 'removed');
+            this.refresh();
+            this.refreshUwb();
+        } catch (err) {
+            this.toast('Detach uplink lost.', 'error', 'DETACH');
         }
     }
 
@@ -247,45 +325,12 @@ class ControlStation {
                     assigned: data.assigned || {},
                 };
                 if ($('#addSpheroModal').classList.contains('show')) {
-                    this.populateTagSelect();
+                    this.updateBatchSummary();
                 }
             }
         } catch (err) {
             // Silent.
         }
-    }
-
-    populateTagSelect() {
-        const select = $('#tagIdSelect');
-        const confirmBtn = $('#confirmAddBtn');
-        select.innerHTML = '';
-
-        if (!this.uwbTags.all.length || !this.uwbTags.free.length) {
-            const ph = document.createElement('option');
-            ph.value = '';
-            ph.disabled = true;
-            ph.selected = true;
-            ph.textContent = this.uwbTags.all.length ? 'no free tags' : 'loading…';
-            select.appendChild(ph);
-            confirmBtn.disabled = true;
-            return;
-        }
-
-        confirmBtn.disabled = false;
-        const firstFree = this.uwbTags.free[0];
-        this.uwbTags.all.forEach((id) => {
-            const opt = document.createElement('option');
-            opt.value = String(id);
-            const owner = this.uwbTags.assigned[String(id)];
-            if (owner) {
-                opt.disabled = true;
-                opt.textContent = `${id} · ${owner}`;
-            } else {
-                opt.textContent = String(id);
-            }
-            if (id === firstFree) opt.selected = true;
-            select.appendChild(opt);
-        });
     }
 
     async refreshAnchors() {
@@ -471,10 +516,15 @@ class ControlStation {
         const grid = $('#spheroGrid');
         const empty = $('#noSpherosMessage');
 
+        // Prune selection of any units no longer present (detached out-of-band).
+        const currentNames = new Set(this.spheros.map((s) => s.name));
+        this.selected = new Set([...this.selected].filter((n) => currentNames.has(n)));
+
         if (this.spheros.length === 0) {
             grid.innerHTML = '';
             empty.classList.add('show');
             this._lastFleetSig = '';
+            this.updateSelectionBar();
             return;
         }
         empty.classList.remove('show');
@@ -487,13 +537,15 @@ class ControlStation {
             .join('::');
 
         if (sig === this._lastFleetSig) {
-            // Fleet shape unchanged — only refresh dynamic [UPT] cells.
+            // Fleet shape unchanged — checkboxes still exist; only refresh
+            // dynamic [UPT] cells. (Selection already pruned above.)
             this.spheros.forEach((s) => {
                 const tile = document.getElementById(`unit-${s.name}`);
                 if (!tile) return;
                 const uptCell = tile.querySelector('.unit__upt');
                 if (uptCell) uptCell.textContent = this.formatAge(s.added_at);
             });
+            this.updateSelectionBar();
             return;
         }
         this._lastFleetSig = sig;
@@ -503,9 +555,29 @@ class ControlStation {
         this.spheros.forEach((s) => {
             const open = document.getElementById(`open-${s.name}`);
             const detach = document.getElementById(`detach-${s.name}`);
+            const sel = document.getElementById(`sel-${s.name}`);
             if (open) open.addEventListener('click', () => window.open(this.consoleUrl(s.url), '_blank'));
             if (detach) detach.addEventListener('click', () => this.requestDetach(s.name));
+            if (sel) {
+                sel.checked = this.selected.has(s.name);
+                sel.addEventListener('change', () => {
+                    if (sel.checked) this.selected.add(s.name);
+                    else this.selected.delete(s.name);
+                    this.updateSelectionBar();
+                });
+            }
         });
+        this.updateSelectionBar();
+    }
+
+    updateSelectionBar() {
+        const bar = $('#fleetSelectBar');
+        const count = $('#selectedCount');
+        const selBtn = $('#detachSelectedBtn');
+        if (!bar) return;
+        bar.hidden = this.spheros.length === 0;
+        if (count) count.textContent = `[ ${this.selected.size} SELECTED ]`;
+        if (selBtn) selBtn.disabled = this.selected.size === 0;
     }
 
     // The instance url points at the host the WebSocket server runs on (the
@@ -534,6 +606,7 @@ class ControlStation {
         return `
         <article id="unit-${safe(s.name)}" class="unit" style="animation-delay:${delay}ms">
             <div class="unit__head">
+                <input type="checkbox" id="sel-${safe(s.name)}" class="unit__select" aria-label="Select ${safe(s.name)}">
                 <span class="unit__name">${safe(s.name)}</span>
                 <span class="unit__state" data-state="${state === 'running' ? 'online' : state}">
                     <span class="dot" data-state="${dotState}"></span>
@@ -622,9 +695,19 @@ class ControlStation {
     }
     closeModal(id) { document.getElementById(id).classList.remove('show'); }
     requestDetach(name) {
+        this.pendingBatchDetach = null;
         this.pendingDetach = name;
         $('#removeConfirmText').textContent =
             `Release unit "${name}"? This terminates the WebSocket server on its channel and stops every attached controller.`;
+        this.openModal('confirmRemoveModal');
+    }
+    requestBatchDetach(names) {
+        if (!names.length) { this.toast('No units selected.', 'error', 'DETACH'); return; }
+        this.pendingDetach = null;
+        this.pendingBatchDetach = names;
+        const n = names.length;
+        $('#removeConfirmText').textContent =
+            `Release ${n} unit${n === 1 ? '' : 's'}? This terminates each unit's WebSocket server and stops every attached controller.`;
         this.openModal('confirmRemoveModal');
     }
 

@@ -231,6 +231,22 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
 .meta__v { color: var(--fg-1); font-variant-numeric: tabular-nums; }
 .meta__sep { color: var(--fg-3); }
 
+/* Fleet batch-selection bar (in panel__head) */
+.fleet__select {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-left: auto;
+}
+.fleet__select[hidden] { display: none; }
+.fleet__count {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    color: var(--fg-2);
+}
+
 /* ============================================================
    Fleet grid — operator panels per Sphero
    ============================================================ */
@@ -262,12 +278,22 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
     padding-bottom: 10px;
     border-bottom: 1px solid var(--line);
 }
+.unit__select {
+    accent-color: var(--amber);
+    width: 14px;
+    height: 14px;
+    margin: 0 4px 0 0;
+    cursor: pointer;
+    flex: 0 0 auto;
+    align-self: center;
+}
 .unit__name {
     font-size: 16px;
     font-weight: 600;
     letter-spacing: 0.04em;
     color: var(--fg);
     font-variant-numeric: tabular-nums;
+    margin-right: auto;
 }
 .unit__state {
     display: inline-flex; align-items: center; gap: 7px;
