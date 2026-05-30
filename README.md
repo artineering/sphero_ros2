@@ -8,8 +8,9 @@ ROS2 Rolling workspace for multi-robot Sphero control with UWB positioning, ArUc
 |---------|---------|
 | `sphero_instance_controller` | Core multi-robot control. Per-instance namespaced topics (`sphero/<name>/*`), device/task/state-machine nodes. |
 | `multirobot_webserver` | Central Flask + WebSocket dashboard for managing multiple Spheros from one browser. |
-| `aruco_slam` | Camera-based ArUco marker localization for field calibration and robot tracking. |
+| `aruco_slam` | Camera-based localization for field calibration and robot tracking. Supports printed ArUco markers and active LED-matrix markers (blue-tape boundary calibration). |
 | `sphero_uwb_positioning` | UWB ranging integration for Sphero positioning via Arduino tag/anchor hardware. |
+| `sphero_worker_agent` | Per-Pi HTTP launcher agent for the distributed BLE worker fleet. Lets the webserver spawn/tear down Sphero instance trees on remote RPi4 workers. |
 
 Hardware-side firmware (Arduino Portenta C33 + UWB Shield, Stella tags) lives under `arduino/`.
 
@@ -86,7 +87,7 @@ arduino/        Arduino firmware (Portenta C33, UWB Shield, Stella tags)
 bin/            arduino-cli binary
 doc/            Documentation (see doc/package.md, doc/development.md)
 plans/          Design plans for past and ongoing work
-scripts/        Standalone validation scripts (ArUco, BLE UWB scan)
+scripts/        Standalone validation/utility scripts (ArUco, BLE UWB scan, blink_fleet.py)
 src/            ROS2 packages (see Packages table above)
 ```
 
