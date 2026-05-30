@@ -87,7 +87,8 @@ class ArucoSLAMNode(Node):
             sphero_name = self.sphero_names[i] if i < len(self.sphero_names) else f"sphero_{marker_id}"
             # Replace hyphens with underscores for ROS2 topic name compliance
             topic_safe_name = sphero_name.replace('-', '_')
-            topic_name = f'/aruco_slam/{topic_safe_name}/position'
+            # Shared "localization position contract": /localization/<name_safe>/position
+            topic_name = f'/localization/{topic_safe_name}/position'
 
             # Publish as PoseStamped (x, y in position, z=0, orientation identity)
             pub = self.create_publisher(PoseStamped, topic_name, 10)

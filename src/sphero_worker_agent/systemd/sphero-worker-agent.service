@@ -1,0 +1,45 @@
+# systemd unit template for the Sphero worker agent.
+#
+# Install (per RPi4 worker), filling in the PLACEHOLDERS:
+#   1. Edit the placeholders below: <RUN_USER>, <WORKSPACE>, <LAN_IP>,
+#      <SHARED_TOKEN>, <ROS_DOMAIN_ID>, <LAN_NIC>.
+#   2. sudo cp sphero-worker-agent.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now sphero-worker-agent
+#   5. systemctl status sphero-worker-agent   (and: journalctl -u sphero-worker-agent -f)
+#
+# The agent sources the workspace so `ros2 run sphero_instance_controller ...`
+# resolves, then spawns Sphero trees that inherit the CycloneDDS env below.
+# CYCLONEDDS_URI should point at a small XML binding CycloneDDS to <LAN_NIC>.
+
+[Unit]
+Description=Sphero BLE worker launcher agent
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<RUN_USER>
+
+# --- CycloneDDS / ROS env injected into every spawned Sphero process ---
+Environment=ROS_DOMAIN_ID=<ROS_DOMAIN_ID>
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file:///<WORKSPACE>/cyclonedds-<LAN_NIC>.xml
+
+# --- agent config ---
+Environment=WORKER_AGENT_TOKEN=<SHARED_TOKEN>
+Environment=WORKER_AGENT_HOST=<LAN_IP>
+Environment=WORKER_AGENT_PORT=8181
+Environment=WORKER_AGENT_LOG_DIR=/var/log/sphero_worker_agent
+
+# Source ROS + the built workspace, then run the agent via ros2 run.
+ExecStartPre=/bin/mkdir -p /var/log/sphero_worker_agent
+ExecStart=/bin/bash -lc 'source /opt/ros/rolling/setup.bash && source /<WORKSPACE>/install/setup.bash && exec ros2 run sphero_worker_agent agent'
+
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

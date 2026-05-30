@@ -1,0 +1,47 @@
+# Worker registry for the distributed BLE Sphero fleet.
+#
+# The coordinator (multirobot_webserver) loads this file to know which RPi4
+# worker nodes exist, how to reach each one's launcher agent, and how many
+# Spheros each may run. Least-loaded auto-assignment uses these entries.
+#
+# PLACEHOLDERS: replace host/ssh_user with your real worker hostnames/IPs at
+# deploy time. `capacity` defaults to 4 (the validated per-Pi BLE link cap);
+# leave it at 4 unless you have re-benched a different limit.
+#
+# Per-worker fields:
+#   name      - unique worker id (also used as the deterministic tie-break key).
+#   host      - hostname or IP of the worker on the dedicated switched LAN.
+#   ssh_user  - login used by the deploy/sync script only (not by the agent).
+#   port      - HTTP port the worker's launcher agent listens on (default 8181).
+#   capacity  - max simultaneous Spheros (BLE links) on this worker (default 4).
+#   online    - optional; set false to administratively exclude a worker.
+
+# Shared launcher-agent settings.
+#   token - bearer token the coordinator presents to every worker's launcher
+#           agent (Authorization: Bearer <token>). Leave blank for dev/no-auth.
+#           Prefer setting it at runtime via the SPHERO_AGENT_TOKEN env var,
+#           which overrides this value, so the secret stays out of the repo.
+agent:
+  token: '76d1e8b546779d71606b4d1e93c45911'   # SPHERO_AGENT_TOKEN env overrides
+
+workers:
+  - name: rpi4-node01
+    host: 10.0.0.11
+    ssh_user: svaghela
+    port: 8181
+    capacity: 4
+  - name: rpi4-node02
+    host: 10.0.0.12
+    ssh_user: svaghela
+    port: 8181
+    capacity: 4
+  - name: rpi4-node03
+    host: 10.0.0.13
+    ssh_user: svaghela
+    port: 8181
+    capacity: 4
+  - name: rpi4-node04
+    host: 10.0.0.14
+    ssh_user: svaghela
+    port: 8181
+    capacity: 4

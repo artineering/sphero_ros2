@@ -1,0 +1,18 @@
+# Fake worker registry used by the Phase 2 selection unit tests.
+workers:
+  - name: w1
+    host: 10.0.0.31
+    ssh_user: pi
+    port: 8181
+    capacity: 4
+  - name: w2
+    host: 10.0.0.32
+    ssh_user: pi
+    port: 8181
+    capacity: 4
+  - name: w3
+    host: 10.0.0.33
+    ssh_user: pi
+    port: 8181
+    capacity: 4
+    online: false

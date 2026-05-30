@@ -43,6 +43,10 @@
                     <span class="dot" id="uwbDot" data-state="offline"></span>
                     <span class="chip__value" id="uwbLabel">OFFLINE</span>
                 </div>
+                <div class="chip chip--state" title="Active positioning source">
+                    <span class="chip__label">SOURCE</span>
+                    <span class="chip__value" id="sourceLabel">—</span>
+                </div>
                 <div class="chip chip--state" title="Backend health">
                     <span class="chip__label">LINK</span>
                     <span class="dot" id="linkDot" data-state="online"></span>
@@ -80,6 +84,26 @@
                 <span class="action__label">STOP UWB</span>
             </button>
             <span class="ribbon__hint">DEPLOY → enter callsign → unit binds to next channel</span>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- SOURCE SELECT — single-active positioning publisher          -->
+        <!-- ============================================================ -->
+        <section class="ribbon" aria-label="Positioning source">
+            <span class="ribbon__hint">POSITIONING SOURCE →</span>
+            <button class="action" id="srcNoneBtn" data-source="none">
+                <span class="action__label">NONE</span>
+            </button>
+            <button class="action" id="srcArucoBtn" data-source="aruco">
+                <span class="action__label">ARUCO</span>
+            </button>
+            <button class="action" id="srcMatrixBtn" data-source="matrix">
+                <span class="action__label">MATRIX</span>
+            </button>
+            <button class="action" id="srcUwbBtn" data-source="uwb">
+                <span class="action__label">UWB</span>
+            </button>
+            <span class="ribbon__hint">Only one source publishes /localization at a time.</span>
         </section>
 
         <!-- ============================================================ -->

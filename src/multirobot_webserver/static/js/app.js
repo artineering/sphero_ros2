@@ -14,6 +14,7 @@ class ControlStation {
         this.aruco = { running: false, enabled: false };
         this.uwb = { running: false, anchorsConfigured: false, fakeMode: false, assignedCount: 0 };
         this.uwbTags = { all: [], free: [], assigned: {} };
+        this.source = { active: null, running: {} };
         this.linkOk = true;
         this.lastSyncAt = null;
         this.init();
@@ -32,6 +33,9 @@ class ControlStation {
         // UWB status polling — every 4s
         this.refreshUwb();
         setInterval(() => this.refreshUwb(), 4000);
+        // Positioning-source status polling — every 4s
+        this.refreshSource();
+        setInterval(() => this.refreshSource(), 4000);
         // Prefill anchor inputs once on load
         this.refreshAnchors();
     }
@@ -47,6 +51,9 @@ class ControlStation {
         $('#uwbStartBtn').addEventListener('click', () => this.startUwb());
         $('#uwbStopBtn').addEventListener('click', () => this.stopUwb());
         $('#saveAnchorsBtn').addEventListener('click', () => this.saveAnchors());
+        $$('[data-source]').forEach((btn) => {
+            btn.addEventListener('click', () => this.setSource(btn.dataset.source));
+        });
 
         // Deploy modal
         const confirmAdd = $('#confirmAddBtn');
@@ -411,6 +418,52 @@ class ControlStation {
         }
 
         assignedText.textContent = this.uwb.assignedCount;
+    }
+
+    /* -------------------------------------------------------- positioning source */
+    async refreshSource() {
+        try {
+            const r = await fetch('/api/positioning_source');
+            const data = await r.json();
+            if (data.success) {
+                this.source = { active: data.source, running: data.running || {} };
+                this.renderSource();
+            }
+        } catch (err) {
+            // Silent — link state is covered by /api/spheros polling.
+        }
+    }
+
+    async setSource(source) {
+        try {
+            const r = await fetch('/api/positioning_source', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source }),
+            });
+            const data = await r.json();
+            if (data.success) {
+                this.toast(`Positioning source → ${source.toUpperCase()}`, 'success', 'SOURCE');
+                this.refreshSource();
+                this.refreshAruco();
+                this.refreshUwb();
+            } else {
+                this.toast(`Source switch failed: ${data.message}`, 'error', 'SOURCE');
+            }
+        } catch (err) {
+            this.toast('Source uplink lost.', 'error', 'SOURCE');
+        }
+    }
+
+    renderSource() {
+        const label = $('#sourceLabel');
+        if (label) {
+            label.textContent = this.source.active ? this.source.active.toUpperCase() : '—';
+        }
+        $$('[data-source]').forEach((btn) => {
+            const isActive = btn.dataset.source === this.source.active;
+            btn.classList.toggle('action--primary', isActive);
+        });
     }
 
     /* -------------------------------------------------------- render: fleet */

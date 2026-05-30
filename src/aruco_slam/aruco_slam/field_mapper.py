@@ -95,6 +95,40 @@ class FieldMapper:
         print(f"Field dimensions: {self.field_width}cm x {self.field_height}cm")
         return True
 
+    def calibrate_from_corners(self, ordered_corners: List[np.ndarray]) -> bool:
+        """
+        Calibrate field mapping from 4 ordered pixel corners directly.
+
+        Unlike calibrate(), this does not use ArUco corner-marker IDs. The caller
+        (e.g. the matrix node's blue-tape boundary detector) supplies the 4 arena
+        corners already ordered [TL, TR, BR, BL].
+
+        Args:
+            ordered_corners: list/array of 4 (x, y) pixel points ordered
+                             Top-Left, Top-Right, Bottom-Right, Bottom-Left.
+
+        Returns:
+            True if calibration successful, False otherwise.
+        """
+        if ordered_corners is None or len(ordered_corners) != 4:
+            return False
+
+        camera_corners = np.float32(ordered_corners)
+
+        self.transform_matrix = cv2.getPerspectiveTransform(
+            camera_corners,
+            self.field_corners
+        )
+        self.inverse_transform_matrix = cv2.getPerspectiveTransform(
+            self.field_corners,
+            camera_corners
+        )
+
+        self.calibrated = True
+        print("Field calibration successful (from arena boundary corners)!")
+        print(f"Field dimensions: {self.field_width}cm x {self.field_height}cm")
+        return True
+
     def camera_to_field(self, camera_point: np.ndarray) -> Optional[np.ndarray]:
         """
         Transform camera coordinates to field coordinates.

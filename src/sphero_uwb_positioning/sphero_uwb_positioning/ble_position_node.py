@@ -4,7 +4,9 @@
 Tags broadcast four anchor distances via BLE manufacturer data. This node
 decodes the advertisement, runs 2D least-squares trilateration, applies a
 per-tag constant-velocity Kalman filter, and publishes PoseStamped per active
-tag id (on uwb/tag_<id>/position) plus a per-tag liveness DiagnosticArray.
+tag on the shared localization position contract
+(/localization/<name_safe>/position, frame_id='field') plus a per-tag liveness
+DiagnosticArray. tag_id->name comes from the aligned tag_names param.
 """
 
 import asyncio
@@ -110,11 +112,16 @@ class BlePositionNode(Node):
 
         self.declare_parameter("publish_rate_hz", 20.0)
         self.declare_parameter("tag_stale_timeout_s", 3.0)
-        self.declare_parameter("frame_id", "sphero_arena")
+        self.declare_parameter("frame_id", "field")
         self.declare_parameter("ble_adapter", "hci0")
         self.declare_parameter("scan_active", True)
         self.declare_parameter("scan_restart_interval_s", 60.0)
         self.declare_parameter("tag_ids", list(range(1, 17)))
+        # tag_names is aligned 1:1 with tag_ids -> builds tag_id->name so this
+        # node can publish on the shared localization position contract.
+        # A static map serves standalone/dev launch; the webserver passes the
+        # live map on start. Empty -> fall back to "tag_<id>" names.
+        self.declare_parameter("tag_names", [""])
         self.declare_parameter("fake_mode", False)
         self.declare_parameter("fake_tag_ids", [1, 2])
         self.declare_parameter(
@@ -133,6 +140,7 @@ class BlePositionNode(Node):
             "scan_restart_interval_s"
         ).value
         tag_ids = list(self.get_parameter("tag_ids").value)
+        tag_names = [n for n in self.get_parameter("tag_names").value if n]
         self.fake_mode: bool = self.get_parameter("fake_mode").value
         self.fake_tag_ids = list(self.get_parameter("fake_tag_ids").value)
 
@@ -143,6 +151,14 @@ class BlePositionNode(Node):
 
         self._tag_ids: list[int] = [int(tid) for tid in tag_ids]
 
+        # tag_id -> name (aligned with tag_ids); falls back to "tag_<id>".
+        self._tag_names: dict[int, str] = {}
+        for i, tid in enumerate(self._tag_ids):
+            if i < len(tag_names):
+                self._tag_names[tid] = tag_names[i]
+            else:
+                self._tag_names[tid] = f"tag_{tid}"
+
         self._lock = threading.Lock()
         self._samples: dict[int, TagSample] = {}
         self._last_published: dict[int, TagSample] = {}
@@ -151,11 +167,13 @@ class BlePositionNode(Node):
 
         self._pose_pubs: dict[int, rclpy.publisher.Publisher] = {}
         for tid in self._tag_ids:
-            # ROS topic name tokens may not start with a digit, so the tag id
-            # token is prefixed: uwb/tag_<id>/position.
-            topic = f"uwb/tag_{tid}/position"
+            # Shared "localization position contract": publish by NAME on
+            # /localization/<name_safe>/position (the old uwb/tag_<id>/position
+            # topic is retired). name_safe = name.replace('-', '_').
+            name_safe = self._tag_names[tid].replace('-', '_')
+            topic = f"/localization/{name_safe}/position"
             self._pose_pubs[tid] = self.create_publisher(PoseStamped, topic, 10)
-            self.get_logger().info(f"Tag {tid} -> {topic}")
+            self.get_logger().info(f"Tag {tid} ({self._tag_names[tid]}) -> {topic}")
 
         diag_qos = QoSProfile(depth=10, durability=QoSDurabilityPolicy.VOLATILE)
         self._diag_pub = self.create_publisher(DiagnosticArray, "/diagnostics", diag_qos)

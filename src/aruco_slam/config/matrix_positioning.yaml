@@ -1,0 +1,40 @@
+matrix_slam_node:
+  ros__parameters:
+    camera_id: 0
+    field_width_cm: 300.0
+    field_height_cm: 200.0
+    publish_rate_hz: 10.0
+    show_visualization: true
+    drive_main_led: true
+    color_model_path: "config/color_model.yaml"
+    # Blue-tape arena boundary detection (replaces ArUco corner markers).
+    blue_lower_hsv: [100, 80, 40]
+    blue_upper_hsv: [130, 255, 255]
+    boundary_min_area_frac: 0.1
+    # LED brightness scale: dims matrix + main-LED RGB so hues do not bloom to
+    # white at the moderate camera exposure.
+    led_brightness_scale: 0.4
+    # Camera locks. Moderate exposure renders the blue tape boundary while the
+    # dimmed LED markers preserve hue (no white bloom).
+    lock_white_balance: true
+    wb_temperature: 4600
+    lock_exposure: true
+    exposure: 1000.0
+    lock_autofocus: true
+    # Blob / fill thresholds.
+    min_blob_area_px: 80
+    max_blob_area_px: 1200
+    ring_center_frac: 0.45
+    ring_contrast_thresh: 0.4
+    brightness_thresh: 200
+    # marker_assignments (string JSON) is the production interface; the
+    # webserver passes the live name->(hue,fill) map on start, e.g.:
+    #   '[{"name":"SB-3660","hue":"Red","fill":"filled"}, ...]'
+    marker_assignments: ""
+    # robot_table is DEV-ONLY fallback (used when marker_assignments is empty).
+    # Format: list of "name:hue:fill" strings.
+    robot_table:
+      - "SB-3660:Red:filled"
+      - "SB-74FB:Red:ring"
+      - "SB-3716:Orange:filled"
+      - "SB-58EF:Orange:ring"

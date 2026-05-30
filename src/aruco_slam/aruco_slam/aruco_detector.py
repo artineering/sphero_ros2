@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 from .aruco_marker import ArucoMarker
+from .camera_capture import CameraCapture
 
 
 class ArucoDetector:
@@ -27,14 +28,20 @@ class ArucoDetector:
             camera_id: Camera device ID (default: 0)
             dict_type: ArUco dictionary type
         """
-        # Initialize ArUco detector (OpenCV 4.12 API)
+        # Initialize ArUco detector. The ArucoDetector class arrived in OpenCV
+        # 4.7; fall back to the legacy free-function API on 4.6 and earlier.
         self.dictionary = cv2.aruco.getPredefinedDictionary(dict_type)
-        self.parameters = cv2.aruco.DetectorParameters()
-        self.detector = cv2.aruco.ArucoDetector(self.dictionary, self.parameters)
+        self._use_legacy_aruco = not hasattr(cv2.aruco, 'ArucoDetector')
+        if self._use_legacy_aruco:
+            self.parameters = cv2.aruco.DetectorParameters_create()
+            self.detector = None
+        else:
+            self.parameters = cv2.aruco.DetectorParameters()
+            self.detector = cv2.aruco.ArucoDetector(self.dictionary, self.parameters)
 
-        # Camera
+        # Camera (capture delegated to shared CameraCapture)
         self.camera_id = camera_id
-        self.cap: Optional[cv2.VideoCapture] = None
+        self.camera = CameraCapture(camera_id=camera_id)
 
         # Marker tracking
         self.aruco_tags: Dict[int, ArucoMarker] = {}
@@ -44,20 +51,13 @@ class ArucoDetector:
 
     def begin_visualization(self):
         """Start camera capture for visualization."""
-        if self.cap is None:
-            self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            if not self.cap.isOpened():
-                raise RuntimeError(f"Cannot open camera {self.camera_id}")
+        self.camera.open()
         self.visualizing = True
 
     def end_visualization(self):
         """Stop camera capture and cleanup."""
         self.visualizing = False
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+        self.camera.release()
         cv2.destroyAllWindows()
 
     def detect_markers(self, frame: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray]:
@@ -74,7 +74,11 @@ class ArucoDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         # Detect markers
-        corners, ids, rejected = self.detector.detectMarkers(gray)
+        if self._use_legacy_aruco:
+            corners, ids, rejected = cv2.aruco.detectMarkers(
+                gray, self.dictionary, parameters=self.parameters)
+        else:
+            corners, ids, rejected = self.detector.detectMarkers(gray)
 
         # Update tracked markers
         if ids is not None:
@@ -101,11 +105,8 @@ class ArucoDetector:
         Returns:
             True if frame was processed, False if camera unavailable
         """
-        if self.cap is None:
-            return False
-
-        ret, frame = self.cap.read()
-        if not ret:
+        frame = self.camera.read()
+        if frame is None:
             return False
 
         # Detect markers
@@ -148,13 +149,9 @@ class ArucoDetector:
         Returns:
             Frame as numpy array, or None if capture failed
         """
-        if self.cap is None:
-            self.cap = cv2.VideoCapture(self.camera_id)
-
-        ret, frame = self.cap.read()
-        if ret:
-            return frame
-        return None
+        if not self.camera.is_open():
+            self.camera.open()
+        return self.camera.read()
 
     def get_tags(self) -> Dict[int, ArucoMarker]:
         """Get all detected marker objects."""

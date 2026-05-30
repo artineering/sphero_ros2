@@ -117,7 +117,8 @@ class SpheroInstanceDeviceController(Node):
 
         if self.external_location:
             """Create ROS subscriber for localization topic."""
-            topic_name = f'/aruco_slam/{self.topic_name_safe}/position'
+            # Shared "localization position contract": /localization/<name_safe>/position
+            topic_name = f'/localization/{self.topic_name_safe}/position'
             self.localization_sub = self.create_subscription(
                 PoseStamped, topic_name, self._localization_callback, 10)
     

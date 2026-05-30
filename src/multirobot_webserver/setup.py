@@ -14,6 +14,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         # Install launch files
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
+        # Install worker registry config
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         # Install web templates
         (os.path.join('share', package_name, 'templates'), glob('templates/*.html')),
         # Install static files
