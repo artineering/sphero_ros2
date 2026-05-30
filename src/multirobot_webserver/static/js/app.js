@@ -503,9 +503,24 @@ class ControlStation {
         this.spheros.forEach((s) => {
             const open = document.getElementById(`open-${s.name}`);
             const detach = document.getElementById(`detach-${s.name}`);
-            if (open) open.addEventListener('click', () => window.open(s.url, '_blank'));
+            if (open) open.addEventListener('click', () => window.open(this.consoleUrl(s.url), '_blank'));
             if (detach) detach.addEventListener('click', () => this.requestDetach(s.name));
         });
+    }
+
+    // The instance url points at the host the WebSocket server runs on (the
+    // worker, for remote instances). Browsers only reach the coordinator, which
+    // relays remote instances on the same port, so rewrite the host to this
+    // page's host while keeping port/path. Harmless for local instances.
+    consoleUrl(url) {
+        try {
+            const u = new URL(url, window.location.href);
+            u.protocol = window.location.protocol;
+            u.hostname = window.location.hostname;
+            return u.toString();
+        } catch (err) {
+            return url;
+        }
     }
 
     unitTile(s, i) {

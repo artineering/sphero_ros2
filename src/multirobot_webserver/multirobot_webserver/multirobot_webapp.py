@@ -9,6 +9,7 @@ multiple Sphero instances through their individual WebSocket servers.
 
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -57,6 +58,96 @@ AGENT_TIMEOUT = (3, 5)
 # Liveness cache TTL (seconds): remote-instance status is derived from a cached
 # per-worker GET /status so per-request listing can't stall on a dead agent.
 AGENT_STATUS_TTL = 2.0
+
+
+class TcpRelay:
+    """
+    A blind TCP relay: listens on a coordinator-side port and forwards every
+    connection to a single remote (worker host, port). Remote Sphero WebSocket
+    servers run on the worker Pi, but browsers only ever reach the coordinator;
+    this relay bridges the gap so the CONSOLE link works through one host.
+
+    Bytes are forwarded verbatim in both directions, so HTTP and the WebSocket
+    upgrade both pass through unchanged. One accept thread plus two pump threads
+    per connection; daemon threads, so they never block process exit.
+    """
+
+    def __init__(self, listen_port: int, target_host: str, target_port: int):
+        self.listen_port = listen_port
+        self.target_host = target_host
+        self.target_port = target_port
+        self._server: Optional[socket.socket] = None
+        self._accept_thread: Optional[threading.Thread] = None
+        self._running = False
+
+    def start(self):
+        """Bind, listen, and spawn the accept loop. Raises on bind failure."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('0.0.0.0', self.listen_port))
+        server.listen(16)
+        self._server = server
+        self._running = True
+        self._accept_thread = threading.Thread(
+            target=self._accept_loop, daemon=True,
+        )
+        self._accept_thread.start()
+
+    def _accept_loop(self):
+        while self._running:
+            try:
+                client, _ = self._server.accept()
+            except OSError:
+                break  # listen socket closed by stop()
+            threading.Thread(
+                target=self._handle, args=(client,), daemon=True,
+            ).start()
+
+    def _handle(self, client: socket.socket):
+        try:
+            upstream = socket.create_connection(
+                (self.target_host, self.target_port), timeout=5,
+            )
+        except OSError:
+            client.close()
+            return
+        threading.Thread(
+            target=self._pump, args=(client, upstream), daemon=True,
+        ).start()
+        self._pump(upstream, client)
+
+    @staticmethod
+    def _pump(src: socket.socket, dst: socket.socket):
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data:
+                    break
+                dst.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for sock in (src, dst):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def stop(self):
+        """Stop accepting and close the listen socket. Idempotent."""
+        if not self._running:
+            return
+        self._running = False
+        if self._server is not None:
+            try:
+                self._server.close()
+            except OSError:
+                pass
+            self._server = None
 
 
 class FleetNode(Node):
@@ -387,7 +478,8 @@ class SpheroInstanceManager:
             return {
                 'success': False,
                 'message': f'Sphero {sphero_name} already exists',
-                'instance': {k: v for k, v in existing.items() if k != 'process'}
+                'instance': {k: v for k, v in existing.items()
+                             if k not in ('process', 'relay')}
             }
 
         # A Sphero requires a valid, free tag id to join.
@@ -466,7 +558,8 @@ class SpheroInstanceManager:
                 return {
                     'success': True,
                     'message': f'Sphero {sphero_name} added successfully',
-                    'instance': {k: v for k, v in instance_info.items() if k != 'process'}
+                    'instance': {k: v for k, v in instance_info.items()
+                                 if k not in ('process', 'relay')}
                 }
             else:
                 # Process died
@@ -518,9 +611,16 @@ class SpheroInstanceManager:
         # Spawn confirmed — account capacity now. From here on, any failure must
         # release this assignment as part of rollback.
         self.worker_registry.assign(worker)
+        relay: Optional[TcpRelay] = None
         try:
             # Coordinator is the source of truth for the port (the agent echoes
-            # it back, but we use the locally-allocated value).
+            # it back, but we use the locally-allocated value). The remote
+            # WebSocket server runs on the worker; we stand up a coordinator-side
+            # relay on the same port that forwards to worker.host:port so the
+            # browser only ever talks to the coordinator. CONSOLE links are then
+            # served through this host (the front-end rewrites url's host).
+            relay = TcpRelay(port, worker.host, port)
+            relay.start()
             url = f'http://{worker.host}:{port}'
             marker_slot = -1
             if self.fleet_node is not None:
@@ -533,6 +633,7 @@ class SpheroInstanceManager:
                 'name': sphero_name,
                 'port': port,
                 'process': None,          # remote: no local subprocess
+                'relay': relay,           # coordinator-side TCP relay
                 'status': 'running',
                 'added_at': time.time(),
                 'url': url,
@@ -544,6 +645,8 @@ class SpheroInstanceManager:
             self.instances[sphero_name] = instance_info
         except Exception as exc:  # noqa: BLE001 - roll back the remote spawn
             print(f"✗ Bookkeeping failed for {sphero_name}; rolling back: {exc}")
+            if relay is not None:
+                relay.stop()
             self._agent_remove(worker, sphero_name)
             self.worker_registry.release(worker.name)
             self.instances.pop(sphero_name, None)
@@ -553,7 +656,8 @@ class SpheroInstanceManager:
         return {
             'success': True,
             'message': f'Sphero {sphero_name} added on worker {worker.name}',
-            'instance': {k: v for k, v in instance_info.items() if k != 'process'},
+            'instance': {k: v for k, v in instance_info.items()
+                         if k not in ('process', 'relay')},
         }
 
     def remove_sphero(self, sphero_name: str) -> Dict:
@@ -589,6 +693,10 @@ class SpheroInstanceManager:
                         print(f"   ⚠️  {sphero_name} agent remove not confirmed; "
                               f"dropping local bookkeeping anyway")
                     self.worker_registry.release(worker_name)
+                # Tear down the coordinator-side relay for this remote instance.
+                relay = instance.get('relay')
+                if relay is not None:
+                    relay.stop()
             else:
                 # Local instance: terminate the WebSocket server subprocess.
                 process = instance['process']
