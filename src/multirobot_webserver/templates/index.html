@@ -333,10 +333,17 @@
                     <option value="reflect">reflect</option>
                     <option value="custom">custom</option>
                 </select>
-                <label for="broadcastParams" class="field__label">[ PARAMETERS (JSON) ]</label>
-                <textarea id="broadcastParams" class="field" rows="5" autocomplete="off" spellcheck="false"></textarea>
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                    <button id="broadcastAddBtn" class="action action--accent" type="button">ADD</button>
+                    <button id="broadcastClearBtn" class="action action--ghost" type="button">CLEAR</button>
+                </div>
+                <label for="broadcastParams" class="field__label">[ BUNDLE TASKS (JSON) ]</label>
+                <textarea id="broadcastParams" class="field" rows="8" autocomplete="off" spellcheck="false">[]</textarea>
+                <p class="field__hint" id="broadcastLanes" hidden></p>
+                <p class="field__hint">// per-task "start_offset" (sec) staggers that lane AFTER the synced start; 0 = with the fleet</p>
                 <label for="broadcastLead" class="field__label">[ LEAD SECONDS ]</label>
                 <input type="number" id="broadcastLead" class="field" value="3.0" min="0.5" step="0.5">
+                <p class="field__hint">// lead = fleet-wide synchronized start instant (now + lead)</p>
                 <p class="field__hint"><span id="broadcastSummary">0 units · fires at now + lead</span></p>
                 <p class="field__hint field__hint--countdown" id="broadcastCountdown" hidden></p>
             </div>

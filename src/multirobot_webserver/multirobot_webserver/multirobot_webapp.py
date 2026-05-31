@@ -832,14 +832,16 @@ class SpheroInstanceManager:
             'results': results,
         }
 
-    def broadcast_task(self, task_type: str, parameters: dict,
+    def broadcast_task(self, task_core: dict,
                        start_offset: float) -> Dict:
         """
-        Fan ONE task to every running instance in parallel. A single coordinator
-        timestamp `now` is stamped ONCE before dispatch; the SAME payload (incl.
-        `now` and `start_offset`) goes to every unit so NTP-synced controllers
-        fire together at `now + start_offset`. Per-POST timeout keeps a dead unit
-        from blocking the others.
+        Fan ONE task (or one concurrent bundle) to every running instance in
+        parallel. `task_core` is the task body sans timing: either a single
+        `{task_type, parameters}` or a bundle `{tasks:[...]}`. A single
+        coordinator timestamp `now` is stamped ONCE before dispatch; the SAME
+        payload (incl. `now` and `start_offset`) goes to every unit so
+        NTP-synced controllers fire together at `now + start_offset`. Per-POST
+        timeout keeps a dead unit from blocking the others.
 
         Returns: {success, sent, failed, now, start_offset, start_time,
                   results:[{name, success, error?}]}
@@ -855,8 +857,7 @@ class SpheroInstanceManager:
         # Stamp the coordinator clock ONCE; every unit receives this same value.
         now = time.time()
         payload = {
-            'task_type': task_type,
-            'parameters': parameters,
+            **task_core,
             'now': now,
             'start_offset': start_offset,
         }
@@ -1505,28 +1506,51 @@ def remove_spheros_batch():
 
 @app.route('/api/broadcast_task', methods=['POST'])
 def broadcast_task():
-    """Fan ONE task to every running Sphero in parallel.
+    """Fan ONE task (or one concurrent bundle) to every running Sphero.
 
-    Request: {task_type, parameters?, start_offset?}. The manager stamps a
-    single `now` and fans the same payload to each unit's /api/task. `task_type`
-    is NOT whitelisted here (the per-instance controller is the authority on
-    unknown types, matching single /api/task). 400 on bad body or zero units.
+    Request is EITHER a single task `{task_type, parameters?, start_offset?}`
+    OR a concurrent bundle `{tasks:[{task_type, parameters?}, ...],
+    start_offset?}`. The manager stamps a single `now` and fans the same
+    payload to each unit's /api/task. Task types are NOT whitelisted here (the
+    per-instance controller is the authority on unknown types AND on bundle
+    lane conflicts, matching single /api/task). 400 on bad body or zero units.
     """
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({'success': False,
                         'message': 'Invalid JSON body'}), 400
 
-    task_type = data.get('task_type')
-    if not isinstance(task_type, str) or not task_type.strip():
-        return jsonify({'success': False,
-                        'message': 'task_type must be a non-empty string'}), 400
-    task_type = task_type.strip()
+    if 'tasks' in data:
+        # Concurrent bundle: validate shape only; the per-instance controller
+        # owns lane-conflict and unknown-type rejection.
+        tasks = data.get('tasks')
+        if not isinstance(tasks, list) or not tasks:
+            return jsonify({'success': False,
+                            'message': 'tasks must be a non-empty list'}), 400
+        for i, item in enumerate(tasks):
+            if not isinstance(item, dict):
+                return jsonify({'success': False,
+                                'message': f'tasks[{i}] must be an object'}), 400
+            tt = item.get('task_type')
+            if not isinstance(tt, str) or not tt.strip():
+                return jsonify({
+                    'success': False,
+                    'message': f'tasks[{i}].task_type must be a '
+                               'non-empty string'}), 400
+        task_core = {'tasks': tasks}
+    else:
+        task_type = data.get('task_type')
+        if not isinstance(task_type, str) or not task_type.strip():
+            return jsonify({
+                'success': False,
+                'message': 'task_type must be a non-empty string'}), 400
+        task_type = task_type.strip()
 
-    parameters = data.get('parameters', {})
-    if not isinstance(parameters, dict):
-        return jsonify({'success': False,
-                        'message': 'parameters must be a JSON object'}), 400
+        parameters = data.get('parameters', {})
+        if not isinstance(parameters, dict):
+            return jsonify({'success': False,
+                            'message': 'parameters must be a JSON object'}), 400
+        task_core = {'task_type': task_type, 'parameters': parameters}
 
     start_offset = data.get('start_offset', 3.0)
     try:
@@ -1543,7 +1567,7 @@ def broadcast_task():
                         'message': 'No units deployed'}), 400
 
     return jsonify(
-        manager.broadcast_task(task_type, parameters, start_offset)), 200
+        manager.broadcast_task(task_core, start_offset)), 200
 
 
 @app.route('/api/spheros/<sphero_name>', methods=['DELETE'])

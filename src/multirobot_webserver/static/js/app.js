@@ -50,6 +50,20 @@ const BROADCAST_DEFAULTS = {
     },
 };
 
+// Which actuator lane(s) each task type occupies. The per-instance controller
+// allows one task per lane concurrently; a bundle whose sub-tasks share a lane
+// is rejected server-side. This map drives a lightweight client-side warning
+// only (it does NOT block sending). 'custom' and 'jumping_bean' touch ALL lanes.
+const ALL_LANES = ['DRIVE', 'LED', 'MATRIX'];
+const TASK_LANES = {
+    move_to: ['DRIVE'], patrol: ['DRIVE'], square: ['DRIVE'], circle: ['DRIVE'],
+    spin: ['DRIVE'], roll: ['DRIVE'], heading: ['DRIVE'], speed: ['DRIVE'],
+    reflect: ['DRIVE'], stop: ['DRIVE'],
+    set_led: ['LED'], led_sequence: ['LED'],
+    matrix: ['MATRIX'], matrix_sequence: ['MATRIX'],
+    custom: ALL_LANES, jumping_bean: ALL_LANES,
+};
+
 class ControlStation {
     constructor() {
         this.spheros = [];
@@ -134,7 +148,9 @@ class ControlStation {
 
         // Broadcast modal
         $('#broadcastBtn').addEventListener('click', () => this.openBroadcast());
-        $('#broadcastType').addEventListener('change', () => this.fillBroadcastDefault());
+        $('#broadcastAddBtn').addEventListener('click', () => this.addBroadcastTask());
+        $('#broadcastClearBtn').addEventListener('click', () => this.clearBroadcastBundle());
+        $('#broadcastParams').addEventListener('input', () => this.renderBroadcastLanes());
         $('#confirmBroadcastBtn').addEventListener('click', () => this.sendBroadcast());
         $('#cancelBroadcastBtn').addEventListener('click', () => this.closeModal('broadcastModal'));
 
@@ -754,7 +770,7 @@ class ControlStation {
             this.toast('No units deployed.', 'info', 'BROADCAST');
             return;
         }
-        this.fillBroadcastDefault();
+        this.renderBroadcastLanes();
         $('#broadcastSummary').textContent =
             `${count} unit${count === 1 ? '' : 's'} · fires at now + lead`;
         const cd = $('#broadcastCountdown');
@@ -763,25 +779,94 @@ class ControlStation {
         this.openModal('broadcastModal', 'broadcastType');
     }
 
-    fillBroadcastDefault() {
+    // Parse the bundle editor as a JSON array. Returns the array on success, or
+    // null on parse error / non-array (caller decides how to react).
+    parseBroadcastBundle() {
+        const raw = ($('#broadcastParams').value || '').trim();
+        if (!raw) return [];
+        let arr;
+        try {
+            arr = JSON.parse(raw);
+        } catch (e) {
+            return null;
+        }
+        return Array.isArray(arr) ? arr : null;
+    }
+
+    // ADD: append the selected type (with its default params) to the bundle.
+    addBroadcastTask() {
         const type = $('#broadcastType').value;
-        const params = BROADCAST_DEFAULTS[type] ?? {};
-        $('#broadcastParams').value = JSON.stringify(params, null, 2);
+        const arr = this.parseBroadcastBundle();
+        if (arr === null) {
+            this.toast('Bundle must be a valid JSON array.', 'error', 'BROADCAST');
+            return;
+        }
+        // start_offset is an explicit per-task lane stagger (additive on the
+        // bundle lead). Inject 0 so it's visible in the JSON and easy to edit.
+        arr.push({ task_type: type, parameters: BROADCAST_DEFAULTS[type] ?? {}, start_offset: 0 });
+        $('#broadcastParams').value = JSON.stringify(arr, null, 2);
+        this.renderBroadcastLanes();
+    }
+
+    clearBroadcastBundle() {
+        $('#broadcastParams').value = '[]';
+        this.renderBroadcastLanes();
+    }
+
+    // Lightweight live hint: which lanes the bundle occupies + a conflict
+    // warning when two entries share a lane. Never blocks sending.
+    renderBroadcastLanes() {
+        const hint = $('#broadcastLanes');
+        if (!hint) return;
+        const arr = this.parseBroadcastBundle();
+        if (arr === null) {
+            hint.hidden = false;
+            hint.textContent = '⚠ bundle is not valid JSON';
+            return;
+        }
+        if (arr.length === 0) {
+            hint.hidden = true;
+            hint.textContent = '';
+            return;
+        }
+        const seen = new Set();
+        const conflicts = new Set();
+        const stagger = [];
+        for (const item of arr) {
+            const type = item && item.task_type;
+            const lanes = TASK_LANES[type] ?? [];
+            for (const lane of lanes) {
+                if (seen.has(lane)) conflicts.add(lane);
+                seen.add(lane);
+            }
+            // Per-task stagger readout, e.g. "DRIVE @0s, LED @2s".
+            const off = item && Number.isFinite(item.start_offset) ? item.start_offset : 0;
+            const laneTag = lanes.length ? lanes.join('+') : (type || '?');
+            stagger.push(`${laneTag} @${off}s`);
+        }
+        const lanesTxt = seen.size ? [...seen].join(' + ') : '(unknown)';
+        hint.hidden = false;
+        hint.textContent = conflicts.size
+            ? `⚠ lane conflict: ${[...conflicts].join(', ')} · controller will reject`
+            : `lanes: ${lanesTxt} · ${stagger.join(', ')}`;
     }
 
     async sendBroadcast() {
-        const taskType = $('#broadcastType').value;
-
-        let parameters;
-        try {
-            parameters = JSON.parse($('#broadcastParams').value || '{}');
-        } catch (e) {
-            this.toast('Parameters must be valid JSON.', 'error', 'BROADCAST');
+        const tasks = this.parseBroadcastBundle();
+        if (tasks === null) {
+            this.toast('Bundle must be a valid JSON array.', 'error', 'BROADCAST');
             return;
         }
-        if (typeof parameters !== 'object' || parameters === null || Array.isArray(parameters)) {
-            this.toast('Parameters must be a JSON object.', 'error', 'BROADCAST');
+        if (tasks.length === 0) {
+            this.toast('Bundle is empty — ADD at least one task.', 'info', 'BROADCAST');
             return;
+        }
+        for (const item of tasks) {
+            if (typeof item !== 'object' || item === null || Array.isArray(item)
+                || typeof item.task_type !== 'string' || !item.task_type.trim()) {
+                this.toast('Each bundle entry needs a task_type.', 'error', 'BROADCAST');
+                return;
+            }
         }
 
         let startOffset = parseFloat($('#broadcastLead').value);
@@ -791,7 +876,7 @@ class ControlStation {
             const r = await fetch('/api/broadcast_task', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ task_type: taskType, parameters, start_offset: startOffset }),
+                body: JSON.stringify({ tasks, start_offset: startOffset }),
             });
             const data = await r.json();
             if (!data.success) {
