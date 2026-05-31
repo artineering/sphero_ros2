@@ -12,17 +12,57 @@ Extends the robot-agnostic ``TaskExecutorBase`` with:
     ``sphero_task_handlers``.
 """
 
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, FrozenSet, Optional
 
-from sphero_instance_controller.core.common.task import TaskExecutorBase
+from sphero_instance_controller.core.common.task import (
+    TaskExecutorBase,
+    LANE_DRIVE,
+    LANE_LED,
+    LANE_MATRIX,
+    LANE_CONFIG,
+    EXCLUSIVE_LANES,
+    DEFAULT_LANE,
+)
 
 from . import sphero_task_handlers as h
+
+
+# task_type -> lane set. Single source of truth for concurrent lane assignment;
+# kept beside the handler registry below. Add a lane entry whenever you register
+# a handler. DRIVE / LED / MATRIX run concurrently; CONFIG is slotless (never
+# blocks / blocked). `custom` and `jumping_bean` are EXCLUSIVE in v1: they
+# occupy all three lanes, so nothing else runs while they do (and they only
+# start when every lane is free).
+TASK_LANES = {
+    'move_to': frozenset({LANE_DRIVE}),
+    'patrol': frozenset({LANE_DRIVE}),
+    'square': frozenset({LANE_DRIVE}),
+    'circle': frozenset({LANE_DRIVE}),
+    'spin': frozenset({LANE_DRIVE}),
+    'roll': frozenset({LANE_DRIVE}),
+    'heading': frozenset({LANE_DRIVE}),
+    'speed': frozenset({LANE_DRIVE}),
+    'reflect': frozenset({LANE_DRIVE}),
+    'stop': frozenset({LANE_DRIVE}),
+    'set_led': frozenset({LANE_LED}),
+    'led_sequence': frozenset({LANE_LED}),
+    'matrix': frozenset({LANE_MATRIX}),
+    'matrix_sequence': frozenset({LANE_MATRIX}),
+    'collision': frozenset({LANE_CONFIG}),
+    'custom': EXCLUSIVE_LANES,
+    'jumping_bean': EXCLUSIVE_LANES,
+}
 
 
 class SpheroTaskExecutorBase(TaskExecutorBase):
     """Sphero-shaped task executor. Extend, then implement the _send_* methods."""
 
     cancel_task_type = 'stop'
+
+    @staticmethod
+    def lanes_for(task_type: str) -> FrozenSet[str]:
+        """Resolve a task_type to its lane set (default = DRIVE)."""
+        return TASK_LANES.get(task_type.lower(), frozenset({DEFAULT_LANE}))
 
     def __init__(self,
                  position_callback: Optional[Callable[[], Dict[str, float]]] = None,

@@ -11,7 +11,7 @@ string. The base class itself contains no robot-specific knowledge.
 
 import time
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
 from dataclasses import dataclass, field
 
 
@@ -22,6 +22,28 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+# ----- Lane model (concurrent per-actuator execution) -----
+# A task occupies one or more lanes. Tasks in disjoint lanes run in parallel;
+# tasks sharing a lane are serialized (FIFO within a lane). Lane assignment per
+# task_type lives beside the handler registry (see sphero_task_executor.py); the
+# base class is robot-agnostic and only carries the resolved `lanes` set.
+LANE_DRIVE = 'drive'
+LANE_LED = 'led'
+LANE_MATRIX = 'matrix'
+LANE_CONFIG = 'config'
+
+# The three slotted lanes that participate in gating / exclusivity. CONFIG is a
+# slot (so it flows through the same promote->tick->complete path) but is
+# deliberately excluded here so it never blocks, and is never blocked by, the
+# three real lanes.
+LANES = (LANE_DRIVE, LANE_LED, LANE_MATRIX)
+EXCLUSIVE_LANES = frozenset(LANES)  # "whole robot" set (custom / jumping_bean)
+DEFAULT_LANE = LANE_DRIVE
+
+# Slot dict keys: the three real lanes plus CONFIG.
+_SLOT_LANES = LANES + (LANE_CONFIG,)
 
 
 @dataclass
@@ -36,6 +58,9 @@ class TaskDescriptor:
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     error_message: Optional[str] = None
+    # The set of lanes this task occupies. Default = the single DRIVE lane,
+    # which keeps lane-unaware tasks (and the generic test handlers) serial.
+    lanes: FrozenSet[str] = field(default_factory=lambda: frozenset({DEFAULT_LANE}))
 
     def to_dict(self) -> dict:
         """Convert task to dictionary."""
@@ -49,6 +74,8 @@ class TaskDescriptor:
             'started_at': self.started_at,
             'completed_at': self.completed_at,
             'error_message': self.error_message,
+            'lanes': sorted(self.lanes),
+            'lane': (next(iter(self.lanes)) if len(self.lanes) == 1 else 'multi'),
         }
 
 
@@ -74,10 +101,42 @@ class TaskExecutorBase:
 
     def __init__(self):
         self.task_queue: List[TaskDescriptor] = []
-        self.current_task: Optional[TaskDescriptor] = None
+        # One running slot per lane. Tasks in disjoint lanes run concurrently.
+        self.current_tasks: Dict[str, Optional[TaskDescriptor]] = {
+            ln: None for ln in _SLOT_LANES
+        }
         self.task_history: List[TaskDescriptor] = []
         self._handlers: Dict[str, TaskHandler] = {}
         self._register_default_handlers()
+
+    # ----- Back-compat single-slot view -----
+    # Existing callers / tests treat the executor as having one `current_task`.
+    # The getter resolves to the DRIVE slot (or any occupied slot); the setter
+    # clears every lane then places the value under each of its lanes. This lets
+    # the serial DRIVE stream and the force-state tests keep working unchanged.
+    @property
+    def current_task(self) -> Optional['TaskDescriptor']:
+        drive = self.current_tasks[LANE_DRIVE]
+        if drive is not None:
+            return drive
+        return next((t for t in self.current_tasks.values() if t is not None), None)
+
+    @current_task.setter
+    def current_task(self, value: Optional['TaskDescriptor']) -> None:
+        for ln in self.current_tasks:
+            self.current_tasks[ln] = None
+        if value is not None:
+            for ln in value.lanes:
+                if ln in self.current_tasks:
+                    self.current_tasks[ln] = value
+
+    def running_tasks(self) -> List['TaskDescriptor']:
+        """Distinct, non-None running tasks across all lane slots."""
+        seen = []
+        for t in self.current_tasks.values():
+            if t is not None and t not in seen:
+                seen.append(t)
+        return seen
 
     def _register_default_handlers(self) -> None:
         """Subclass hook. Register handlers on ``self`` at construction time."""
@@ -91,54 +150,168 @@ class TaskExecutorBase:
         """Append a task to the back of the queue."""
         self.task_queue.append(task)
 
-    def process_tasks(self) -> Optional[TaskDescriptor]:
+    def process_tasks(self) -> Optional[List[TaskDescriptor]]:
         """
-        Drive the queue forward by one tick.
+        Drive the queue forward by one tick, per-lane.
 
-        Returns the currently-running task (or None if idle).
+        Phases: (1) handle any stop/cancel sentinel at the queue head, (2)
+        promote due queued tasks into free lanes (per-lane start_at gating),
+        (3) tick each running task.
+
+        Returns the list of running tasks, or ``None`` when nothing is running
+        (back-compat with the original single-slot contract, which returned the
+        current task or ``None``).
         """
-        # Cancel-current-on-next-stop hook: if the next queued task matches the
-        # cancel sentinel and has zero delay, kill the in-flight task before
-        # picking up the next one.
-        if self.current_task is not None and self.task_queue:
-            next_task = self.task_queue[0]
-            if next_task.task_type.lower() == self.cancel_task_type.lower():
-                delay = next_task.parameters.get('delay', 0.0)
-                if delay == 0.0:
-                    self.current_task.status = TaskStatus.CANCELLED
-                    self.current_task.completed_at = time.time()
-                    self.task_history.append(self.current_task)
-                    self.current_task = None
+        # ----- Phase 1: stop / cancel sentinel handling (Decision D3). -----
+        self._handle_stop_sentinels()
 
-        # Promote next pending task to running, unless it is scheduled for a
-        # future shared-start instant (synchronized start). Comparison uses the
-        # wall clock (time.time()) intentionally: the shared NTP-synced frame is
-        # exactly what synchronizes starts across units.
-        if self.current_task is None and self.task_queue:
-            head = self.task_queue[0]
-            if head.start_at is None or time.time() >= head.start_at:
-                self.current_task = self.task_queue.pop(0)
-                self.current_task.status = TaskStatus.RUNNING
-                self.current_task.started_at = time.time()
+        # ----- Phase 2: per-lane promotion with per-lane start_at gating. -----
+        self._promote_due()
 
-        # Tick the current task.
-        if self.current_task is not None:
+        # ----- Phase 3: tick each distinct running task. -----
+        for task in self.running_tasks():
             try:
-                completed = self.execute_task(self.current_task)
+                completed = self.execute_task(task)
                 if completed:
-                    if self.current_task.status == TaskStatus.RUNNING:
-                        self.current_task.status = TaskStatus.COMPLETED
-                    self.current_task.completed_at = time.time()
-                    self.task_history.append(self.current_task)
-                    self.current_task = None
+                    if task.status == TaskStatus.RUNNING:
+                        task.status = TaskStatus.COMPLETED
+                    task.completed_at = time.time()
+                    self.task_history.append(task)
+                    self._clear_task(task)
             except Exception as e:
-                self.current_task.status = TaskStatus.FAILED
-                self.current_task.error_message = str(e)
-                self.current_task.completed_at = time.time()
-                self.task_history.append(self.current_task)
-                self.current_task = None
+                task.status = TaskStatus.FAILED
+                task.error_message = str(e)
+                task.completed_at = time.time()
+                self.task_history.append(task)
+                self._clear_task(task)
 
-        return self.current_task
+        # ----- Phase 4: re-promote into lanes freed by Phase 3 completions. -----
+        # A task that finished this tick frees its lane(s); its lane-follower
+        # should start in the same tick (serial-within-lane has no idle gap).
+        self._promote_due()
+
+        running = self.running_tasks()
+        return running if running else None
+
+    # ----- Stop / promotion phases -----
+
+    def _handle_stop_sentinels(self) -> None:
+        """
+        Phase 1. Consume stop/halt sentinels.
+
+        Targeted (`target`) and panic (`scope == 'all'` / ``halt``) sentinels
+        are consumed wherever they sit in the queue. A leading *bare* stop
+        (zero delay, no target/scope) cancels only the DRIVE slot and is left in
+        place so it falls through to promotion (so the physical stop is emitted).
+        A delayed bare stop is an ordinary queued task and is left untouched.
+        """
+        cancel = self.cancel_task_type.lower()
+
+        # First pass: scan the whole queue for targeted / panic sentinels.
+        i = 0
+        while i < len(self.task_queue):
+            s = self.task_queue[i]
+            if s.task_type.lower() != cancel:
+                i += 1
+                continue
+            params = s.parameters
+            target = params.get('target')
+            is_panic = params.get('scope') == 'all' or s.task_type.lower() == 'halt'
+
+            if target is not None:
+                self._cancel_by_id(target)
+                self.task_queue.pop(i)
+                self._complete_sentinel(s)
+                continue
+            if is_panic:
+                for t in self.running_tasks():
+                    self._cancel_task(t)
+                self.task_queue.clear()
+                self._complete_sentinel(s)
+                return  # queue is empty now
+            i += 1
+
+        # Second pass: a leading bare stop (delay 0) cancels the DRIVE slot and
+        # falls through to promotion. Anything else at the head is left as-is.
+        if not self.task_queue:
+            return
+        head = self.task_queue[0]
+        if head.task_type.lower() == cancel and head.parameters.get('delay', 0.0) == 0.0:
+            drive = self.current_tasks[LANE_DRIVE]
+            if drive is not None:
+                self._cancel_task(drive)
+
+    def _promote_due(self) -> None:
+        """
+        Phase 2 / 4. Promote due queued tasks into free lanes (per-lane FIFO).
+
+        Scan front-to-back. A task promotes only if every one of its lanes is
+        free AND not reserved this tick. Any task that cannot promote (busy
+        lane, already-reserved lane, or not yet due per ``start_at``) reserves
+        its OWN lanes, so a follower needing those lanes waits (preserving FIFO
+        within a lane) while a task in a disjoint lane proceeds.
+        """
+        now = time.time()
+        reserved = set()
+        i = 0
+        while i < len(self.task_queue):
+            t = self.task_queue[i]
+            lanes = self._slot_lanes(t.lanes)
+
+            busy = any(self.current_tasks[ln] is not None for ln in lanes)
+            not_due = t.start_at is not None and now < t.start_at
+            if busy or (reserved & lanes) or not_due:
+                reserved |= lanes
+                i += 1
+                continue
+
+            # Promote.
+            self.task_queue.pop(i)
+            t.status = TaskStatus.RUNNING
+            t.started_at = now
+            for ln in lanes:
+                self.current_tasks[ln] = t
+            reserved |= lanes
+            # Do not advance i: a new task may now sit at this index.
+
+    # ----- Lane / cancel helpers -----
+
+    def _slot_lanes(self, lanes: FrozenSet[str]) -> FrozenSet[str]:
+        """Restrict a task's lanes to lanes that exist as slots."""
+        return frozenset(ln for ln in lanes if ln in self.current_tasks)
+
+    def _clear_task(self, task: TaskDescriptor) -> None:
+        """Vacate every lane slot currently holding ``task``."""
+        for ln in self.current_tasks:
+            if self.current_tasks[ln] is task:
+                self.current_tasks[ln] = None
+
+    def _cancel_task(self, task: TaskDescriptor) -> None:
+        """Mark a running task CANCELLED, file to history, vacate its lanes."""
+        task.status = TaskStatus.CANCELLED
+        task.completed_at = time.time()
+        self.task_history.append(task)
+        self._clear_task(task)
+
+    def _cancel_by_id(self, task_id: str) -> None:
+        """Cancel a task by task_id, whether it is running or still queued."""
+        for t in self.running_tasks():
+            if t.task_id == task_id:
+                self._cancel_task(t)
+                return
+        for idx, t in enumerate(self.task_queue):
+            if t.task_id == task_id:
+                t.status = TaskStatus.CANCELLED
+                t.completed_at = time.time()
+                self.task_history.append(t)
+                self.task_queue.pop(idx)
+                return
+
+    def _complete_sentinel(self, sentinel: TaskDescriptor) -> None:
+        """File a consumed targeted/halt sentinel as COMPLETED."""
+        sentinel.status = TaskStatus.COMPLETED
+        sentinel.completed_at = time.time()
+        self.task_history.append(sentinel)
 
     def execute_task(self, task: TaskDescriptor) -> bool:
         """

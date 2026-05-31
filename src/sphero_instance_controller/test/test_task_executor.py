@@ -13,6 +13,9 @@ from sphero_instance_controller.core.common.task import (
     TaskDescriptor,
     TaskStatus,
     TaskExecutorBase,
+    LANE_DRIVE,
+    LANE_LED,
+    LANE_MATRIX,
 )
 from sphero_instance_controller.core.sphero import sphero_task_handlers as h
 from sphero_instance_controller.core.sphero.sphero_task_executor import (
@@ -651,3 +654,265 @@ class TestSpheroHandlerSmoke:
         # Last two calls: stop, then stabilization on
         assert names[-2] == 'stop'
         assert names[-1] == 'stabilization' and ex.sends[-1][1] == {'enable': True}
+
+
+# ====================================================================
+# E. Concurrent lanes (DRIVE / LED / MATRIX)
+# ====================================================================
+
+
+def lane_task(task_type, task_id=None, **params):
+    """Build a Sphero task with lanes resolved from the task_type lane map."""
+    t = TaskDescriptor(
+        task_id=task_id or f't_{task_type}',
+        task_type=task_type,
+        parameters=dict(params),
+    )
+    t.lanes = SpheroTaskExecutorBase.lanes_for(task_type)
+    return t
+
+
+def _send_names(ex):
+    return [s[0] for s in ex.sends]
+
+
+class TestConcurrentLanes:
+
+    def test_parallel_lanes_tick_independently(self, clock):
+        # roll (DRIVE), set_led (LED), matrix (MATRIX) all fire in one tick.
+        ex = RecordingSphero()
+        ex.add_task(lane_task('roll', heading=0, speed=100))
+        ex.add_task(lane_task('set_led', color='red'))
+        ex.add_task(lane_task('matrix', pattern='smile'))
+        ex.process_tasks()
+        names = _send_names(ex)
+        assert 'roll' in names
+        assert 'led' in names
+        assert 'matrix' in names
+        # roll is indefinite (still running); set_led/matrix are one-shot.
+        assert ex.current_tasks[LANE_DRIVE] is not None
+        assert len(ex.running_tasks()) >= 1
+
+    def test_parallel_three_lanes_all_running_same_tick(self, clock):
+        # Use three indefinite/one-shot-but-occupying tasks via led_sequence /
+        # matrix_sequence so all three lanes stay occupied after one tick.
+        ex = RecordingSphero()
+        ex.add_task(lane_task('roll', heading=0, speed=100))  # indefinite DRIVE
+        ex.add_task(lane_task('led_sequence',
+                              sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                              interval=10.0, loop=True))
+        ex.add_task(lane_task('matrix_sequence',
+                              sequence=[{'pattern': 'smile'}],
+                              interval=10.0, loop=True))
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is not None
+        assert ex.current_tasks[LANE_LED] is not None
+        assert ex.current_tasks[LANE_MATRIX] is not None
+        assert len(ex.running_tasks()) == 3
+
+    def test_per_lane_start_at_gating_independence(self, clock):
+        # THE critical test: a future-gated DRIVE task queued AHEAD of a due
+        # LED task must NOT block the LED task.
+        ex = RecordingSphero()
+        gated_drive = lane_task('roll', heading=0, speed=100)
+        gated_drive.start_at = clock.now + 5.0
+        led = lane_task('set_led', color='red')
+        ex.add_task(gated_drive)
+        ex.add_task(led)
+
+        ex.process_tasks()
+        # LED promoted and emitted now; DRIVE still pending (gated).
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+        assert gated_drive.status == TaskStatus.PENDING
+        assert ex.current_tasks[LANE_DRIVE] is None
+        assert gated_drive in ex.task_queue
+
+        # Once due, DRIVE promotes.
+        clock.advance(5.0)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is gated_drive
+        assert gated_drive.status == TaskStatus.RUNNING
+
+    def test_bundle_per_task_start_offsets_stagger_lanes(self, clock):
+        # Mirrors a bundle with per-task additive start_offsets: DRIVE at the
+        # synced instant (now), LED staggered to now+2. Each lane gates on its
+        # own start_at, so at t=now only DRIVE runs; at t=now+2 LED joins.
+        ex = RecordingSphero()
+        drive = lane_task('roll', heading=0, speed=100)
+        drive.start_at = clock.now            # fires immediately
+        led = lane_task('set_led', color='red')
+        led.start_at = clock.now + 2.0        # staggered +2s
+        ex.add_task(drive)
+        ex.add_task(led)
+
+        ex.process_tasks()
+        # DRIVE promoted now; LED still gated (independent of DRIVE).
+        assert ex.current_tasks[LANE_DRIVE] is drive
+        assert drive.status == TaskStatus.RUNNING
+        assert ex.current_tasks[LANE_LED] is None
+        assert led.status == TaskStatus.PENDING
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) not in ex.sends
+
+        # Advance to the LED's start instant; it now promotes and emits.
+        clock.advance(2.0)
+        ex.process_tasks()
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+        # DRIVE (indefinite) is still running on its lane.
+        assert ex.current_tasks[LANE_DRIVE] is drive
+
+    def test_per_lane_fifo_same_lane_gated_blocks_follower(self, clock):
+        # Two LED tasks, first gated 5s; the second LED task waits (same lane).
+        ex = RecordingSphero()
+        first = lane_task('set_led', task_id='l1', color='red')
+        first.start_at = clock.now + 5.0
+        second = lane_task('set_led', task_id='l2', color='blue')
+        ex.add_task(first)
+        ex.add_task(second)
+
+        ex.process_tasks()
+        # Neither LED task promoted (same lane FIFO; head is gated).
+        assert ex.current_tasks[LANE_LED] is None
+        assert first in ex.task_queue and second in ex.task_queue
+        assert ex.sends == []
+
+    def test_lane_conflict_queues_within_lane(self, clock):
+        # Two roll tasks: second waits until first completes; LED unaffected.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100, duration=2.0)
+        r2 = lane_task('roll', task_id='r2', heading=90, speed=100, duration=2.0)
+        led = lane_task('set_led', color='red')
+        ex.add_task(r1)
+        ex.add_task(r2)
+        ex.add_task(led)
+
+        ex.process_tasks()
+        # r1 running on DRIVE, led ran on LED, r2 still queued.
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        assert r2 in ex.task_queue
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+
+        # Finish r1, r2 promotes.
+        clock.advance(2.5)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is r2
+        assert r1.status == TaskStatus.COMPLETED
+
+    def test_targeted_stop_by_name(self, clock):
+        # Start roll(r1, DRIVE) + led_sequence(l1, LED); stop target=r1 cancels
+        # only r1; l1 keeps running.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        l1 = lane_task('led_sequence', task_id='l1',
+                       sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                       interval=10.0, loop=True)
+        ex.add_task(r1)
+        ex.add_task(l1)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        assert ex.current_tasks[LANE_LED] is l1
+
+        stop = lane_task('stop', target='r1')
+        ex.add_task(stop)
+        ex.process_tasks()
+
+        assert r1.status == TaskStatus.CANCELLED
+        assert ex.current_tasks[LANE_DRIVE] is None
+        assert ex.current_tasks[LANE_LED] is l1
+        assert l1.status == TaskStatus.RUNNING
+        assert r1 in ex.task_history
+
+    def test_halt_scope_all_cancels_everything(self, clock):
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        l1 = lane_task('led_sequence', task_id='l1',
+                       sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                       interval=10.0, loop=True)
+        m1 = lane_task('matrix_sequence', task_id='m1',
+                       sequence=[{'pattern': 'smile'}], interval=10.0, loop=True)
+        for t in (r1, l1, m1):
+            ex.add_task(t)
+        ex.process_tasks()
+        assert len(ex.running_tasks()) == 3
+
+        # Queue a couple of extra tasks too, to verify the queue is drained.
+        ex.add_task(lane_task('roll', task_id='r2', heading=90, speed=100))
+        halt = lane_task('stop', scope='all')
+        ex.add_task(halt)
+        ex.process_tasks()
+
+        assert r1.status == TaskStatus.CANCELLED
+        assert l1.status == TaskStatus.CANCELLED
+        assert m1.status == TaskStatus.CANCELLED
+        assert ex.task_queue == []
+        assert ex.running_tasks() == []
+
+    def test_bare_stop_cancels_drive_only(self, clock):
+        # D2-a: DRIVE roll + LED set_led running; bare stop cancels DRIVE and
+        # emits physical stop, LED keeps running.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        l1 = lane_task('led_sequence', task_id='l1',
+                       sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                       interval=10.0, loop=True)
+        ex.add_task(r1)
+        ex.add_task(l1)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        assert ex.current_tasks[LANE_LED] is l1
+
+        ex.add_task(lane_task('stop'))
+        ex.process_tasks()
+
+        assert r1.status == TaskStatus.CANCELLED
+        # Physical stop emitted.
+        assert ('stop', {}) in ex.sends
+        # LED lane untouched.
+        assert ex.current_tasks[LANE_LED] is l1
+        assert l1.status == TaskStatus.RUNNING
+
+    def test_exclusive_custom_blocks_and_is_blocked(self, clock):
+        # While a DRIVE task runs, a queued custom does NOT promote; once the
+        # custom runs, a queued set_led does NOT promote until custom completes.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100, duration=2.0)
+        custom = lane_task('custom', task_id='c1', commands=[
+            {'type': 'led', 'red': 1, 'green': 2, 'blue': 3, 'duration': 0.0},
+        ])
+        led_after = lane_task('set_led', task_id='l2', color='red')
+        ex.add_task(r1)
+        ex.add_task(custom)
+        ex.add_task(led_after)
+
+        ex.process_tasks()
+        # r1 occupies DRIVE; custom is exclusive so it cannot promote (DRIVE
+        # busy); led_after is behind the exclusive custom which reserves LED,
+        # so it must wait too (FIFO behind an exclusive task).
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        assert custom in ex.task_queue
+        assert led_after in ex.task_queue
+        assert ex.current_tasks[LANE_LED] is None
+
+        # Finish r1: now all lanes free, custom promotes (exclusive).
+        clock.advance(2.5)
+        ex.process_tasks()
+        assert custom in ex.running_tasks()
+        # custom occupies all three lanes; led_after still blocked.
+        assert ex.current_tasks[LANE_LED] is custom
+        assert led_after in ex.task_queue
+
+    def test_back_compat_serial_drive_stream(self, clock):
+        # A stream of roll tasks behaves one-at-a-time, FIFO (regression guard).
+        ex = RecordingSphero()
+        a = lane_task('roll', task_id='a', heading=0, speed=100, duration=1.0)
+        b = lane_task('roll', task_id='b', heading=90, speed=100, duration=1.0)
+        ex.add_task(a)
+        ex.add_task(b)
+
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is a
+        assert b in ex.task_queue
+
+        clock.advance(1.5)
+        ex.process_tasks()
+        assert a.status == TaskStatus.COMPLETED
+        assert ex.current_tasks[LANE_DRIVE] is b

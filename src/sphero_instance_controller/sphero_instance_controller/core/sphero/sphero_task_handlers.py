@@ -392,8 +392,13 @@ def execute_roll(executor, task: TaskDescriptor) -> bool:
         elapsed = time.time() - task.parameters['start_time']
         return elapsed >= duration
     else:
-        executor._send_roll_command(heading, speed, duration)
-        return True
+        # duration <= 0 => roll indefinitely (Sphero keeps moving until it is
+        # told to stop). The task therefore stays running and continues to
+        # occupy the DRIVE lane until cancelled. Emit the command once.
+        if not params.get('_rolling'):
+            executor._send_roll_command(heading, speed, duration)
+            task.parameters['_rolling'] = True
+        return False
 
 
 def execute_heading(executor, task: TaskDescriptor) -> bool:

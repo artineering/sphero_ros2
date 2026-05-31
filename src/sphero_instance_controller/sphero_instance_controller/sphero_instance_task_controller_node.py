@@ -273,49 +273,79 @@ class SpheroInstanceTaskController(Node):
 
     # ===== Callbacks =====
 
+    def _compute_start_at(self, now, start_offset):
+        """Resolve an optional synchronized-start instant to an absolute epoch.
+
+        Anchors to the coordinator's `now` so units that receive late still fire
+        at the same absolute target. Returns None for immediate start.
+        """
+        if now is not None and start_offset is not None:
+            target = float(now) + float(start_offset)
+            if target > time.time():
+                return target
+        return None
+
+    def _build_task(self, item, start_at):
+        """Build one TaskDescriptor from a single-task / sub-task dict.
+
+        Normalizes the `name` alias to `task_id`, auto-generates a task_id when
+        absent, and resolves lanes (honoring an explicit `lane`/`lanes`
+        override). Returns the TaskDescriptor (does not enqueue).
+        """
+        # name alias -> task_id; auto-generate when neither is present.
+        task_id = item.get('task_id') or item.get('name')
+        if not task_id:
+            task_id = f"task_{int(time.time() * 1000)}"
+
+        task = TaskDescriptor(
+            task_id=task_id,
+            task_type=item['task_type'],
+            parameters=item.get('parameters', {}),
+        )
+
+        # Lane resolution: explicit override wins, else infer from task_type.
+        override = item.get('lanes') or item.get('lane')
+        if override is not None:
+            override = [override] if isinstance(override, str) else override
+            task.lanes = frozenset(override)
+        else:
+            task.lanes = self.task_executor.lanes_for(task.task_type)
+
+        if start_at is not None:
+            task.start_at = start_at
+        return task
+
     def task_callback(self, msg: String):
         """
         Handle incoming task messages.
 
-        Expected JSON format:
-        {
-            "task_id": "unique_id",  // optional
-            "task_type": "move_to|patrol|circle|...",
-            "parameters": {
-                // Task-specific parameters
-            }
-        }
+        Accepts three shapes:
+          (a) single task:  {"task_type": "...", "parameters": {...}}
+              (+ optional task_id / name, now / start_offset). Lane inferred
+              from task_type. Back-compat for every existing caller.
+          (b) concurrent bundle:  {"tasks": [ {...}, {...} ], now, start_offset}
+              One shared start_at across all sub-tasks. Rejected if two
+              sub-tasks share a lane or any sub-task is exclusive.
+          (c) targeted stop / halt: a single `stop` task whose parameters carry
+              `target` / `scope` (interpreted by the scheduler).
         """
         try:
             task_data = json.loads(msg.data)
 
-            # Validate required fields
+            # ----- Shape (b): concurrent bundle -----
+            if isinstance(task_data.get('tasks'), list):
+                self._handle_bundle(task_data)
+                return
+
+            # ----- Shape (a)/(c): single task -----
             if 'task_type' not in task_data:
                 self.get_logger().error('Task missing required field: task_type')
                 return
 
-            # Generate task ID if not provided
-            if 'task_id' not in task_data:
-                task_data['task_id'] = f"task_{int(time.time() * 1000)}"
+            start_at = self._compute_start_at(
+                task_data.get('now'), task_data.get('start_offset'))
+            task = self._build_task(task_data, start_at)
 
-            # Create task descriptor
-            task = TaskDescriptor(
-                task_id=task_data['task_id'],
-                task_type=task_data['task_type'],
-                parameters=task_data.get('parameters', {})
-            )
-
-            # Synchronized start (optional): anchor to the coordinator's `now`
-            # so units that receive late still fire at the same absolute target.
-            now = task_data.get('now')
-            start_offset = task_data.get('start_offset')
-            if now is not None and start_offset is not None:
-                target = float(now) + float(start_offset)
-                if target > time.time():
-                    task.start_at = target
-                # else: target already past => leave start_at None (immediate)
-
-            # Add to executor queue
             self.task_executor.add_task(task)
 
             schedule_note = (
@@ -328,13 +358,66 @@ class SpheroInstanceTaskController(Node):
             )
             self.get_logger().info(f'Task parameters: {json.dumps(task.parameters, indent=2)}')
 
-            # Publish status
             self.publish_task_status(task)
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON in task message: {e}')
         except Exception as e:
             self.get_logger().error(f'Error processing task: {e}')
+
+    def _handle_bundle(self, task_data):
+        """Ingest a concurrent `tasks:[...]` bundle.
+
+        The bundle-level `start_offset` anchors all sub-tasks to the same synced
+        fleet instant; each sub-task may carry its own additive `start_offset`
+        (float seconds) to stagger its lane after that synced start.
+        """
+        items = task_data['tasks']
+        if not items:
+            self.get_logger().error('Bundle rejected: empty tasks list')
+            return
+
+        now = task_data.get('now')
+        bundle_start_offset = float(task_data.get('start_offset', 0.0) or 0.0)
+
+        tasks = []
+        for item in items:
+            if 'task_type' not in item:
+                self.get_logger().error('Bundle rejected: sub-task missing task_type')
+                return
+            item_start_offset = float(item.get('start_offset', 0.0))
+            start_at = self._compute_start_at(
+                now, bundle_start_offset + item_start_offset)
+            tasks.append(self._build_task(item, start_at))
+
+        # Validate lane disjointness: no two sub-tasks may share a lane, and an
+        # exclusive sub-task cannot coexist with any other in one bundle.
+        seen_lanes = set()
+        for t in tasks:
+            if seen_lanes & t.lanes:
+                self.get_logger().error(
+                    f'Bundle rejected: lane conflict on {sorted(seen_lanes & t.lanes)} '
+                    f'(sub-task {t.task_id} / {t.task_type})'
+                )
+                return
+            seen_lanes |= t.lanes
+
+        for t in tasks:
+            self.task_executor.add_task(t)
+            self.publish_task_status(t)
+
+        # Per-task start delays may differ (staggered), so report each one.
+        now_wall = time.time()
+        starts = [
+            f'{t.task_id}+{t.start_at - now_wall:.2f}s'
+            if t.start_at is not None else f'{t.task_id} now'
+            for t in tasks
+        ]
+        self.get_logger().info(
+            f'Added bundle of {len(tasks)} tasks '
+            f'({", ".join(t.task_type for t in tasks)}) to queue. '
+            f'Starts: {", ".join(starts)}'
+        )
 
     def state_callback(self, msg: String):
         """Handle Sphero state updates."""
@@ -362,49 +445,53 @@ class SpheroInstanceTaskController(Node):
 
     def task_execution_loop(self):
         """Main task execution loop - called periodically."""
-        # Get previous task state
-        previous_task = self.task_executor.current_task
+        # Snapshot the running SET (by identity) before processing so we can
+        # report per-lane starts/finishes independently.
+        previous = {id(t): t for t in self.task_executor.running_tasks()}
 
-        # Process tasks
-        current_task = self.task_executor.process_tasks()
+        # Process tasks (returns the list of running tasks, or None if idle).
+        running = self.task_executor.process_tasks() or []
+        current = {id(t): t for t in running}
 
-        # Check if task changed
-        if previous_task != current_task:
-            # Task completed or new task started
-            if previous_task is not None:
-                # Previous task finished
-                self.publish_task_status(previous_task)
-
-                duration = previous_task.completed_at - previous_task.started_at
+        # Tasks that left the running set: finished or cancelled.
+        for tid, task in previous.items():
+            if tid not in current:
+                self.publish_task_status(task)
+                duration = (task.completed_at or task.started_at) - task.started_at
                 self.get_logger().info(
-                    f'Task {previous_task.task_id} {previous_task.status.value} in {duration:.2f}s'
+                    f'Task {task.task_id} {task.status.value} in {duration:.2f}s'
                 )
 
-            if current_task is not None:
-                # New task started
-                self.publish_task_status(current_task)
+        # Tasks newly in the running set: started.
+        for tid, task in current.items():
+            if tid not in previous:
+                self.publish_task_status(task)
 
-                # Update position from state before starting
+                # Update position from state before starting.
                 if 'position' in self.current_state:
                     self.current_position = self.current_state['position'].copy()
                     self.get_logger().info(
-                        f'Starting task {current_task.task_id} at position: '
+                        f'Starting task {task.task_id} at position: '
                         f'x={self.current_position["x"]:.2f}, '
                         f'y={self.current_position["y"]:.2f}'
                     )
                 else:
-                    self.get_logger().info(f'Starting task {current_task.task_id}')
+                    self.get_logger().info(f'Starting task {task.task_id}')
 
     def publish_task_status(self, task: TaskDescriptor):
         """Publish task status update."""
-        # Include queue information
+        # Include queue + per-lane information.
         status_dict = task.to_dict()
+        running = self.task_executor.running_tasks()
         status_dict['queue_length'] = len(self.task_executor.task_queue)
-        status_dict['has_current_task'] = self.task_executor.current_task is not None
-        status_dict['total_pending'] = (
-            len(self.task_executor.task_queue) +
-            (1 if self.task_executor.current_task is not None else 0)
-        )
+        status_dict['has_current_task'] = bool(running)
+        status_dict['total_pending'] = len(self.task_executor.task_queue) + len(running)
+        # Which lane slot holds which task_id (or None) so the dashboard can
+        # show per-lane state.
+        status_dict['running_lanes'] = {
+            ln: (t.task_id if t else None)
+            for ln, t in self.task_executor.current_tasks.items()
+        }
 
         msg = String()
         msg.data = json.dumps(status_dict)
