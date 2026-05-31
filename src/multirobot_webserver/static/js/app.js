@@ -6,6 +6,50 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+// Per-type default parameters for the BROADCAST composer. Mirrors the
+// per-instance forms' defaults; types absent here default to {} (operator
+// fills the JSON manually).
+const BROADCAST_DEFAULTS = {
+    roll:    { heading: 0, speed: 100, duration: 0 },
+    move_to: { x: 100, y: 100, speed: 100 },
+    patrol:  { waypoints: [{ x: 50, y: 50 }, { x: 100, y: 50 }, { x: 100, y: 100 }], speed: 100, loop: false },
+    circle:  { radius: 50, speed: 100, duration: 10, direction: 'ccw' },
+    square:  { side_length: 100 },
+    spin:    { duration: 5, speed: 120 },
+    set_led: { red: 0, green: 128, blue: 255 },
+    stop:    {},
+    heading: { heading: 0 },
+    speed:   { speed: 100 },
+    matrix:  { pattern: 'smile', red: 255, green: 255, blue: 255 },
+    led_sequence: {
+        sequence: [
+            { red: 255, green: 0, blue: 0 },
+            { red: 0, green: 255, blue: 0 },
+            { red: 0, green: 0, blue: 255 },
+        ],
+        interval: 1.0,
+        loop: false,
+    },
+    matrix_sequence: {
+        sequence: [
+            { pattern: 'smile', red: 255, green: 255, blue: 0 },
+            { pattern: 'heart', red: 255, green: 0, blue: 0 },
+            { pattern: 'arrow', red: 0, green: 255, blue: 255 },
+        ],
+        interval: 2.0,
+        loop: false,
+    },
+    collision: { action: 'start', mode: 'obstacle', sensitivity: 'HIGH' },
+    reflect: { offset_min: -45, offset_max: 45, speed: 80 },
+    custom: {
+        commands: [
+            { type: 'led', red: 0, green: 128, blue: 255, duration: 1.0 },
+            { type: 'roll', heading: 90, speed: 100, duration: 2.0 },
+            { type: 'stop', duration: 0.5 },
+        ],
+    },
+};
+
 class ControlStation {
     constructor() {
         this.spheros = [];
@@ -87,6 +131,12 @@ class ControlStation {
         // Batch detach controls (fleet selection bar)
         $('#detachSelectedBtn').addEventListener('click', () => this.requestBatchDetach([...this.selected]));
         $('#detachAllBtn').addEventListener('click', () => this.requestBatchDetach(this.spheros.map((s) => s.name)));
+
+        // Broadcast modal
+        $('#broadcastBtn').addEventListener('click', () => this.openBroadcast());
+        $('#broadcastType').addEventListener('change', () => this.fillBroadcastDefault());
+        $('#confirmBroadcastBtn').addEventListener('click', () => this.sendBroadcast());
+        $('#cancelBroadcastBtn').addEventListener('click', () => this.closeModal('broadcastModal'));
 
         // Generic close-on-X / outside-click
         $$('.modal .close').forEach((btn) => {
@@ -516,6 +566,14 @@ class ControlStation {
         const grid = $('#spheroGrid');
         const empty = $('#noSpherosMessage');
 
+        // BROADCAST is only valid with at least one running unit.
+        const broadcastBtn = $('#broadcastBtn');
+        if (broadcastBtn) {
+            const disabled = this.runningCount() === 0;
+            broadcastBtn.disabled = disabled;
+            broadcastBtn.setAttribute('aria-disabled', String(disabled));
+        }
+
         // Prune selection of any units no longer present (detached out-of-band).
         const currentNames = new Set(this.spheros.map((s) => s.name));
         this.selected = new Set([...this.selected].filter((n) => currentNames.has(n)));
@@ -685,6 +743,94 @@ class ControlStation {
     }
 
     /* -------------------------------------------------------- modal helpers */
+    /* -------------------------------------------------------- broadcast */
+    runningCount() {
+        return this.spheros.filter((s) => s.status === 'running').length;
+    }
+
+    openBroadcast() {
+        const count = this.runningCount();
+        if (count === 0) {
+            this.toast('No units deployed.', 'info', 'BROADCAST');
+            return;
+        }
+        this.fillBroadcastDefault();
+        $('#broadcastSummary').textContent =
+            `${count} unit${count === 1 ? '' : 's'} · fires at now + lead`;
+        const cd = $('#broadcastCountdown');
+        cd.hidden = true;
+        cd.textContent = '';
+        this.openModal('broadcastModal', 'broadcastType');
+    }
+
+    fillBroadcastDefault() {
+        const type = $('#broadcastType').value;
+        const params = BROADCAST_DEFAULTS[type] ?? {};
+        $('#broadcastParams').value = JSON.stringify(params, null, 2);
+    }
+
+    async sendBroadcast() {
+        const taskType = $('#broadcastType').value;
+
+        let parameters;
+        try {
+            parameters = JSON.parse($('#broadcastParams').value || '{}');
+        } catch (e) {
+            this.toast('Parameters must be valid JSON.', 'error', 'BROADCAST');
+            return;
+        }
+        if (typeof parameters !== 'object' || parameters === null || Array.isArray(parameters)) {
+            this.toast('Parameters must be a JSON object.', 'error', 'BROADCAST');
+            return;
+        }
+
+        let startOffset = parseFloat($('#broadcastLead').value);
+        if (!Number.isFinite(startOffset) || startOffset < 0.5) startOffset = 0.5;
+
+        try {
+            const r = await fetch('/api/broadcast_task', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ task_type: taskType, parameters, start_offset: startOffset }),
+            });
+            const data = await r.json();
+            if (!data.success) {
+                this.toast(`Broadcast failed: ${data.message || 'bad request'}`, 'error', 'BROADCAST');
+                return;
+            }
+            const sent = data.sent;
+            const failed = data.failed;
+            if (failed === 0) {
+                this.toast(`Broadcast to ${sent} unit${sent === 1 ? '' : 's'}, start in ${data.start_offset}s`, 'success', 'BROADCAST');
+            } else {
+                const failedNames = (data.results || []).filter((x) => !x.success).map((x) => x.name);
+                this.toast(`${sent} sent, ${failed} failed: ${this.truncateNames(failedNames)}`, 'error', 'BROADCAST');
+            }
+            this.startCountdown(data.start_offset);
+        } catch (e) {
+            this.toast('Broadcast uplink lost.', 'error', 'BROADCAST');
+        }
+    }
+
+    startCountdown(offset) {
+        const cd = $('#broadcastCountdown');
+        if (this._countdownTimer) clearInterval(this._countdownTimer);
+        let remaining = Math.max(1, Math.ceil(offset));
+        cd.hidden = false;
+        cd.textContent = `START IN ${remaining}…`;
+        this._countdownTimer = setInterval(() => {
+            remaining -= 1;
+            if (remaining > 0) {
+                cd.textContent = `START IN ${remaining}…`;
+            } else {
+                cd.textContent = 'GO';
+                clearInterval(this._countdownTimer);
+                this._countdownTimer = null;
+                setTimeout(() => this.closeModal('broadcastModal'), 600);
+            }
+        }, 1000);
+    }
+
     openModal(id, focusId) {
         const m = document.getElementById(id);
         m.classList.add('show');

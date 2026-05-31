@@ -32,6 +32,7 @@ class TaskDescriptor:
     parameters: Dict[str, Any]
     status: TaskStatus = TaskStatus.PENDING
     created_at: float = field(default_factory=time.time)
+    start_at: Optional[float] = None  # absolute epoch; None => start immediately
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     error_message: Optional[str] = None
@@ -44,6 +45,7 @@ class TaskDescriptor:
             'parameters': self.parameters,
             'status': self.status.value,
             'created_at': self.created_at,
+            'start_at': self.start_at,
             'started_at': self.started_at,
             'completed_at': self.completed_at,
             'error_message': self.error_message,
@@ -108,11 +110,16 @@ class TaskExecutorBase:
                     self.task_history.append(self.current_task)
                     self.current_task = None
 
-        # Promote next pending task to running.
+        # Promote next pending task to running, unless it is scheduled for a
+        # future shared-start instant (synchronized start). Comparison uses the
+        # wall clock (time.time()) intentionally: the shared NTP-synced frame is
+        # exactly what synchronizes starts across units.
         if self.current_task is None and self.task_queue:
-            self.current_task = self.task_queue.pop(0)
-            self.current_task.status = TaskStatus.RUNNING
-            self.current_task.started_at = time.time()
+            head = self.task_queue[0]
+            if head.start_at is None or time.time() >= head.start_at:
+                self.current_task = self.task_queue.pop(0)
+                self.current_task.status = TaskStatus.RUNNING
+                self.current_task.started_at = time.time()
 
         # Tick the current task.
         if self.current_task is not None:

@@ -28,6 +28,13 @@ from enum import Enum
 from sphero_instance_controller.core.common.task import TaskDescriptor, TaskStatus
 
 
+# Default angular rate for duration-based spins: one full rotation per second.
+# When a spin task supplies an explicit ``duration``, the swept ``angle`` is
+# derived as ``SPIN_DEG_PER_SEC * duration`` so the Sphero keeps spinning for
+# the whole requested time instead of crawling.
+SPIN_DEG_PER_SEC = 360.0
+
+
 class TaskType(Enum):
     """Catalog of Sphero task types."""
     # High-level tasks
@@ -263,17 +270,30 @@ def execute_matrix_sequence(executor, task: TaskDescriptor) -> bool:
 
 
 def execute_spin(executor, task: TaskDescriptor) -> bool:
-    """Spin in place by N rotations."""
+    """Spin in place for an explicit ``duration`` or by N ``rotations``.
+
+    If ``duration`` > 0 it takes precedence: the Sphero spins for exactly that
+    many seconds, with the swept ``angle`` derived as
+    ``SPIN_DEG_PER_SEC * duration`` (one rotation per second). Otherwise the
+    legacy ``rotations`` path is used: ``angle = 360 * rotations`` swept over
+    ``(360 * rotations) / 90`` seconds. ``speed`` is accepted for back-compat
+    but is not used in the angle math.
+    """
+    duration = task.parameters.get('duration', 0.0)
     rotations = task.parameters.get('rotations', 1)
     speed = task.parameters.get('speed', 100)
 
     if 'start_time' not in task.parameters:
         task.parameters['start_time'] = time.time()
         task.parameters['start_heading'] = executor.get_current_heading()
-        angle = int(360 * rotations)
-        duration = (360 * rotations) / 90
-        executor._send_spin_command(angle, duration)
-        task.parameters['rotation_time'] = duration
+        if duration > 0:
+            angle = int(SPIN_DEG_PER_SEC * duration)
+            effective_duration = duration
+        else:
+            angle = int(360 * rotations)
+            effective_duration = (360 * rotations) / 90
+        executor._send_spin_command(angle, effective_duration)
+        task.parameters['rotation_time'] = effective_duration
         return False
 
     if time.time() - task.parameters['start_time'] >= task.parameters['rotation_time']:

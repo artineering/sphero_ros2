@@ -15,6 +15,7 @@ import threading
 import time
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -58,6 +59,12 @@ AGENT_TIMEOUT = (3, 5)
 # Liveness cache TTL (seconds): remote-instance status is derived from a cached
 # per-worker GET /status so per-request listing can't stall on a dead agent.
 AGENT_STATUS_TTL = 2.0
+
+# Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
+# can never block the others; worker pool capped at the fleet ceiling (16 units /
+# UWB tags). Fan-out is parallel, so worst-case wall time is one read timeout.
+BROADCAST_POST_TIMEOUT = (3, 5)
+BROADCAST_MAX_WORKERS = 16
 
 
 class TcpRelay:
@@ -825,6 +832,66 @@ class SpheroInstanceManager:
             'results': results,
         }
 
+    def broadcast_task(self, task_type: str, parameters: dict,
+                       start_offset: float) -> Dict:
+        """
+        Fan ONE task to every running instance in parallel. A single coordinator
+        timestamp `now` is stamped ONCE before dispatch; the SAME payload (incl.
+        `now` and `start_offset`) goes to every unit so NTP-synced controllers
+        fire together at `now + start_offset`. Per-POST timeout keeps a dead unit
+        from blocking the others.
+
+        Returns: {success, sent, failed, now, start_offset, start_time,
+                  results:[{name, success, error?}]}
+        """
+        # Snapshot running targets so a concurrent add/remove can't mutate the
+        # instance dict mid-fan-out.
+        targets = [(inst['name'], inst['url'])
+                   for inst in self.instances.values()
+                   if self._instance_status(inst) == 'running']
+        if not targets:
+            return {'success': False, 'message': 'No units deployed'}
+
+        # Stamp the coordinator clock ONCE; every unit receives this same value.
+        now = time.time()
+        payload = {
+            'task_type': task_type,
+            'parameters': parameters,
+            'now': now,
+            'start_offset': start_offset,
+        }
+
+        def _post_one(name: str, url: str) -> Dict:
+            try:
+                r = requests.post(f'{url}/api/task', json=payload,
+                                  timeout=BROADCAST_POST_TIMEOUT)
+                if 200 <= r.status_code < 300:
+                    return {'name': name, 'success': True}
+                return {'name': name, 'success': False,
+                        'error': f'HTTP {r.status_code}'}
+            except requests.RequestException as exc:
+                return {'name': name, 'success': False, 'error': str(exc)}
+
+        results: List[Dict] = []
+        with ThreadPoolExecutor(
+                max_workers=min(BROADCAST_MAX_WORKERS, len(targets))) as ex:
+            futures = [ex.submit(_post_one, name, url) for name, url in targets]
+            # No timeout on as_completed: the per-POST timeout bounds each worker,
+            # so we always collect every result while they ran concurrently.
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+        sent = sum(1 for r in results if r['success'])
+        return {
+            'success': True,
+            'sent': sent,
+            'failed': len(results) - sent,
+            'now': now,
+            'start_offset': start_offset,
+            'start_time': now + start_offset,
+            'results': results,
+        }
+
     def get_all_instances(self) -> List[Dict]:
         """
         Get information about all Sphero instances.
@@ -1434,6 +1501,49 @@ def remove_spheros_batch():
         }), 400
 
     return jsonify(manager.remove_spheros_batch(names)), 200
+
+
+@app.route('/api/broadcast_task', methods=['POST'])
+def broadcast_task():
+    """Fan ONE task to every running Sphero in parallel.
+
+    Request: {task_type, parameters?, start_offset?}. The manager stamps a
+    single `now` and fans the same payload to each unit's /api/task. `task_type`
+    is NOT whitelisted here (the per-instance controller is the authority on
+    unknown types, matching single /api/task). 400 on bad body or zero units.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'success': False,
+                        'message': 'Invalid JSON body'}), 400
+
+    task_type = data.get('task_type')
+    if not isinstance(task_type, str) or not task_type.strip():
+        return jsonify({'success': False,
+                        'message': 'task_type must be a non-empty string'}), 400
+    task_type = task_type.strip()
+
+    parameters = data.get('parameters', {})
+    if not isinstance(parameters, dict):
+        return jsonify({'success': False,
+                        'message': 'parameters must be a JSON object'}), 400
+
+    start_offset = data.get('start_offset', 3.0)
+    try:
+        start_offset = float(start_offset)
+    except (TypeError, ValueError):
+        return jsonify({'success': False,
+                        'message': 'start_offset must be a number'}), 400
+    if start_offset < 0:
+        return jsonify({'success': False,
+                        'message': 'start_offset must be >= 0'}), 400
+
+    if not manager.instances:
+        return jsonify({'success': False,
+                        'message': 'No units deployed'}), 400
+
+    return jsonify(
+        manager.broadcast_task(task_type, parameters, start_offset)), 200
 
 
 @app.route('/api/spheros/<sphero_name>', methods=['DELETE'])

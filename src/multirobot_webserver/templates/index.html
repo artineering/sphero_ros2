@@ -67,6 +67,10 @@
                 <span class="action__glyph">↻</span>
                 <span class="action__label">REFRESH</span>
             </button>
+            <button class="action action--accent" id="broadcastBtn" disabled aria-disabled="true">
+                <span class="action__glyph">⇶</span>
+                <span class="action__label">BROADCAST TASK</span>
+            </button>
             <button class="action action--accent" id="arucoStartBtn">
                 <span class="action__glyph">⚡</span>
                 <span class="action__label">START ARUCO</span>
@@ -295,6 +299,50 @@
             <div class="modal__foot">
                 <button id="cancelRemoveBtn" class="action action--ghost">CANCEL</button>
                 <button id="confirmRemoveBtn" class="action action--danger">DETACH</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- BROADCAST TASK MODAL                                             -->
+    <!-- ================================================================ -->
+    <div id="broadcastModal" class="modal" role="dialog" aria-modal="true">
+        <div class="modal__panel">
+            <div class="modal__head">
+                <span class="modal__tag">[ BROADCAST ]</span>
+                <h3 class="modal__title">FAN TASK TO FLEET</h3>
+                <button class="modal__close close" aria-label="Close">×</button>
+            </div>
+            <div class="modal__body">
+                <label for="broadcastType" class="field__label">[ TASK TYPE ]</label>
+                <select id="broadcastType" class="field">
+                    <option value="roll">roll</option>
+                    <option value="move_to">move_to</option>
+                    <option value="patrol">patrol</option>
+                    <option value="circle">circle</option>
+                    <option value="square">square</option>
+                    <option value="spin">spin</option>
+                    <option value="set_led">set_led</option>
+                    <option value="stop">stop</option>
+                    <option value="heading">heading</option>
+                    <option value="speed">speed</option>
+                    <option value="matrix">matrix</option>
+                    <option value="led_sequence">led_sequence</option>
+                    <option value="matrix_sequence">matrix_sequence</option>
+                    <option value="collision">collision</option>
+                    <option value="reflect">reflect</option>
+                    <option value="custom">custom</option>
+                </select>
+                <label for="broadcastParams" class="field__label">[ PARAMETERS (JSON) ]</label>
+                <textarea id="broadcastParams" class="field" rows="5" autocomplete="off" spellcheck="false"></textarea>
+                <label for="broadcastLead" class="field__label">[ LEAD SECONDS ]</label>
+                <input type="number" id="broadcastLead" class="field" value="3.0" min="0.5" step="0.5">
+                <p class="field__hint"><span id="broadcastSummary">0 units · fires at now + lead</span></p>
+                <p class="field__hint field__hint--countdown" id="broadcastCountdown" hidden></p>
+            </div>
+            <div class="modal__foot">
+                <button id="cancelBroadcastBtn" class="action action--ghost">CANCEL</button>
+                <button id="confirmBroadcastBtn" class="action action--primary">BROADCAST ALL</button>
             </div>
         </div>
     </div>

@@ -240,6 +240,78 @@ class TestQueueLifecycle:
 
 
 # ====================================================================
+# A2. Synchronized start (start_at gating)
+# ====================================================================
+
+
+class TestSynchronizedStart:
+
+    def test_future_start_at_is_not_promoted(self, clock):
+        ex = RecordingExecutor()
+        task = make_task('one_shot')
+        task.start_at = clock.now + 5.0
+        ex.add_task(task)
+        # Across several ticks the future-dated head stays pending in the queue.
+        for _ in range(3):
+            assert ex.process_tasks() is None
+        assert ex.current_task is None
+        assert ex.task_queue == [task]
+        assert task.status == TaskStatus.PENDING
+        assert ex.calls == []
+
+    def test_future_start_at_promotes_once_due(self, clock):
+        ex = RecordingExecutor()
+        task = make_task('one_shot')
+        task.start_at = clock.now + 5.0
+        ex.add_task(task)
+        ex.process_tasks()
+        assert ex.current_task is None  # not yet due
+
+        clock.advance(5.0)  # now time.time() == start_at
+        ex.process_tasks()
+        # one_shot returns True → runs and completes in this tick.
+        assert ex.task_history[0].status == TaskStatus.COMPLETED
+        assert ex.task_history[0].started_at == clock.now
+
+    def test_past_start_at_promotes_immediately(self, clock):
+        ex = RecordingExecutor()
+        task = make_task('one_shot')
+        task.start_at = clock.now - 2.0
+        ex.add_task(task)
+        ex.process_tasks()
+        assert ex.current_task is None
+        assert ex.task_history[0].status == TaskStatus.COMPLETED
+
+    def test_none_start_at_promotes_immediately(self, clock):
+        # Regression guard: absent start_at behaves exactly as before.
+        ex = RecordingExecutor()
+        task = make_task('one_shot')
+        assert task.start_at is None
+        ex.add_task(task)
+        ex.process_tasks()
+        assert ex.current_task is None
+        assert ex.task_history[0].status == TaskStatus.COMPLETED
+
+    def test_future_head_blocks_later_queued_tasks(self, clock):
+        # Head-of-queue gating: a future-dated head holds the queue (FIFO).
+        ex = RecordingExecutor()
+        gated = make_task('one_shot')
+        gated.start_at = clock.now + 5.0
+        behind = make_task('two_shot')
+        ex.add_task(gated)
+        ex.add_task(behind)
+        ex.process_tasks()
+        assert ex.current_task is None
+        assert ex.task_queue == [gated, behind]
+
+    def test_to_dict_includes_start_at(self):
+        task = make_task('one_shot')
+        assert task.to_dict()['start_at'] is None
+        task.start_at = 1234.5
+        assert task.to_dict()['start_at'] == 1234.5
+
+
+# ====================================================================
 # B. Registry semantics
 # ====================================================================
 
@@ -445,6 +517,18 @@ class TestSpheroHandlerSmoke:
         # Not yet completed (still within duration)
         assert ex.current_task is not None
         clock.advance(8.5)
+        ex.process_tasks()
+        assert ex.current_task is None
+
+    def test_spin_with_duration(self, clock):
+        ex = RecordingSphero()
+        ex.add_task(make_task('spin', duration=60, speed=120))
+        ex.process_tasks()
+        # duration takes precedence: angle = 360 * 60 = 21600, duration = 60.0
+        assert ('spin', {'angle': 21600, 'duration': 60.0}) in ex.sends
+        # Still running before the full duration elapses
+        assert ex.current_task is not None
+        clock.advance(60.5)
         ex.process_tasks()
         assert ex.current_task is None
 

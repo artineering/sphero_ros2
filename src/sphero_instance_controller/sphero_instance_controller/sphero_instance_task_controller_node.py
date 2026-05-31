@@ -305,12 +305,26 @@ class SpheroInstanceTaskController(Node):
                 parameters=task_data.get('parameters', {})
             )
 
+            # Synchronized start (optional): anchor to the coordinator's `now`
+            # so units that receive late still fire at the same absolute target.
+            now = task_data.get('now')
+            start_offset = task_data.get('start_offset')
+            if now is not None and start_offset is not None:
+                target = float(now) + float(start_offset)
+                if target > time.time():
+                    task.start_at = target
+                # else: target already past => leave start_at None (immediate)
+
             # Add to executor queue
             self.task_executor.add_task(task)
 
+            schedule_note = (
+                f' scheduled in {task.start_at - time.time():.2f}s'
+                if task.start_at is not None else ''
+            )
             self.get_logger().info(
                 f'Added task {task.task_id} ({task.task_type}) to queue. '
-                f'Queue length: {len(self.task_executor.task_queue)}'
+                f'Queue length: {len(self.task_executor.task_queue)}{schedule_note}'
             )
             self.get_logger().info(f'Task parameters: {json.dumps(task.parameters, indent=2)}')
 

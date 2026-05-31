@@ -532,6 +532,12 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
     font-size: 11px;
     line-height: 1.6;
 }
+.field__hint--countdown {
+    color: var(--amber);
+    font-size: 14px;
+    letter-spacing: 0.18em;
+    font-weight: 600;
+}
 
 /* ============================================================
    Toast notifications
