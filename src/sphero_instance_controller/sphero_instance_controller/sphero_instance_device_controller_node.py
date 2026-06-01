@@ -366,6 +366,17 @@ class SpheroInstanceDeviceController(Node):
             blue = int(data.get('blue', 255))
             duration = float(data.get('duration', 0))
 
+            # Clear convention (e.g. /api/matrix/clear and _stop_lane(MATRIX)):
+            # empty pattern + no custom matrix means "blank the device". set_matrix
+            # no-ops on empty input, so route this to clear_matrix() explicitly.
+            if not pattern and not custom_matrix:
+                success = self.sphero.clear_matrix()
+                if success:
+                    self.get_logger().info('Matrix cleared')
+                else:
+                    self.get_logger().warning('Matrix clear not supported')
+                return
+
             success = self.sphero.set_matrix(
                 pattern=pattern if pattern else None,
                 custom_matrix=custom_matrix if custom_matrix else None,

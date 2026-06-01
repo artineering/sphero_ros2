@@ -916,3 +916,100 @@ class TestConcurrentLanes:
         ex.process_tasks()
         assert a.status == TaskStatus.COMPLETED
         assert ex.current_tasks[LANE_DRIVE] is b
+
+
+# ====================================================================
+# F. Physical stop emission on cancellation (_stop_lane hook)
+# ====================================================================
+
+
+class TestPhysicalStopOnCancel:
+    """A cancelled task must emit a PHYSICAL lane-scoped stop, not just vacate
+    its scheduler slot. Regression coverage for the live bug where halt/stop
+    left an indefinite roll physically running."""
+
+    def test_panic_halt_emits_physical_drive_stop(self, clock):
+        # Indefinite roll running; panic halt must physically stop the motors.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        ex.add_task(r1)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        ex.sends.clear()
+
+        ex.add_task(lane_task('stop', scope='all'))
+        ex.process_tasks()
+
+        assert r1.status == TaskStatus.CANCELLED
+        assert ('stop', {}) in ex.sends
+
+    def test_targeted_stop_emits_physical_drive_stop(self, clock):
+        # Targeted stop of a running drive task must physically stop the motors.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        ex.add_task(r1)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        ex.sends.clear()
+
+        ex.add_task(lane_task('stop', target='r1'))
+        ex.process_tasks()
+
+        assert r1.status == TaskStatus.CANCELLED
+        assert ('stop', {}) in ex.sends
+
+    def test_bare_stop_emits_exactly_one_drive_stop_no_led_or_matrix(self, clock):
+        # Bare stop while a roll runs: EXACTLY ONE physical DRIVE stop, and no
+        # LED / MATRIX stop (those lanes weren't cancelled).
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        ex.add_task(r1)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is r1
+        ex.sends.clear()
+
+        ex.add_task(lane_task('stop'))
+        ex.process_tasks()
+
+        assert r1.status == TaskStatus.CANCELLED
+        stops = [s for s in ex.sends if s == ('stop', {})]
+        assert len(stops) == 1
+        assert not any(s[0] == 'led' for s in ex.sends)
+        assert not any(s[0] == 'matrix' for s in ex.sends)
+
+    def test_halt_emits_physical_stop_for_all_three_lanes(self, clock):
+        # DRIVE + LED + MATRIX all running; panic halt stops every lane
+        # physically: stop motors, LED off, matrix cleared.
+        ex = RecordingSphero()
+        r1 = lane_task('roll', task_id='r1', heading=0, speed=100)
+        l1 = lane_task('led_sequence', task_id='l1',
+                       sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                       interval=10.0, loop=True)
+        m1 = lane_task('matrix_sequence', task_id='m1',
+                       sequence=[{'pattern': 'smile'}], interval=10.0, loop=True)
+        for t in (r1, l1, m1):
+            ex.add_task(t)
+        ex.process_tasks()
+        assert len(ex.running_tasks()) == 3
+        ex.sends.clear()
+
+        ex.add_task(lane_task('stop', scope='all'))
+        ex.process_tasks()
+
+        assert ('stop', {}) in ex.sends
+        assert ('led', {'red': 0, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+        assert ('matrix', {'pattern': None, 'red': 0, 'green': 0, 'blue': 0}) in ex.sends
+
+    def test_base_stop_lane_default_is_noop(self, clock):
+        # The robot-agnostic base _stop_lane must be a safe no-op: halting a
+        # generic RecordingExecutor (no actuators) must not raise.
+        ex = RecordingExecutor()
+        ex.register_handler('stop', lambda _e, _t: True)
+        ex.add_task(make_task('two_shot'))
+        ex.process_tasks()
+        assert ex.current_task is not None
+
+        ex.add_task(make_task('stop', scope='all'))
+        ex.process_tasks()  # must not raise
+        cancelled = [t for t in ex.task_history if t.status == TaskStatus.CANCELLED]
+        assert len(cancelled) == 1

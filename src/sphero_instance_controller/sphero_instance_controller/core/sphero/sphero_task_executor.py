@@ -97,6 +97,27 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
         self.register_handler('reflect', h.execute_reflect)
         self.register_handler('jumping_bean', h.execute_jumping_bean)
 
+    def _stop_lane(self, lane: str) -> None:
+        """Emit the lane-appropriate physical stop when a task is cancelled.
+
+        Routes scheduler cancellation (panic halt / targeted stop / bare stop)
+        into real hardware commands so a cancelled task actually stops on the
+        robot:
+          * DRIVE  -> stop the motors.
+          * LED    -> turn the main LED off (RGB 0,0,0).
+          * MATRIX -> clear the LED matrix via the established clear convention
+                      (empty pattern + all-zero color); the device controller
+                      honors this by blanking the matrix.
+          * CONFIG -> nothing physical to stop.
+        """
+        if lane == LANE_DRIVE:
+            self._send_stop_command()
+        elif lane == LANE_LED:
+            self._send_led_command(0, 0, 0)
+        elif lane == LANE_MATRIX:
+            self._send_matrix_command(pattern=None, red=0, green=0, blue=0)
+        # LANE_CONFIG: no physical actuator to stop.
+
     def get_current_position(self) -> Dict[str, float]:
         if self.position_callback:
             return self.position_callback()

@@ -231,8 +231,14 @@ class TaskExecutorBase:
                 return  # queue is empty now
             i += 1
 
-        # Second pass: a leading bare stop (delay 0) cancels the DRIVE slot and
-        # falls through to promotion. Anything else at the head is left as-is.
+        # Second pass: a leading bare stop (delay 0) cancels the DRIVE slot.
+        # When a DRIVE task is running, `_cancel_task` (via `_stop_lane`) now
+        # emits the physical DRIVE stop, so we CONSUME the sentinel here (pop +
+        # complete) to avoid it falling through to promotion -> `execute_stop`,
+        # which would emit a second, redundant physical stop. When no DRIVE task
+        # is running there is nothing to cancel, so we leave the sentinel in
+        # place and let it fall through to promotion (its handler emits the
+        # one physical stop). Anything else at the head is left as-is.
         if not self.task_queue:
             return
         head = self.task_queue[0]
@@ -240,6 +246,8 @@ class TaskExecutorBase:
             drive = self.current_tasks[LANE_DRIVE]
             if drive is not None:
                 self._cancel_task(drive)
+                self.task_queue.pop(0)
+                self._complete_sentinel(head)
 
     def _promote_due(self) -> None:
         """
@@ -286,11 +294,30 @@ class TaskExecutorBase:
             if self.current_tasks[ln] is task:
                 self.current_tasks[ln] = None
 
+    def _stop_lane(self, lane: str) -> None:
+        """
+        Robot-agnostic hook: emit a PHYSICAL stop for the given lane.
+
+        Called by ``_cancel_task`` for each lane slot a cancelled task occupied,
+        so cancellation (panic halt, targeted stop, bare stop) actually halts
+        hardware rather than only vacating scheduler slots. The base class has no
+        actuators, so this is a no-op; robot subclasses override it.
+        """
+        pass
+
     def _cancel_task(self, task: TaskDescriptor) -> None:
-        """Mark a running task CANCELLED, file to history, vacate its lanes."""
+        """Mark a running task CANCELLED, file to history, vacate its lanes.
+
+        Emits a physical stop per occupied lane via ``_stop_lane`` BEFORE
+        vacating the slots, so the lane set is still known.
+        """
         task.status = TaskStatus.CANCELLED
         task.completed_at = time.time()
         self.task_history.append(task)
+        occupied = [ln for ln in self.current_tasks
+                    if self.current_tasks[ln] is task]
+        for ln in occupied:
+            self._stop_lane(ln)
         self._clear_task(task)
 
     def _cancel_by_id(self, task_id: str) -> None:
