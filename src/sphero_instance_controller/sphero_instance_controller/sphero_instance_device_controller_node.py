@@ -14,6 +14,9 @@ import time
 import json
 import signal
 import random
+import os
+import fcntl
+from contextlib import contextmanager
 
 import rclpy
 from rclpy.node import Node
@@ -32,6 +35,59 @@ from sphero_instance_controller.spherov2_collision_patch import apply_collision_
 
 # Apply collision detection patch for 16-byte collision responses
 apply_collision_patch()
+
+
+# Per-host serialization of the BLE scan+connect phase.
+#
+# BlueZ rejects parallel connects on a single adapter (org.bluez.Error.InProgress),
+# so when several device-controller processes start at once on one Pi they starve
+# each other's scan/connect. We serialize that critical section across processes on
+# the same host with a file lock at a host-local path (NOT the NFS workspace).
+DEFAULT_BLE_CONNECT_LOCK = '/tmp/sphero_ble_connect.lock'
+BLE_CONNECT_LOCK_TIMEOUT = 90.0  # seconds: bounded blocking acquire, then proceed
+BLE_CONNECT_LOCK_POLL = 0.25     # seconds between non-blocking acquire attempts
+
+
+@contextmanager
+def ble_connect_lock(label=''):
+    """Serialize the BLE scan+connect phase per host via an flock'd lockfile.
+
+    Bounded blocking acquire: polls a non-blocking exclusive flock for up to
+    BLE_CONNECT_LOCK_TIMEOUT seconds, then proceeds anyway rather than deadlocking.
+    The lock is always released (LOCK_UN) and the fd closed on exit, even on
+    exception inside the critical section.
+    """
+    lock_path = os.environ.get('SPHERO_BLE_CONNECT_LOCK', DEFAULT_BLE_CONNECT_LOCK)
+    fd = open(lock_path, 'w')
+    acquired = False
+    deadline = time.monotonic() + BLE_CONNECT_LOCK_TIMEOUT
+    waited = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if not waited:
+                    print(f"[ble-lock] waiting on {lock_path} for {label}...")
+                    waited = True
+                if time.monotonic() >= deadline:
+                    print(f"[ble-lock] timed out after {BLE_CONNECT_LOCK_TIMEOUT}s "
+                          f"waiting for {label}; proceeding without lock")
+                    break
+                time.sleep(BLE_CONNECT_LOCK_POLL)
+        if acquired:
+            print(f"[ble-lock] acquired {lock_path} for {label}")
+        yield
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            print(f"[ble-lock] released {lock_path} for {label}")
+        fd.close()
 
 
 class SpheroInstanceDeviceController(Node):
@@ -576,22 +632,64 @@ def main(args=None):
         topic_name_safe = sphero_name.replace("-", "_")
         topic_prefix = f'sphero/{topic_name_safe}'
 
-        # Scan for Sphero
+        # Scan + connect, serialized per host (see ble_connect_lock) with retry.
+        # BlueZ rejects parallel connects on one adapter, so only one process on a
+        # host runs find_toy + the SpheroEduAPI connect at a time. We enter the
+        # SpheroEduAPI context MANUALLY so the connection can outlive the lock: the
+        # lock covers scan+connect only, then is released before the spin loop.
         print(f"Scanning for Sphero robot: {sphero_name}...")
         robot = None
-        try:
-            robot = scanner.find_toy(toy_name=sphero_name)
-        except Exception as scan_error:
-            # Toy not found - publish error status before exiting
-            print(f"✗ Failed to find Sphero {sphero_name}: {scan_error}")
+        api = None
+        cm = None                # the SpheroEduAPI context manager, kept for __exit__
+        connected = False
+        last_error = None
+        error_code = 'connect_failed'
+        max_attempts = 3
+        retry_backoff = 2.5      # seconds between attempts
 
-            # Use temp_node to publish error status
+        for attempt in range(1, max_attempts + 1):
+            attempt_cm = None
+            try:
+                with ble_connect_lock(label=sphero_name):
+                    # Scan (contends on the adapter too, so inside the lock).
+                    robot = scanner.find_toy(toy_name=sphero_name)
+                    # Manual __enter__ = the BLE connect. Kept open past the lock.
+                    attempt_cm = SpheroEduAPI(toy=robot)
+                    api = attempt_cm.__enter__()
+                    # Success: hand off the context manager and leave the lock.
+                    cm = attempt_cm
+                    connected = True
+                print(f"Connected to {sphero_name} (attempt {attempt}/{max_attempts})")
+                break
+            except Exception as connect_error:
+                last_error = connect_error
+                # Distinguish scan failure (no robot yet) from connect failure.
+                error_code = 'toy_not_found' if robot is None else 'connect_failed'
+                print(f"✗ Attempt {attempt}/{max_attempts} for {sphero_name} "
+                      f"failed: {connect_error}")
+                # Close any half-open connection from this attempt.
+                if attempt_cm is not None:
+                    try:
+                        attempt_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                robot = None
+                api = None
+                if attempt < max_attempts:
+                    print(f"Retrying {sphero_name} in {retry_backoff}s...")
+                    time.sleep(retry_backoff)
+
+        if not connected:
+            # All attempts failed - publish error status via temp_node before exiting.
+            print(f"✗ Failed to connect to Sphero {sphero_name} after "
+                  f"{max_attempts} attempts: {last_error}")
+
             error_pub = temp_node.create_publisher(String, f'{topic_prefix}/device_error', 10)
             error_msg = String()
             error_msg.data = json.dumps({
-                'error': 'toy_not_found',
+                'error': error_code,
                 'sphero_name': sphero_name,
-                'message': str(scan_error)
+                'message': str(last_error)
             })
 
             # Publish multiple times and spin to ensure delivery
@@ -607,19 +705,24 @@ def main(args=None):
             rclpy.shutdown()
             return  # Exit cleanly
 
-        # Destroy temporary node before creating controller node
+        # Connected. Destroy temporary node before creating controller node.
         temp_node.destroy_node()
         temp_node = None
 
-        with SpheroEduAPI(toy=robot) as api:
-            print(f"Connected to {sphero_name}")
-
+        # Spin OUTSIDE the lock; guarantee the connection closes on shutdown/exception.
+        try:
             # Create the node
             node = SpheroInstanceDeviceController(robot, api, sphero_name)
 
             # Spin until shutdown requested
             while rclpy.ok() and not shutdown_requested:
                 rclpy.spin_once(node, timeout_sec=0.1)
+        finally:
+            # Manual __exit__ mirrors the manual __enter__ done under the lock.
+            try:
+                cm.__exit__(None, None, None)
+            except Exception:
+                pass
 
     except KeyboardInterrupt:
         print("\nShutting down...")
