@@ -16,6 +16,7 @@ from spherov2.sphero_edu import SpheroEduAPI, EventType
 from spherov2.types import Color
 from spherov2.commands.sensor import Sensor, CollisionDetectionMethods
 from spherov2.commands.sphero import RawMotorModes
+from spherov2.controls.v2 import Processors
 
 from .state import SpheroState, SpheroConnectionState
 from .matrix_patterns import get_pattern
@@ -553,6 +554,134 @@ class Sphero:
 
         except Exception as e:
             print(f"Error in collision handler: {e}")
+
+    # ===== Robot-to-Robot Infrared =====
+    #
+    # All IR commands are issued on the SECONDARY processor (proc=Processors.SECONDARY),
+    # which is required for the broadcaster to actually emit and for follow/evade to act.
+    #
+    # Our public (near, far) argument order is mapped to the underlying Sensor
+    # command's (far_code, near_code) order.
+
+    def start_ir_broadcast(self, near: int, far: int) -> bool:
+        """
+        Start robot-to-robot infrared broadcasting.
+
+        Args:
+            near: Near IR channel code (0-7)
+            far: Far IR channel code (0-7)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            near = max(0, min(7, int(near)))
+            far = max(0, min(7, int(far)))
+            Sensor.start_robot_to_robot_infrared_broadcasting(
+                self.robot, far, near, proc=Processors.SECONDARY
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error starting IR broadcasting: {e}")
+            return False
+
+    def stop_ir_broadcast(self) -> bool:
+        """
+        Stop robot-to-robot infrared broadcasting.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            Sensor.stop_robot_to_robot_infrared_broadcasting(
+                self.robot, proc=Processors.SECONDARY
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error stopping IR broadcasting: {e}")
+            return False
+
+    def start_ir_follow(self, near: int, far: int) -> bool:
+        """
+        Start robot-to-robot infrared following.
+
+        Args:
+            near: Near IR channel code (0-7)
+            far: Far IR channel code (0-7)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            near = max(0, min(7, int(near)))
+            far = max(0, min(7, int(far)))
+            Sensor.start_robot_to_robot_infrared_following(
+                self.robot, far, near, proc=Processors.SECONDARY
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error starting IR following: {e}")
+            return False
+
+    def stop_ir_follow(self) -> bool:
+        """
+        Stop robot-to-robot infrared following.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            Sensor.stop_robot_to_robot_infrared_following(
+                self.robot, proc=Processors.SECONDARY
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error stopping IR following: {e}")
+            return False
+
+    def start_ir_evade(self, near: int, far: int) -> bool:
+        """
+        Start robot-to-robot infrared evading.
+
+        Args:
+            near: Near IR channel code (0-7)
+            far: Far IR channel code (0-7)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            near = max(0, min(7, int(near)))
+            far = max(0, min(7, int(far)))
+            Sensor.start_robot_to_robot_infrared_evading(
+                self.robot, far, near, proc=Processors.SECONDARY
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error starting IR evading: {e}")
+            return False
+
+    def stop_ir_evade(self) -> bool:
+        """
+        Stop robot-to-robot infrared evading.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            Sensor.stop_robot_to_robot_infrared_evading(
+                self.robot, proc=Processors.SECONDARY
+            )
+            return True
+
+        except Exception as e:
+            print(f"Error stopping IR evading: {e}")
+            return False
 
     # ===== Sensor Data =====
 
