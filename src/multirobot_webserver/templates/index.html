@@ -149,6 +149,40 @@
         </section>
 
         <!-- ============================================================ -->
+        <!-- FOLLOW/EVADE — robot-to-robot IR formation                   -->
+        <!-- ============================================================ -->
+        <section class="panel">
+            <div class="panel__head">
+                <h2 class="panel__title">// FOLLOW/EVADE</h2>
+                <div class="panel__meta">
+                    <span class="meta__row"><span class="meta__k">BROADCASTERS</span><span class="meta__v"><span id="irBroadcasterCount">0</span>/4</span></span>
+                    <span class="meta__sep">·</span>
+                    <span class="meta__row"><span class="meta__k">ASSIGNABLE</span><span class="meta__v" id="irAssignableCount">0</span></span>
+                </div>
+            </div>
+
+            <p class="field__hint">Pick up to 4 broadcasters; each is auto-assigned an IR channel pair. Assign every other unit a role (follow / evade) under one broadcaster.</p>
+
+            <div id="irFormationGrid"></div>
+
+            <div id="irFormationEmpty" class="empty">
+                <p class="empty__title">NO UNITS DEPLOYED</p>
+                <p class="empty__body">Deploy and connect units to assign IR follow / evade roles.</p>
+            </div>
+
+            <div class="ir-actions">
+                <button class="action action--primary" id="applyIrBtn">
+                    <span class="action__glyph">▸</span>
+                    <span class="action__label">APPLY FORMATION</span>
+                </button>
+                <button class="action action--danger" id="stopIrBtn">
+                    <span class="action__glyph">⊗</span>
+                    <span class="action__label">STOP ALL IR</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
         <!-- LOCALIZATION — ArUco SLAM panel                              -->
         <!-- ============================================================ -->
         <section class="panel panel--narrow">

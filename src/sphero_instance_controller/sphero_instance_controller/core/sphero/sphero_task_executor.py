@@ -60,8 +60,30 @@ TASK_LANES = {
     'led_sequence': frozenset({LANE_LED}),
     'matrix_sequence': frozenset({LANE_MATRIX}),
     'collision': frozenset({LANE_CONFIG}),
+    # Robot-to-robot IR. Broadcast does not drive -> CONFIG (slotless). Follow
+    # and evade let the firmware drive the robot, so they OWN the DRIVE lane to
+    # block a concurrent roll/heading. Their _stop counterparts mirror the lane
+    # so the stop replaces/releases the resident owner.
+    'ir_broadcast': frozenset({LANE_CONFIG}),
+    'ir_follow': frozenset({LANE_DRIVE}),
+    'ir_evade': frozenset({LANE_DRIVE}),
+    'ir_broadcast_stop': frozenset({LANE_CONFIG}),
+    'ir_follow_stop': frozenset({LANE_DRIVE}),
+    'ir_evade_stop': frozenset({LANE_DRIVE}),
     'custom': EXCLUSIVE_LANES,
     'jumping_bean': EXCLUSIVE_LANES,
+}
+
+
+# DRIVE-lane task types whose firmware keeps re-driving the robot every IR
+# cycle. A bare motor stop does NOT release them: the firmware re-drives on the
+# next cycle and fights a preempting drive task. So when one of these loses the
+# DRIVE lane (cancel / preempt), the executor must emit the matching IR stop so
+# the firmware releases motor control. Maps task_type -> the bound executor
+# method that issues that IR stop.
+_IR_DRIVE_CANCEL_STOP = {
+    'ir_follow': '_send_ir_follow_stop_command',
+    'ir_evade': '_send_ir_evade_stop_command',
 }
 
 
@@ -120,6 +142,12 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
         self.register_handler('reflect', h.execute_reflect)
         self.register_handler('jumping_bean', h.execute_jumping_bean)
         self.register_handler('calibrate_compass', h.execute_calibrate_compass)
+        self.register_handler('ir_broadcast', h.execute_ir_broadcast)
+        self.register_handler('ir_follow', h.execute_ir_follow)
+        self.register_handler('ir_evade', h.execute_ir_evade)
+        self.register_handler('ir_broadcast_stop', h.execute_ir_broadcast_stop)
+        self.register_handler('ir_follow_stop', h.execute_ir_follow_stop)
+        self.register_handler('ir_evade_stop', h.execute_ir_evade_stop)
 
     def _stop_lane(self, lane: str) -> None:
         """Emit the lane-appropriate physical stop when a task is cancelled.
@@ -141,6 +169,24 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
         elif lane == LANE_MATRIX:
             self._send_matrix_command(pattern=None, red=0, green=0, blue=0)
         # LANE_CONFIG: no physical actuator to stop.
+
+    def _cancel_task(self, task) -> None:
+        """IR-aware cancellation.
+
+        ir_follow / ir_evade are DRIVE-lane owners whose firmware keeps
+        re-driving the robot on every IR cycle. The base ``_cancel_task`` calls
+        ``_stop_lane(LANE_DRIVE)`` -> ``_send_stop_command()`` (a motor stop),
+        which does NOT stop the IR firmware: it would re-drive on the next cycle
+        and fight any preempting drive task. So before delegating to the base
+        cancellation, emit the matching IR stop (``stop_ir_follow`` /
+        ``stop_ir_evade``) so the firmware releases motor control. This fires
+        for every cancel/preempt path (panic halt, targeted stop, bare stop,
+        lane preemption) since they all funnel through ``_cancel_task``.
+        """
+        stop_method = _IR_DRIVE_CANCEL_STOP.get(task.task_type.lower())
+        if stop_method is not None:
+            getattr(self, stop_method)()
+        super()._cancel_task(task)
 
     def get_current_position(self) -> Dict[str, float]:
         if self.position_callback:
@@ -190,3 +236,21 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
                                             mode: str = 'obstacle',
                                             sensitivity: str = 'HIGH'):
         raise NotImplementedError("Subclass must implement _send_collision_detection_command")
+
+    def _send_ir_broadcast_command(self, near: int, far: int):
+        raise NotImplementedError("Subclass must implement _send_ir_broadcast_command")
+
+    def _send_ir_follow_command(self, near: int, far: int):
+        raise NotImplementedError("Subclass must implement _send_ir_follow_command")
+
+    def _send_ir_evade_command(self, near: int, far: int):
+        raise NotImplementedError("Subclass must implement _send_ir_evade_command")
+
+    def _send_ir_broadcast_stop_command(self):
+        raise NotImplementedError("Subclass must implement _send_ir_broadcast_stop_command")
+
+    def _send_ir_follow_stop_command(self):
+        raise NotImplementedError("Subclass must implement _send_ir_follow_stop_command")
+
+    def _send_ir_evade_stop_command(self):
+        raise NotImplementedError("Subclass must implement _send_ir_evade_stop_command")

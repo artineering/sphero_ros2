@@ -194,6 +194,12 @@ class SpheroInstanceTaskController(Node):
             10
         )
 
+        self.ir_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/ir',
+            10
+        )
+
     def _log_initialization(self):
         """Log initialization information."""
         self.get_logger().info('='*70)
@@ -218,6 +224,7 @@ class SpheroInstanceTaskController(Node):
         self.get_logger().info(f'  - {self.topic_prefix}/stop')
         self.get_logger().info(f'  - {self.topic_prefix}/stabilization')
         self.get_logger().info(f'  - {self.topic_prefix}/collision')
+        self.get_logger().info(f'  - {self.topic_prefix}/ir')
         self.get_logger().info('='*70)
         self.get_logger().info('✅ Task Controller READY (Topic-Based Executor)')
         self.get_logger().info('='*70)
@@ -278,6 +285,9 @@ class SpheroInstanceTaskController(Node):
         elif topic_name == 'collision':
             self.collision_pub.publish(msg)
             self.get_logger().debug(f'Published collision: {params}')
+        elif topic_name == 'ir':
+            self.ir_pub.publish(msg)
+            self.get_logger().debug(f'Published ir: {params}')
         else:
             self.get_logger().warning(f'Unknown command topic: {topic_name}')
 

@@ -90,3 +90,27 @@ class DirectTaskExecutor(SpheroTaskExecutorBase):
             self.sphero.start_collision_detection(mode=mode, sensitivity=sensitivity)
         else:
             self.sphero.stop_collision_detection()
+
+    def _send_ir_broadcast_command(self, near: int, far: int):
+        """Start IR broadcasting directly on the Sphero."""
+        self.sphero.start_ir_broadcast(near, far)
+
+    def _send_ir_follow_command(self, near: int, far: int):
+        """Start IR following directly on the Sphero."""
+        self.sphero.start_ir_follow(near, far)
+
+    def _send_ir_evade_command(self, near: int, far: int):
+        """Start IR evading directly on the Sphero."""
+        self.sphero.start_ir_evade(near, far)
+
+    def _send_ir_broadcast_stop_command(self):
+        """Stop IR broadcasting directly on the Sphero."""
+        self.sphero.stop_ir_broadcast()
+
+    def _send_ir_follow_stop_command(self):
+        """Stop IR following directly on the Sphero."""
+        self.sphero.stop_ir_follow()
+
+    def _send_ir_evade_stop_command(self):
+        """Stop IR evading directly on the Sphero."""
+        self.sphero.stop_ir_evade()

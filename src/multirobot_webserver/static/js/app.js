@@ -6,6 +6,10 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+// Escape a string for safe interpolation into innerHTML (XSS guard for unit
+// names rendered into markup). Mirrors the local `safe` in unitTile.
+const safeHtml = (str) => String(str).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+
 // Per-type default parameters for the BROADCAST composer. Mirrors the
 // per-instance forms' defaults; types absent here default to {} (operator
 // fills the JSON manually).
@@ -157,6 +161,10 @@ class ControlStation {
         this.lastSyncAt = null;
         // Broadcast builder: single source of truth (wire-format array + _uid).
         this.bundle = [];
+        // Follow/Evade (IR) formation state.
+        this.irBroadcasters = new Set();          // names checked as broadcasters
+        this.irRoles = {};                        // name -> {role, under}
+        this._lastIrSig = '';                     // re-render guard (like fleet)
         this._syncing = false;     // guards JSON<->builder sync feedback loops
         this._paletteBuilt = false;
         this.init();
@@ -239,6 +247,10 @@ class ControlStation {
         // JSON is canonical-ward only on blur (not input) to avoid sync loops.
         $('#broadcastParams').addEventListener('blur', () => this.syncBundleFromJson());
         $('#confirmBroadcastBtn').addEventListener('click', () => this.sendBroadcast());
+
+        // Follow/Evade (IR) formation
+        $('#applyIrBtn').addEventListener('click', () => this.applyIrFormation());
+        $('#stopIrBtn').addEventListener('click', () => this.stopAllIr());
         $('#cancelBroadcastBtn').addEventListener('click', () => this.closeModal('broadcastModal'));
         this.bindBuilderDnd();
 
@@ -705,6 +717,7 @@ class ControlStation {
             empty.classList.add('show');
             this._lastFleetSig = '';
             this.updateSelectionBar();
+            this.renderIrFormation();
             return;
         }
         empty.classList.remove('show');
@@ -748,6 +761,7 @@ class ControlStation {
             }
         });
         this.updateSelectionBar();
+        this.renderIrFormation();
     }
 
     updateSelectionBar() {
@@ -810,6 +824,209 @@ class ControlStation {
                 </button>
             </div>
         </article>`;
+    }
+
+    /* -------------------------------------------------------- render: follow/evade (IR) */
+    // Running units only — IR tasks dispatch to running instances.
+    irUnits() {
+        return this.spheros.filter((s) => s.status === 'running');
+    }
+
+    // Broadcasters in stable fleet order, capped at the channel-pair count (4).
+    irBroadcasterList() {
+        return this.irUnits()
+            .map((s) => s.name)
+            .filter((n) => this.irBroadcasters.has(n))
+            .slice(0, 4);
+    }
+
+    renderIrFormation() {
+        const grid = $('#irFormationGrid');
+        const empty = $('#irFormationEmpty');
+        if (!grid) return;
+
+        const units = this.irUnits();
+        const names = units.map((s) => s.name);
+        const present = new Set(names);
+
+        // Prune stale state for units no longer running (detached / down).
+        this.irBroadcasters = new Set([...this.irBroadcasters].filter((n) => present.has(n)));
+        Object.keys(this.irRoles).forEach((n) => { if (!present.has(n)) delete this.irRoles[n]; });
+
+        if (units.length === 0) {
+            grid.innerHTML = '';
+            if (empty) empty.classList.add('show');
+            this._lastIrSig = '';
+            this.updateIrReadouts();
+            return;
+        }
+        if (empty) empty.classList.remove('show');
+
+        // Re-render only on fleet-shape change OR after a local interaction
+        // (which clears _lastIrSig) so the 5s poll can't wipe selections.
+        const sig = names.join('::');
+        if (sig === this._lastIrSig) {
+            this.updateIrReadouts();
+            return;
+        }
+        this._lastIrSig = sig;
+
+        const broadcasters = this.irBroadcasterList();
+        const bcastSet = new Set(broadcasters);
+        const pairs = ['CH 0/1', 'CH 2/3', 'CH 4/5', 'CH 6/7'];
+        const full = broadcasters.length >= 4;
+
+        grid.innerHTML = units.map((s) => {
+            const name = s.name;
+            const sn = safeHtml(name);
+            const isBcast = bcastSet.has(name);
+            const role = (this.irRoles[name] && this.irRoles[name].role) || 'none';
+            const under = (this.irRoles[name] && this.irRoles[name].under) || '';
+            // Disable broadcaster checkbox if 4 chosen (and not this unit), or
+            // if this unit already has a follow/evade role.
+            const cbDisabled = (!isBcast && full) || (!isBcast && role !== 'none');
+            const chip = isBcast
+                ? `<span class="ir-chip">${pairs[broadcasters.indexOf(name)] || 'CH —'}</span>`
+                : '';
+
+            // "under" options: current broadcasters (excluding self).
+            const underOpts = broadcasters
+                .filter((b) => b !== name)
+                .map((b) => `<option value="${safeHtml(b)}"${b === under ? ' selected' : ''}>${safeHtml(b)}</option>`)
+                .join('');
+
+            const roleControls = isBcast ? `<span class="ir-row__bcast">IS A BROADCASTER</span>` : `
+                <select class="field ir-row__role" data-ir-role="${sn}" aria-label="Role for ${sn}">
+                    <option value="none"${role === 'none' ? ' selected' : ''}>none</option>
+                    <option value="follow"${role === 'follow' ? ' selected' : ''}>follow</option>
+                    <option value="evade"${role === 'evade' ? ' selected' : ''}>evade</option>
+                </select>
+                <select class="field ir-row__under" data-ir-under="${sn}" aria-label="Broadcaster for ${sn}"${role === 'none' ? ' disabled' : ''}>
+                    <option value="">— under —</option>
+                    ${underOpts}
+                </select>`;
+
+            return `
+            <div class="ir-row">
+                <label class="ir-row__bcastcell">
+                    <input type="checkbox" data-ir-bcast="${sn}"${isBcast ? ' checked' : ''}${cbDisabled ? ' disabled' : ''} aria-label="Broadcaster ${sn}">
+                    <span class="ir-row__name">${sn}</span>
+                </label>
+                ${chip}
+                <div class="ir-row__roles">${roleControls}</div>
+            </div>`;
+        }).join('');
+
+        // Wire interaction handlers. Any change updates state, clears the sig so
+        // the next render rebuilds, then re-renders immediately.
+        grid.querySelectorAll('[data-ir-bcast]').forEach((cb) => {
+            cb.addEventListener('change', () => {
+                const n = cb.getAttribute('data-ir-bcast');
+                if (cb.checked) {
+                    if (this.irBroadcasterList().length >= 4) { cb.checked = false; return; }
+                    this.irBroadcasters.add(n);
+                    delete this.irRoles[n];               // can't be both
+                } else {
+                    this.irBroadcasters.delete(n);
+                }
+                this._lastIrSig = '';
+                this.renderIrFormation();
+            });
+        });
+        grid.querySelectorAll('[data-ir-role]').forEach((sel) => {
+            sel.addEventListener('change', () => {
+                const n = sel.getAttribute('data-ir-role');
+                const role = sel.value;
+                const prev = this.irRoles[n] || {};
+                this.irRoles[n] = { role, under: role === 'none' ? null : (prev.under || null) };
+                this._lastIrSig = '';
+                this.renderIrFormation();
+            });
+        });
+        grid.querySelectorAll('[data-ir-under]').forEach((sel) => {
+            sel.addEventListener('change', () => {
+                const n = sel.getAttribute('data-ir-under');
+                const prev = this.irRoles[n] || { role: 'none' };
+                this.irRoles[n] = { role: prev.role, under: sel.value || null };
+                this._lastIrSig = '';
+                this.renderIrFormation();
+            });
+        });
+
+        this.updateIrReadouts();
+    }
+
+    updateIrReadouts() {
+        const bcount = $('#irBroadcasterCount');
+        const acount = $('#irAssignableCount');
+        if (bcount) bcount.textContent = this.irBroadcasterList().length;
+        if (acount) {
+            const broadcasters = new Set(this.irBroadcasterList());
+            acount.textContent = this.irUnits().filter((s) => !broadcasters.has(s.name)).length;
+        }
+    }
+
+    // Assemble {broadcasters:[{name, followers, evaders}]} from current state.
+    // Roles whose `under` isn't a current broadcaster are skipped.
+    buildIrPayload() {
+        const broadcasters = this.irBroadcasterList();
+        const bset = new Set(broadcasters);
+        const out = broadcasters.map((name) => ({ name, followers: [], evaders: [] }));
+        const byName = Object.fromEntries(out.map((b) => [b.name, b]));
+        Object.entries(this.irRoles).forEach(([name, info]) => {
+            if (!info || info.role === 'none') return;
+            if (!info.under || !bset.has(info.under)) return;
+            const target = byName[info.under];
+            if (info.role === 'follow') target.followers.push(name);
+            else if (info.role === 'evade') target.evaders.push(name);
+        });
+        return { broadcasters: out };
+    }
+
+    async applyIrFormation() {
+        const payload = this.buildIrPayload();
+        if (payload.broadcasters.length === 0) {
+            this.toast('Pick at least one broadcaster.', 'error', 'IR');
+            return;
+        }
+        try {
+            const r = await fetch('/api/ir_formation', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await r.json();
+            if (!data.success) {
+                this.toast(`IR formation failed: ${data.message || 'bad request'}`, 'error', 'IR');
+                return;
+            }
+            const dispatched = data.dispatched;
+            const failed = data.failed;
+            if (failed === 0) {
+                this.toast(`IR formation set on ${dispatched} unit${dispatched === 1 ? '' : 's'}`, 'success', 'IR');
+            } else {
+                const failedNames = (data.results || []).filter((x) => !x.success).map((x) => x.name);
+                this.toast(`${dispatched} set, ${failed} failed: ${this.truncateNames(failedNames)}`, 'error', 'IR');
+            }
+        } catch (e) {
+            this.toast('IR uplink lost.', 'error', 'IR');
+        }
+    }
+
+    async stopAllIr() {
+        try {
+            const r = await fetch('/api/ir_stop', { method: 'POST' });
+            const data = await r.json();
+            const results = data.results || [];
+            const failed = results.filter((x) => !x.success);
+            if (failed.length === 0) {
+                this.toast(`IR cleared on ${results.length} unit${results.length === 1 ? '' : 's'}`, 'success', 'IR');
+            } else {
+                this.toast(`IR stop: ${failed.length} failed: ${this.truncateNames(failed.map((x) => x.name))}`, 'error', 'IR');
+            }
+        } catch (e) {
+            this.toast('IR uplink lost.', 'error', 'IR');
+        }
     }
 
     /* -------------------------------------------------------- render: header / aruco */

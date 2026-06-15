@@ -114,3 +114,29 @@ class TopicTaskExecutor(SpheroTaskExecutorBase):
             'mode': mode,
             'sensitivity': sensitivity
         })
+
+    # All six IR commands multiplex onto one 'ir' topic via an `action` field,
+    # mirroring how `motion` / `collision` carry start/stop on a single topic.
+    def _send_ir_broadcast_command(self, near: int, far: int):
+        """Publish IR broadcast-start command to ROS topic."""
+        self.command_publisher('ir', {'action': 'broadcast', 'near': near, 'far': far})
+
+    def _send_ir_follow_command(self, near: int, far: int):
+        """Publish IR follow-start command to ROS topic."""
+        self.command_publisher('ir', {'action': 'follow', 'near': near, 'far': far})
+
+    def _send_ir_evade_command(self, near: int, far: int):
+        """Publish IR evade-start command to ROS topic."""
+        self.command_publisher('ir', {'action': 'evade', 'near': near, 'far': far})
+
+    def _send_ir_broadcast_stop_command(self):
+        """Publish IR broadcast-stop command to ROS topic."""
+        self.command_publisher('ir', {'action': 'broadcast_stop'})
+
+    def _send_ir_follow_stop_command(self):
+        """Publish IR follow-stop command to ROS topic."""
+        self.command_publisher('ir', {'action': 'follow_stop'})
+
+    def _send_ir_evade_stop_command(self):
+        """Publish IR evade-stop command to ROS topic."""
+        self.command_publisher('ir', {'action': 'evade_stop'})

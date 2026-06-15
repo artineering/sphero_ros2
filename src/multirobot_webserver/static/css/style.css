@@ -778,3 +778,71 @@ select.field option:disabled { color: var(--fg-3); }
     gap: 10px;
 }
 .bundle-json__clear { padding: 3px 10px; font-size: 10px; }
+
+/* ============================================================
+   Follow/Evade (robot-to-robot IR) panel
+   ============================================================ */
+#irFormationGrid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+}
+.ir-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1fr) auto minmax(220px, 1.4fr);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: var(--rad);
+}
+.ir-row__bcastcell {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+.ir-row__bcastcell input { accent-color: var(--amber); }
+.ir-row__name {
+    color: var(--fg);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+}
+.ir-chip {
+    justify-self: start;
+    color: var(--amber);
+    background: var(--amber-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+}
+.ir-row__bcast {
+    color: var(--fg-2);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+.ir-row__roles {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.ir-row__roles .field { width: auto; flex: 1; padding: 8px 10px; font-size: 12px; }
+.ir-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 14px;
+}
+@media (max-width: 640px) {
+    .ir-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+    .ir-row__roles { flex-direction: column; align-items: stretch; }
+    .ir-row__roles .field { width: 100%; }
+}

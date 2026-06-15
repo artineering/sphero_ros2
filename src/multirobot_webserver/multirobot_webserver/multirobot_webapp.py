@@ -66,6 +66,10 @@ AGENT_STATUS_TTL = 2.0
 BROADCAST_POST_TIMEOUT = (3, 5)
 BROADCAST_MAX_WORKERS = 16
 
+# Robot-to-robot IR channel pairs, one (near, far) per broadcaster. Max 4
+# broadcasters; the server assigns pairs in payload order (source of truth).
+IR_CHANNEL_PAIRS = [(0, 1), (2, 3), (4, 5), (6, 7)]
+
 
 class TcpRelay:
     """
@@ -893,6 +897,176 @@ class SpheroInstanceManager:
             'results': results,
         }
 
+    def _post_task_to_unit(self, name: str, url: str, payload: dict) -> Dict:
+        """POST one task payload to a single unit's /api/task. Per-POST timeout
+        keeps a dead unit from blocking the fan-out. Returns {name, success,
+        error?}."""
+        try:
+            r = requests.post(f'{url}/api/task', json=payload,
+                              timeout=BROADCAST_POST_TIMEOUT)
+            if 200 <= r.status_code < 300:
+                return {'name': name, 'success': True}
+            return {'name': name, 'success': False,
+                    'error': f'HTTP {r.status_code}'}
+        except requests.RequestException as exc:
+            return {'name': name, 'success': False, 'error': str(exc)}
+
+    def dispatch_ir_formation(self, broadcasters: list) -> Dict:
+        """
+        Fan DIFFERENT robot-to-robot IR tasks to DIFFERENT running units.
+
+        `broadcasters` is a list (max 4) of
+        `{name, followers:[...], evaders:[...]}`. Each broadcaster i is assigned
+        IR_CHANNEL_PAIRS[i] = (near, far) in payload order (server is the source
+        of truth for channel assignment). The broadcaster gets `ir_broadcast`,
+        its followers get `ir_follow`, its evaders get `ir_evade`, all carrying
+        that broadcaster's (near, far). Each unit receives its OWN bare
+        `{task_type, parameters}` (no now/start_offset — IR is a continuous
+        toggle, not a synced one-shot).
+
+        Validation is all-or-nothing: nothing is dispatched unless every entry
+        passes. Returns {success, dispatched, failed, results:[{name, role,
+        task_type, success, error?}]} or {success: False, message}.
+        """
+        if not isinstance(broadcasters, list) or not broadcasters:
+            return {'success': False,
+                    'message': 'broadcasters must be a non-empty list'}
+        if len(broadcasters) > len(IR_CHANNEL_PAIRS):
+            return {'success': False,
+                    'message': f'max {len(IR_CHANNEL_PAIRS)} broadcasters'}
+
+        # Snapshot running targets so a concurrent add/remove can't mutate the
+        # instance dict mid-fan-out. Map name -> url for per-unit dispatch.
+        running = {inst['name']: inst['url']
+                   for inst in self.instances.values()
+                   if self._instance_status(inst) == 'running'}
+        if not running:
+            return {'success': False, 'message': 'No units deployed'}
+
+        # --- Validation pass (assign roles into a plan; dispatch nothing yet).
+        # plan: name -> (role, task_type, near, far)
+        plan: Dict[str, tuple] = {}
+        seen_broadcasters = set()
+        for entry in broadcasters:
+            if not isinstance(entry, dict):
+                return {'success': False,
+                        'message': 'each broadcaster must be an object'}
+            bname = entry.get('name')
+            if not isinstance(bname, str) or not bname.strip():
+                return {'success': False,
+                        'message': 'broadcaster name must be a non-empty '
+                                   'string'}
+            bname = bname.strip()
+            if bname in seen_broadcasters:
+                return {'success': False,
+                        'message': f'{bname} listed as broadcaster twice'}
+            if bname not in running:
+                return {'success': False,
+                        'message': f'{bname} is not a running unit'}
+            seen_broadcasters.add(bname)
+
+        # Channel pairs assigned in payload order (matches client display order).
+        for i, entry in enumerate(broadcasters):
+            bname = entry['name'].strip()
+            near, far = IR_CHANNEL_PAIRS[i]
+            # A unit can't be both broadcaster and follower/evader.
+            if bname in plan:
+                return {'success': False,
+                        'message': f'{bname} is assigned conflicting roles'}
+            plan[bname] = ('broadcaster', 'ir_broadcast', near, far)
+
+            followers = entry.get('followers', []) or []
+            evaders = entry.get('evaders', []) or []
+            if not isinstance(followers, list) or not isinstance(evaders, list):
+                return {'success': False,
+                        'message': 'followers and evaders must be lists'}
+
+            for role, task_type, members in (
+                    ('follower', 'ir_follow', followers),
+                    ('evader', 'ir_evade', evaders)):
+                for member in members:
+                    if not isinstance(member, str) or not member.strip():
+                        return {'success': False,
+                                'message': f'{role} name must be a non-empty '
+                                           'string'}
+                    member = member.strip()
+                    if member not in running:
+                        return {'success': False,
+                                'message': f'{member} is not a running unit'}
+                    if member in seen_broadcasters:
+                        return {'success': False,
+                                'message': f'{member} is both a broadcaster '
+                                           'and a follower/evader'}
+                    if member in plan:
+                        return {'success': False,
+                                'message': f'{member} is assigned to more than '
+                                           'one broadcaster/role'}
+                    plan[member] = (role, task_type, near, far)
+
+        # --- Dispatch: each unit gets its OWN payload (no shared now/offset).
+        def _dispatch(name: str, role: str, task_type: str,
+                      near: int, far: int) -> Dict:
+            payload = {'task_type': task_type,
+                       'parameters': {'near': near, 'far': far}}
+            res = self._post_task_to_unit(name, running[name], payload)
+            res['role'] = role
+            res['task_type'] = task_type
+            return res
+
+        results: List[Dict] = []
+        with ThreadPoolExecutor(
+                max_workers=min(BROADCAST_MAX_WORKERS, len(plan))) as ex:
+            futures = [ex.submit(_dispatch, name, role, task_type, near, far)
+                       for name, (role, task_type, near, far) in plan.items()]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+        dispatched = sum(1 for r in results if r['success'])
+        return {
+            'success': True,
+            'dispatched': dispatched,
+            'failed': len(results) - dispatched,
+            'results': results,
+        }
+
+    def stop_all_ir(self) -> Dict:
+        """
+        Clear all robot-to-robot IR behavior fleet-wide. Each running unit gets
+        the three IR stop tasks (`ir_broadcast_stop`, `ir_follow_stop`,
+        `ir_evade_stop`); a unit not running a given behavior treats its stop as
+        a harmless no-op (per task contract). Units are stopped in parallel; the
+        three stops per unit are sent sequentially. A unit is `success` only if
+        all three stop POSTs returned 2xx, else it carries the first error.
+
+        Returns {success, results:[{name, success, error?}]}.
+        """
+        targets = [(inst['name'], inst['url'])
+                   for inst in self.instances.values()
+                   if self._instance_status(inst) == 'running']
+        if not targets:
+            return {'success': True, 'results': []}
+
+        stop_types = ('ir_broadcast_stop', 'ir_follow_stop', 'ir_evade_stop')
+
+        def _stop_unit(name: str, url: str) -> Dict:
+            for task_type in stop_types:
+                res = self._post_task_to_unit(
+                    name, url, {'task_type': task_type, 'parameters': {}})
+                if not res['success']:
+                    return {'name': name, 'success': False,
+                            'error': res.get('error', 'stop failed')}
+            return {'name': name, 'success': True}
+
+        results: List[Dict] = []
+        with ThreadPoolExecutor(
+                max_workers=min(BROADCAST_MAX_WORKERS, len(targets))) as ex:
+            futures = [ex.submit(_stop_unit, name, url)
+                       for name, url in targets]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+        return {'success': True, 'results': results}
+
     def get_all_instances(self) -> List[Dict]:
         """
         Get information about all Sphero instances.
@@ -1573,6 +1747,31 @@ def broadcast_task():
 
     return jsonify(
         manager.broadcast_task(task_core, start_offset)), 200
+
+
+@app.route('/api/ir_formation', methods=['POST'])
+def ir_formation():
+    """Dispatch a robot-to-robot IR formation across the running fleet.
+
+    Request: `{broadcasters:[{name, followers:[...], evaders:[...]}, ...]}`
+    (max 4 broadcasters). The manager assigns one IR channel pair per
+    broadcaster and fans the matching ir_broadcast / ir_follow / ir_evade task
+    to each unit. 400 on bad body or validation failure.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('broadcasters'),
+                                                     list):
+        return jsonify({'success': False,
+                        'message': 'broadcasters must be a list'}), 400
+
+    result = manager.dispatch_ir_formation(data['broadcasters'])
+    return jsonify(result), (200 if result.get('success') else 400)
+
+
+@app.route('/api/ir_stop', methods=['POST'])
+def ir_stop():
+    """Clear all robot-to-robot IR behavior fleet-wide (no body required)."""
+    return jsonify(manager.stop_all_ir()), 200
 
 
 @app.route('/api/spheros/<sphero_name>', methods=['DELETE'])

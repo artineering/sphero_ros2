@@ -275,6 +275,9 @@ class SpheroInstanceDeviceController(Node):
         self.stabilization_sub = self.create_subscription(
             String, f'{self.topic_prefix}/stabilization', self.stabilization_callback, 10)
 
+        self.ir_sub = self.create_subscription(
+            String, f'{self.topic_prefix}/ir', self.ir_callback, 10)
+
     def _create_publishers(self):
         """Create all ROS publishers for status and sensor topics."""
         self.sensor_pub = self.create_publisher(
@@ -310,6 +313,7 @@ class SpheroInstanceDeviceController(Node):
         self.get_logger().info(f'  - {self.topic_prefix}/raw_motor')
         self.get_logger().info(f'  - {self.topic_prefix}/stop')
         self.get_logger().info(f'  - {self.topic_prefix}/matrix')
+        self.get_logger().info(f'  - {self.topic_prefix}/ir')
         self.get_logger().info(f'  - ... and 6 more')
         self.get_logger().info('Publishing Topics:')
         self.get_logger().info(f'  - {self.topic_prefix}/sensors')
@@ -596,6 +600,40 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().error(f'Invalid JSON in stabilization command: {str(e)}')
         except Exception as e:
             self.get_logger().error(f'Error in stabilization callback: {str(e)}')
+
+    def ir_callback(self, msg: String):
+        """Handle robot-to-robot IR commands (BOLT only).
+
+        One topic multiplexes all six IR actions via the `action` field:
+        broadcast / follow / evade (carry near, far) and their *_stop variants.
+        """
+        try:
+            data = json.loads(msg.data)
+            action = data.get('action', '')
+            near = int(data.get('near', 0))
+            far = int(data.get('far', 0))
+
+            if action == 'broadcast':
+                self.sphero.start_ir_broadcast(near, far)
+            elif action == 'follow':
+                self.sphero.start_ir_follow(near, far)
+            elif action == 'evade':
+                self.sphero.start_ir_evade(near, far)
+            elif action == 'broadcast_stop':
+                self.sphero.stop_ir_broadcast()
+            elif action == 'follow_stop':
+                self.sphero.stop_ir_follow()
+            elif action == 'evade_stop':
+                self.sphero.stop_ir_evade()
+            else:
+                self.get_logger().warning(f'Unknown IR action: {action}')
+                return
+            self.get_logger().info(f'IR command: {action} (near={near}, far={far})')
+
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Invalid JSON in ir command: {str(e)}')
+        except Exception as e:
+            self.get_logger().error(f'Error in ir callback: {str(e)}')
 
     # ===== Publishing Methods =====
 

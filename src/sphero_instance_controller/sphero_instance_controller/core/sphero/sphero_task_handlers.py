@@ -57,6 +57,13 @@ class TaskType(Enum):
     REFLECT = "reflect"
     JUMPING_BEAN = "jumping_bean"
     CALIBRATE_COMPASS = "calibrate_compass"
+    # Robot-to-robot IR (BOLT)
+    IR_BROADCAST = "ir_broadcast"
+    IR_FOLLOW = "ir_follow"
+    IR_EVADE = "ir_evade"
+    IR_BROADCAST_STOP = "ir_broadcast_stop"
+    IR_FOLLOW_STOP = "ir_follow_stop"
+    IR_EVADE_STOP = "ir_evade_stop"
 
 
 # ===== High-level task handlers =====
@@ -491,4 +498,75 @@ def execute_jumping_bean(executor, task: TaskDescriptor) -> bool:
     executor._send_stop_command()
     executor._send_stabilization_command(True)
 
+    return True
+
+
+# ===== Robot-to-robot IR handlers (BOLT) =====
+
+def execute_ir_broadcast(executor, task: TaskDescriptor) -> bool:
+    """Start IR broadcasting and stay resident on the CONFIG lane.
+
+    Broadcasting does not drive the robot; it sits on the CONFIG lane and is
+    released by ``ir_broadcast_stop``. Emit once, then keep running so the lane
+    owner reflects the active broadcast.
+    """
+    params = task.parameters
+    if not params.get('_ir_active'):
+        near = params.get('near', 0)
+        far = params.get('far', 0)
+        executor._send_ir_broadcast_command(near, far)
+        task.parameters['_ir_active'] = True
+    return False
+
+
+def execute_ir_follow(executor, task: TaskDescriptor) -> bool:
+    """Start IR following and stay resident on the DRIVE lane.
+
+    The firmware drives the robot on every IR cycle, so this owns the DRIVE
+    lane to keep a concurrent roll/heading from fighting it. Emit once, then
+    keep running until ``ir_follow_stop`` or lane preemption releases it (the
+    IR-aware cancellation path issues ``stop_ir_follow`` so the firmware
+    releases motor control — a bare motor stop would not).
+    """
+    params = task.parameters
+    if not params.get('_ir_active'):
+        near = params.get('near', 0)
+        far = params.get('far', 0)
+        executor._send_ir_follow_command(near, far)
+        task.parameters['_ir_active'] = True
+    return False
+
+
+def execute_ir_evade(executor, task: TaskDescriptor) -> bool:
+    """Start IR evading and stay resident on the DRIVE lane.
+
+    Same residency/ownership rationale as ``execute_ir_follow``: the firmware
+    keeps re-driving the robot, so it owns the DRIVE lane and is released via
+    ``ir_evade_stop`` or the IR-aware cancellation path (which issues
+    ``stop_ir_evade``).
+    """
+    params = task.parameters
+    if not params.get('_ir_active'):
+        near = params.get('near', 0)
+        far = params.get('far', 0)
+        executor._send_ir_evade_command(near, far)
+        task.parameters['_ir_active'] = True
+    return False
+
+
+def execute_ir_broadcast_stop(executor, task: TaskDescriptor) -> bool:
+    """Stop IR broadcasting (emit once)."""
+    executor._send_ir_broadcast_stop_command()
+    return True
+
+
+def execute_ir_follow_stop(executor, task: TaskDescriptor) -> bool:
+    """Stop IR following (emit once); releases firmware motor control."""
+    executor._send_ir_follow_stop_command()
+    return True
+
+
+def execute_ir_evade_stop(executor, task: TaskDescriptor) -> bool:
+    """Stop IR evading (emit once); releases firmware motor control."""
+    executor._send_ir_evade_stop_command()
     return True
