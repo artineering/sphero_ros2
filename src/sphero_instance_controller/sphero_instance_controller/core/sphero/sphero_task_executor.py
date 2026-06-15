@@ -27,12 +27,22 @@ from sphero_instance_controller.core.common.task import (
 from . import sphero_task_handlers as h
 
 
+# Modifier task types: single-shot live setpoint pokes that apply immediately,
+# concurrently with whatever owner holds the actuator's lane. A modifier carries
+# an EMPTY lane set (see TASK_LANES below), never reserves a slot, never
+# conflicts, and never blocks an owner or a follower; it executes inline at
+# promotion time and completes the same tick. `reflect` is intentionally NOT a
+# modifier here: it is a DRIVE owner that takes over the drive lane like `roll`.
+MODIFIER_TASK_TYPES = frozenset({'heading', 'speed', 'set_led', 'matrix'})
+
+
 # task_type -> lane set. Single source of truth for concurrent lane assignment;
 # kept beside the handler registry below. Add a lane entry whenever you register
 # a handler. DRIVE / LED / MATRIX run concurrently; CONFIG is slotless (never
 # blocks / blocked). `custom` and `jumping_bean` are EXCLUSIVE in v1: they
 # occupy all three lanes, so nothing else runs while they do (and they only
-# start when every lane is free).
+# start when every lane is free). Modifiers (see MODIFIER_TASK_TYPES) carry an
+# empty lane set: they reserve nothing and run inline at promotion.
 TASK_LANES = {
     'move_to': frozenset({LANE_DRIVE}),
     'patrol': frozenset({LANE_DRIVE}),
@@ -40,13 +50,14 @@ TASK_LANES = {
     'circle': frozenset({LANE_DRIVE}),
     'spin': frozenset({LANE_DRIVE}),
     'roll': frozenset({LANE_DRIVE}),
-    'heading': frozenset({LANE_DRIVE}),
-    'speed': frozenset({LANE_DRIVE}),
     'reflect': frozenset({LANE_DRIVE}),
+    'calibrate_compass': frozenset({LANE_DRIVE}),
     'stop': frozenset({LANE_DRIVE}),
-    'set_led': frozenset({LANE_LED}),
+    'heading': frozenset(),
+    'speed': frozenset(),
+    'set_led': frozenset(),
+    'matrix': frozenset(),
     'led_sequence': frozenset({LANE_LED}),
-    'matrix': frozenset({LANE_MATRIX}),
     'matrix_sequence': frozenset({LANE_MATRIX}),
     'collision': frozenset({LANE_CONFIG}),
     'custom': EXCLUSIVE_LANES,
@@ -61,8 +72,20 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
 
     @staticmethod
     def lanes_for(task_type: str) -> FrozenSet[str]:
-        """Resolve a task_type to its lane set (default = DRIVE)."""
+        """Resolve a task_type to its lane set (default = DRIVE).
+
+        Modifier task types resolve to an empty lane set (they reserve nothing).
+        """
         return TASK_LANES.get(task_type.lower(), frozenset({DEFAULT_LANE}))
+
+    @staticmethod
+    def is_modifier(task_type: str) -> bool:
+        """True when ``task_type`` is a modifier (single-shot live setpoint)."""
+        return task_type.lower() in MODIFIER_TASK_TYPES
+
+    def _is_modifier(self, task) -> bool:
+        """Override of the base predicate: consult MODIFIER_TASK_TYPES."""
+        return self.is_modifier(task.task_type)
 
     def __init__(self,
                  position_callback: Optional[Callable[[], Dict[str, float]]] = None,
@@ -96,6 +119,7 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
         self.register_handler('collision', h.execute_collision)
         self.register_handler('reflect', h.execute_reflect)
         self.register_handler('jumping_bean', h.execute_jumping_bean)
+        self.register_handler('calibrate_compass', h.execute_calibrate_compass)
 
     def _stop_lane(self, lane: str) -> None:
         """Emit the lane-appropriate physical stop when a task is cancelled.
@@ -151,6 +175,9 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
 
     def _send_spin_command(self, angle: int, duration: float = 1.0):
         raise NotImplementedError("Subclass must implement _send_spin_command")
+
+    def _send_calibrate_compass_command(self):
+        raise NotImplementedError("Subclass must implement _send_calibrate_compass_command")
 
     def _send_matrix_command(self, pattern: str = None,
                               red: int = 255, green: int = 255, blue: int = 255):

@@ -72,6 +72,10 @@ class DirectTaskExecutor(SpheroTaskExecutorBase):
         """Send spin command directly to Sphero."""
         self.sphero.spin(angle, duration)
 
+    def _send_calibrate_compass_command(self):
+        """Trigger compass calibration directly on the Sphero (BOLT only, blocks)."""
+        self.sphero.calibrate_compass()
+
     def _send_matrix_command(self, pattern: str = None, red: int = 255, green: int = 255, blue: int = 255):
         """Send matrix command directly to Sphero."""
         self.sphero.set_matrix(pattern=pattern, red=red, green=green, blue=blue)

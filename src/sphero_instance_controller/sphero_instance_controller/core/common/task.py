@@ -75,7 +75,11 @@ class TaskDescriptor:
             'completed_at': self.completed_at,
             'error_message': self.error_message,
             'lanes': sorted(self.lanes),
-            'lane': (next(iter(self.lanes)) if len(self.lanes) == 1 else 'multi'),
+            'lane': (
+                'none' if not self.lanes
+                else next(iter(self.lanes)) if len(self.lanes) == 1
+                else 'multi'
+            ),
         }
 
 
@@ -141,6 +145,15 @@ class TaskExecutorBase:
     def _register_default_handlers(self) -> None:
         """Subclass hook. Register handlers on ``self`` at construction time."""
         pass
+
+    def _is_modifier(self, task: TaskDescriptor) -> bool:
+        """Whether ``task`` is a modifier (runs inline, reserves no lane).
+
+        Robot-agnostic default: nothing is a modifier, so generic tasks keep the
+        owner promote->tick path. Robot subclasses override this to classify
+        single-shot setpoint pokes (heading / speed / set_led / matrix).
+        """
+        return False
 
     def register_handler(self, task_type: str, handler: TaskHandler) -> None:
         """Register a handler for a given task_type (case-insensitive)."""
@@ -271,6 +284,26 @@ class TaskExecutorBase:
             if busy or (reserved & lanes) or not_due:
                 reserved |= lanes
                 i += 1
+                continue
+
+            # Modifier: single-shot live poke. Run it inline this tick — it
+            # reserves no lane (empty lane set), so it never blocks an owner or a
+            # follower and never enters `current_tasks`. start_at gating above
+            # still applies (synchronized start preserved).
+            if self._is_modifier(t):
+                self.task_queue.pop(i)
+                t.status = TaskStatus.RUNNING
+                t.started_at = now
+                try:
+                    self.execute_task(t)
+                    if t.status == TaskStatus.RUNNING:
+                        t.status = TaskStatus.COMPLETED
+                except Exception as e:
+                    t.status = TaskStatus.FAILED
+                    t.error_message = str(e)
+                t.completed_at = time.time()
+                self.task_history.append(t)
+                # Do not slot, do not reserve lanes, do not advance i.
                 continue
 
             # Promote.

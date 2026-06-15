@@ -137,6 +137,9 @@ class RecordingSphero(SpheroTaskExecutorBase):
     def _send_spin_command(self, angle, duration=1.0):
         self._record('spin', angle=angle, duration=duration)
 
+    def _send_calibrate_compass_command(self):
+        self._record('calibrate_compass')
+
     def _send_matrix_command(self, pattern=None, red=255, green=255, blue=255):
         self._record('matrix', pattern=pattern, red=red, green=green, blue=blue)
 
@@ -511,6 +514,15 @@ class TestSpheroHandlerSmoke:
         ex.process_tasks()
         assert ('stop', {}) in ex.sends
 
+    def test_calibrate_compass(self, clock):
+        ex = RecordingSphero()
+        ex.add_task(make_task('calibrate_compass'))
+        ex.process_tasks()
+        # One-shot: emits the calibrate_compass command exactly once and completes.
+        assert _send_names(ex).count('calibrate_compass') == 1
+        assert ('calibrate_compass', {}) in ex.sends
+        assert ex.current_task is None
+
     def test_spin(self, clock):
         ex = RecordingSphero()
         ex.add_task(make_task('spin', rotations=2, speed=100))
@@ -761,16 +773,21 @@ class TestConcurrentLanes:
         assert ex.current_tasks[LANE_DRIVE] is drive
 
     def test_per_lane_fifo_same_lane_gated_blocks_follower(self, clock):
-        # Two LED tasks, first gated 5s; the second LED task waits (same lane).
+        # Two LED-OWNER tasks, first gated 5s; the second waits (same lane FIFO).
+        # Same-lane FIFO is an owner-only property, so we use led_sequence owners
+        # (set_led is now a modifier and would not serialize behind a peer).
         ex = RecordingSphero()
-        first = lane_task('set_led', task_id='l1', color='red')
+        seq = [{'red': 1, 'green': 2, 'blue': 3}]
+        first = lane_task('led_sequence', task_id='l1', sequence=seq,
+                          interval=10.0, loop=True)
         first.start_at = clock.now + 5.0
-        second = lane_task('set_led', task_id='l2', color='blue')
+        second = lane_task('led_sequence', task_id='l2', sequence=seq,
+                           interval=10.0, loop=True)
         ex.add_task(first)
         ex.add_task(second)
 
         ex.process_tasks()
-        # Neither LED task promoted (same lane FIFO; head is gated).
+        # Neither LED owner promoted (same lane FIFO; head is gated).
         assert ex.current_tasks[LANE_LED] is None
         assert first in ex.task_queue and second in ex.task_queue
         assert ex.sends == []
@@ -878,7 +895,11 @@ class TestConcurrentLanes:
         custom = lane_task('custom', task_id='c1', commands=[
             {'type': 'led', 'red': 1, 'green': 2, 'blue': 3, 'duration': 0.0},
         ])
-        led_after = lane_task('set_led', task_id='l2', color='red')
+        # An LED OWNER (led_sequence) must wait behind the exclusive custom; a
+        # set_led modifier would fire inline and not be blocked, so use an owner.
+        led_after = lane_task('led_sequence', task_id='l2',
+                              sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                              interval=10.0, loop=True)
         ex.add_task(r1)
         ex.add_task(custom)
         ex.add_task(led_after)
@@ -1013,3 +1034,219 @@ class TestPhysicalStopOnCancel:
         ex.process_tasks()  # must not raise
         cancelled = [t for t in ex.task_history if t.status == TaskStatus.CANCELLED]
         assert len(cancelled) == 1
+
+
+# ====================================================================
+# G. Owner / Modifier lane model
+# ====================================================================
+
+
+class TestOwnerModifier:
+    """Modifiers (heading / speed / set_led / matrix) run inline, reserve no
+    lane, never conflict, and steer/poke a live owner without evicting it."""
+
+    def test_roll_plus_heading_concurrent(self, clock):
+        # Headline fix: a heading modifier steers a live roll owner without
+        # evicting it. The roll stays on DRIVE; heading completes in history.
+        ex = RecordingSphero()
+        roll = lane_task('roll', task_id='r1', heading=0, speed=100)
+        ex.add_task(roll)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_DRIVE] is roll
+        ex.sends.clear()
+
+        ex.add_task(lane_task('heading', task_id='h1', heading=90))
+        ex.process_tasks()
+        assert ('heading', {'heading': 90}) in ex.sends
+        # Roll owner untouched; still holds DRIVE.
+        assert ex.current_tasks[LANE_DRIVE] is roll
+        assert roll.status == TaskStatus.RUNNING
+        heading_done = [t for t in ex.task_history if t.task_type == 'heading']
+        assert len(heading_done) == 1
+        assert heading_done[0].status == TaskStatus.COMPLETED
+
+    def test_roll_plus_speed_concurrent(self, clock):
+        # Same as above for the speed modifier.
+        ex = RecordingSphero()
+        roll = lane_task('roll', task_id='r1', heading=0, speed=100)
+        ex.add_task(roll)
+        ex.process_tasks()
+        ex.sends.clear()
+
+        ex.add_task(lane_task('speed', task_id='s1', speed=42))
+        ex.process_tasks()
+        assert ('speed', {'speed': 42}) in ex.sends
+        assert ex.current_tasks[LANE_DRIVE] is roll
+        assert roll.status == TaskStatus.RUNNING
+
+    def test_modifier_fires_while_its_actuator_lane_is_owned(self, clock):
+        # set_led modifier pokes the LED while a led_sequence owner holds LANE_LED;
+        # the owner is untouched.
+        ex = RecordingSphero()
+        owner = lane_task('led_sequence', task_id='l1',
+                          sequence=[{'red': 1, 'green': 2, 'blue': 3}],
+                          interval=10.0, loop=True)
+        ex.add_task(owner)
+        ex.process_tasks()
+        assert ex.current_tasks[LANE_LED] is owner
+        ex.sends.clear()
+
+        ex.add_task(lane_task('set_led', task_id='sl1', color='red'))
+        ex.process_tasks()
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+        # Owner still holds the LED lane.
+        assert ex.current_tasks[LANE_LED] is owner
+        assert owner.status == TaskStatus.RUNNING
+
+    def test_set_led_param_aware_front_back_and_fallback(self, clock):
+        # The set_led modifier honors led_type / type (main/front/back) and
+        # falls back to main on anything else.
+        ex = RecordingSphero()
+        ex.add_task(lane_task('set_led', task_id='f', color='red', led_type='front'))
+        ex.add_task(lane_task('set_led', task_id='b', color='blue', led_type='back'))
+        ex.add_task(lane_task('set_led', task_id='a', color='green', type='back'))
+        ex.add_task(lane_task('set_led', task_id='x', color='white', led_type='foo'))
+        ex.process_tasks()
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'front'}) in ex.sends
+        assert ('led', {'red': 0, 'green': 0, 'blue': 255, 'led_type': 'back'}) in ex.sends
+        assert ('led', {'red': 0, 'green': 255, 'blue': 0, 'led_type': 'back'}) in ex.sends
+        assert ('led', {'red': 255, 'green': 255, 'blue': 255, 'led_type': 'main'}) in ex.sends
+
+    def test_modifier_empty_lane_and_never_reserves(self, clock):
+        # Modifiers resolve to an empty lane set and never slot a lane.
+        assert SpheroTaskExecutorBase.lanes_for('heading') == frozenset()
+        assert SpheroTaskExecutorBase.is_modifier('heading') is True
+        assert SpheroTaskExecutorBase.is_modifier('roll') is False
+
+        ex = RecordingSphero()
+        ex.add_task(lane_task('set_led', color='red'))
+        ex.process_tasks()
+        # The set_led poke emitted but never occupied the LED slot.
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+        assert ex.current_tasks[LANE_LED] is None
+
+    def test_calibrate_compass_is_drive_lane_not_modifier(self, clock):
+        # calibrate_compass is a DRIVE-lane owner (robot spins), not a modifier.
+        assert SpheroTaskExecutorBase.lanes_for('calibrate_compass') == frozenset({LANE_DRIVE})
+        assert SpheroTaskExecutorBase.is_modifier('calibrate_compass') is False
+
+    def test_modifier_respects_start_at(self, clock):
+        # A heading modifier with a future start_at does not emit until due.
+        ex = RecordingSphero()
+        gated = lane_task('heading', task_id='h1', heading=90)
+        gated.start_at = clock.now + 5.0
+        ex.add_task(gated)
+        ex.process_tasks()
+        assert ('heading', {'heading': 90}) not in ex.sends
+        assert gated.status == TaskStatus.PENDING
+        assert gated in ex.task_queue
+
+        clock.advance(5.0)
+        ex.process_tasks()
+        assert ('heading', {'heading': 90}) in ex.sends
+        assert gated.status == TaskStatus.COMPLETED
+
+    def test_modifier_does_not_block_following_owner(self, clock):
+        # Queue order [set_led modifier, roll owner]: in ONE tick both run — the
+        # modifier inline, the roll promotes into DRIVE — proving a modifier
+        # never reserves a lane nor holds up a follower.
+        ex = RecordingSphero()
+        ex.add_task(lane_task('set_led', task_id='sl1', color='red'))
+        ex.add_task(lane_task('roll', task_id='r1', heading=0, speed=100))
+        ex.process_tasks()
+        assert ('led', {'red': 255, 'green': 0, 'blue': 0, 'led_type': 'main'}) in ex.sends
+        assert ('roll', {'heading': 0, 'speed': 100, 'duration': 0.0}) in ex.sends
+        assert ex.current_tasks[LANE_DRIVE] is not None
+        assert ex.current_tasks[LANE_DRIVE].task_id == 'r1'
+
+
+# ====================================================================
+# H. Bundle lane-conflict validation (owner-vs-owner only)
+# ====================================================================
+
+
+class TestBundleLaneConflict:
+    """The bundle validator rejects only OWNER-vs-OWNER same-lane bundles;
+    modifiers (empty lane set) are always accepted."""
+
+    @staticmethod
+    def _conflict(*task_types):
+        from sphero_instance_controller.sphero_instance_task_controller_node import (
+            SpheroInstanceTaskController,
+        )
+        tasks = [lane_task(tt, task_id=f'{tt}_{i}') for i, tt in enumerate(task_types)]
+        return SpheroInstanceTaskController._bundle_lane_conflict(tasks)
+
+    def test_owner_plus_modifiers_bundle_accepted(self):
+        # {roll, heading, speed, set_led, matrix}: one DRIVE owner + four
+        # modifiers -> no conflict.
+        conflict_task, conflict_lanes = self._conflict(
+            'roll', 'heading', 'speed', 'set_led', 'matrix')
+        assert conflict_task is None
+        assert conflict_lanes == frozenset()
+
+    def test_two_drive_owner_bundle_rejected(self):
+        conflict_task, conflict_lanes = self._conflict('roll', 'circle')
+        assert conflict_task is not None
+        assert conflict_lanes == frozenset({LANE_DRIVE})
+
+    def test_two_led_owner_bundle_rejected(self):
+        conflict_task, conflict_lanes = self._conflict('led_sequence', 'led_sequence')
+        assert conflict_task is not None
+        assert conflict_lanes == frozenset({LANE_LED})
+
+    def test_reflect_is_drive_owner_conflicts_with_roll(self):
+        # reflect is a DRIVE owner (not a modifier): two drive owners conflict.
+        conflict_task, conflict_lanes = self._conflict('roll', 'reflect')
+        assert conflict_task is not None
+        assert conflict_lanes == frozenset({LANE_DRIVE})
+
+
+# ====================================================================
+# I. Per-task targets self-filtering (_task_targets_me)
+# ====================================================================
+
+
+class TestTaskTargetsMe:
+    """A Sphero runs a task only when its callsign is in the task's `targets`.
+
+    Omitted/None targets -> all units (back-compat); empty list -> nobody;
+    membership is case-insensitive; malformed (non-list) targets fail open."""
+
+    @staticmethod
+    def _targets_me(sphero_name, **item):
+        from sphero_instance_controller.sphero_instance_task_controller_node import (
+            SpheroInstanceTaskController,
+        )
+        return SpheroInstanceTaskController._task_targets_me(sphero_name, item)
+
+    def test_omitted_targets_applies_to_all(self):
+        # No `targets` key -> back-compat: every unit runs it.
+        assert self._targets_me('SB-3660', task_type='roll') is True
+        assert self._targets_me('SB-3AAC', task_type='roll') is True
+
+    def test_none_targets_applies_to_all(self):
+        assert self._targets_me('SB-3660', task_type='roll', targets=None) is True
+
+    def test_listed_callsign_matches(self):
+        targets = ['SB-3660', 'SB-1FA8']
+        assert self._targets_me('SB-3660', task_type='roll', targets=targets) is True
+        assert self._targets_me('SB-1FA8', task_type='roll', targets=targets) is True
+
+    def test_unlisted_callsign_excluded(self):
+        targets = ['SB-3660', 'SB-1FA8']
+        assert self._targets_me('SB-3AAC', task_type='roll', targets=targets) is False
+
+    def test_empty_list_targets_nobody(self):
+        assert self._targets_me('SB-3660', task_type='roll', targets=[]) is False
+        assert self._targets_me('SB-3AAC', task_type='roll', targets=[]) is False
+
+    def test_membership_is_case_insensitive(self):
+        # Lower-case in either the callsign or the targets list still matches.
+        assert self._targets_me('SB-3660', task_type='roll', targets=['sb-3660']) is True
+        assert self._targets_me('sb-3660', task_type='roll', targets=['SB-3660']) is True
+
+    def test_malformed_targets_fail_open(self):
+        # Non-list targets -> fail open (run it); caller logs a warning.
+        assert self._targets_me('SB-3660', task_type='roll', targets='SB-3660') is True
+        assert self._targets_me('SB-3AAC', task_type='roll', targets='SB-3660') is True

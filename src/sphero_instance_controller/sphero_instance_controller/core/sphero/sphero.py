@@ -324,6 +324,28 @@ class Sphero:
             print(f"Error resetting aim: {e}")
             return False
 
+    def calibrate_compass(self) -> bool:
+        """
+        Calibrate the magnetometer compass (BOLT only).
+
+        This is a BLOCKING call: the robot physically spins in place and waits
+        for the magnetometer calibration notify to fire (a few seconds). It is a
+        no-op on non-BOLT units (no ``calibrate_compass`` on the API).
+
+        Returns:
+            True if calibration was issued/completed, False if unsupported or on error
+        """
+        if not hasattr(self.api, 'calibrate_compass'):
+            print("calibrate_compass not supported (BOLT only)")
+            return False
+        try:
+            self.api.calibrate_compass()
+            return True
+
+        except Exception as e:
+            print(f"Error calibrating compass: {e}")
+            return False
+
     def set_stabilization(self, enable: bool) -> bool:
         """
         Enable or disable stabilization.

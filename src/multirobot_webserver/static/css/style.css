@@ -669,3 +669,112 @@ select.field option:disabled { color: var(--fg-3); }
     .loc__hint { text-align: left; }
     .anchors__grid { grid-template-columns: 1fr; }
 }
+
+/* ============================================================
+   Broadcast builder — visual lane board
+   (reuses existing tokens: --amber owner, --green modifier, --red conflict)
+   ============================================================ */
+.modal__panel--wide { max-width: 860px; }
+
+/* Palette of draggable task chips */
+.palette { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.palette__card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line-strong);
+    border-radius: var(--rad);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    padding: 5px 9px;
+    cursor: grab;
+}
+.palette__card:hover { border-color: var(--line-strong); background: var(--bg-3); }
+.palette__card:focus-visible { outline: 1px solid var(--amber); }
+.palette__card[data-role="owner"]    { border-left-color: var(--amber); }
+.palette__card[data-role="modifier"] { border-left-color: var(--green); }
+
+/* Lane board (horizontal scroll on narrow viewports) */
+.board { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 14px; }
+.lane {
+    flex: 0 0 150px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: var(--rad);
+    display: flex;
+    flex-direction: column;
+    min-height: 140px;
+}
+.lane__head {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--fg-2);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    gap: 4px;
+    align-items: baseline;
+}
+.lane__flag { color: var(--red); font-size: 9px; }
+.lane__items { flex: 1; padding: 6px; display: flex; flex-direction: column; gap: 6px; }
+.lane__drop { color: var(--fg-3); font-size: 10px; text-align: center; padding: 8px; }
+.lane__items:not(:empty) + .lane__drop { display: none; }
+.lane--drop-ok    { outline: 1px dashed var(--green); outline-offset: -2px; }
+.lane--drop-block { outline: 1px dashed var(--red);   outline-offset: -2px; }
+.lane[data-conflict="true"]            { border-color: var(--red); }
+.lane[data-conflict="true"] .lane__head { color: var(--red); }
+
+/* Placed cards */
+.card {
+    background: var(--bg-2);
+    border: 1px solid var(--line-strong);
+    border-left: 3px solid var(--line-strong);
+    border-radius: var(--rad);
+    padding: 6px;
+    font-size: 11px;
+    cursor: grab;
+}
+.card--owner    { border-left-color: var(--amber); }
+.card--modifier { border-left-color: var(--green); }
+.card--ghost    { opacity: 0.55; cursor: default; }
+.card.dragging  { opacity: 0.5; }
+.card__head { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+.card__type { font-weight: 600; color: var(--fg); }
+.card__json {
+    color: var(--fg-3);
+    font-size: 10px;
+    padding: 0 2px;
+    margin-right: 2px;
+}
+.card__json:hover { color: var(--amber); }
+.card__rm { color: var(--fg-2); padding: 0 2px; }
+.card__rm:hover { color: var(--red); }
+.card__ghostnote { color: var(--fg-3); font-size: 9px; margin-top: 3px; }
+.card__field { display: flex; gap: 4px; align-items: center; margin-top: 3px; }
+.card__field > span { color: var(--fg-3); font-size: 9px; width: 56px; flex: 0 0 auto; }
+.card__field input,
+.card__field select {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+.card__field input:focus,
+.card__field select:focus { border-color: var(--amber); outline: none; }
+
+/* Advanced JSON view */
+.bundle-json { margin-top: 4px; }
+.bundle-json summary {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.bundle-json__clear { padding: 3px 10px; font-size: 10px; }

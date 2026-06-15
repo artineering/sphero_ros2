@@ -301,21 +301,27 @@ class SpheroInstanceWebSocketServer(Node):
             pass
 
     def device_error_callback(self, msg: String):
-        """Handle device error (e.g., toy not found)."""
+        """Handle a terminal device error (e.g. toy_not_found, ble_lost).
+
+        All device_error codes are terminal: the device controller publishes
+        them just before exiting (initial-connect failure or runtime BLE-link
+        loss after retry exhaustion). Forward every code to websocket clients
+        and shut this instance down — no per-code filtering.
+        """
         try:
             error_data = json.loads(msg.data)
             error_type = error_data.get('error', 'unknown')
 
-            if error_type == 'toy_not_found':
-                self._shutdown_triggered = True  # Mark that we received the error
-                self.get_logger().error(f"✗ Sphero {self.sphero_name} not found - initiating shutdown")
-                # Emit error to websocket clients
-                if hasattr(self, 'socketio'):
-                    self.socketio.emit('device_error', error_data)
+            self._shutdown_triggered = True  # Mark that we received the error
+            self.get_logger().error(
+                f"✗ Sphero {self.sphero_name} device error '{error_type}' - initiating shutdown")
+            # Emit error to websocket clients
+            if hasattr(self, 'socketio'):
+                self.socketio.emit('device_error', error_data)
 
-                # Trigger shutdown of all controllers
-                import threading
-                threading.Thread(target=self._shutdown_after_delay, daemon=True).start()
+            # Trigger shutdown of all controllers
+            import threading
+            threading.Thread(target=self._shutdown_after_delay, daemon=True).start()
         except json.JSONDecodeError:
             pass
 

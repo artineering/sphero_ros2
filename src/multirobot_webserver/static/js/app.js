@@ -50,19 +50,97 @@ const BROADCAST_DEFAULTS = {
     },
 };
 
-// Which actuator lane(s) each task type occupies. The per-instance controller
-// allows one task per lane concurrently; a bundle whose sub-tasks share a lane
-// is rejected server-side. This map drives a lightweight client-side warning
-// only (it does NOT block sending). 'custom' and 'jumping_bean' touch ALL lanes.
-const ALL_LANES = ['DRIVE', 'LED', 'MATRIX'];
-const TASK_LANES = {
-    move_to: ['DRIVE'], patrol: ['DRIVE'], square: ['DRIVE'], circle: ['DRIVE'],
-    spin: ['DRIVE'], roll: ['DRIVE'], heading: ['DRIVE'], speed: ['DRIVE'],
-    reflect: ['DRIVE'], stop: ['DRIVE'],
-    set_led: ['LED'], led_sequence: ['LED'],
-    matrix: ['MATRIX'], matrix_sequence: ['MATRIX'],
-    custom: ALL_LANES, jumping_bean: ALL_LANES,
+// ============================================================
+// Lane / task-class config (DATA-DRIVEN CORE)
+// ------------------------------------------------------------
+// A Sphero runs one OWNER task per actuator "lane" concurrently; two owners in
+// one lane is a bundle the controller silently rejects. The visual builder
+// derives ALL of its structure (columns, conflict rules, click-to-add homes)
+// from the objects below, so reconciling with the controller-side taxonomy is a
+// DATA edit only — no structural rewrite.
+//
+// SOURCE OF TRUTH for the final taxonomy is the parallel controller design. If
+// the controller's lane names differ, rename the `id`s in LANES and the `lane`
+// fields in TASK_CLASS to match; nothing else needs to change. (See the
+// reconciliation note in plans/visual-lane-bundle-builder-*.md.)
+
+// Lane definitions — ORDER here is the column order on the board.
+const LANES = [
+    { id: 'DRIVE',     label: 'DRIVE' },
+    { id: 'AIM',       label: 'AIM' },        // heading modifier
+    { id: 'THROTTLE',  label: 'THROTTLE' },   // speed modifier
+    { id: 'LED_MAIN',  label: 'LED·MAIN' },
+    { id: 'LED_FRONT', label: 'LED·FRONT' },
+    { id: 'LED_BACK',  label: 'LED·BACK' },
+    { id: 'MATRIX',    label: 'MATRIX' },
+    { id: 'CONFIG',    label: 'CONFIG' },
+];
+
+// set_led's home lane depends on its `led_type` param.
+const LED_LANE_BY_TYPE = { main: 'LED_MAIN', front: 'LED_FRONT', back: 'LED_BACK' };
+
+// Per-type class.
+//   role: 'owner' (one per lane → conflicts when doubled) | 'modifier' (never
+//         conflicts, always addable, applies live).
+//   lane: the card's HOME lane (click-to-add target; the only lane an owner
+//         accepts). Modifiers whose lane depends on a param define `laneFor`.
+const TASK_CLASS = {
+    // ---- DRIVE owners ----
+    roll:         { role: 'owner', lane: 'DRIVE' },
+    move_to:      { role: 'owner', lane: 'DRIVE' },
+    patrol:       { role: 'owner', lane: 'DRIVE' },
+    square:       { role: 'owner', lane: 'DRIVE' },
+    circle:       { role: 'owner', lane: 'DRIVE' },
+    spin:         { role: 'owner', lane: 'DRIVE' },
+    reflect:      { role: 'owner', lane: 'DRIVE' },
+    // ---- LED / MATRIX owners ----
+    led_sequence:    { role: 'owner', lane: 'LED_MAIN' },
+    matrix_sequence: { role: 'owner', lane: 'MATRIX' },
+    // ---- exclusive owners (occupy ALL lanes — any other owner conflicts) ----
+    custom:       { role: 'owner', lane: '*' },
+    jumping_bean: { role: 'owner', lane: '*' },
+    // ---- modifiers (never conflict) ----
+    heading: { role: 'modifier', lane: 'AIM' },
+    speed:   { role: 'modifier', lane: 'THROTTLE' },
+    set_led: { role: 'modifier', lane: 'LED_MAIN', laneFor: (t) => LED_LANE_BY_TYPE[t?.parameters?.led_type] || 'LED_MAIN' },
+    matrix:  { role: 'modifier', lane: 'MATRIX' },
+    collision:{ role: 'modifier', lane: 'CONFIG' },
 };
+
+// Unknown / reclassed types degrade to a non-conflicting CONFIG modifier so the
+// board never crashes if the controller adds a type the front-end hasn't met.
+const DEFAULT_CLASS = { role: 'modifier', lane: 'CONFIG' };
+const classOf = (type) => TASK_CLASS[type] || DEFAULT_CLASS;
+// Resolve a task's effective lane id ('*' = exclusive, occupies every lane).
+const laneFor = (task) => {
+    const cls = classOf(task && task.task_type);
+    return cls.laneFor ? cls.laneFor(task) : cls.lane;
+};
+
+// Compact inline param editors per card. Format: [key, kind] where kind is
+// '#' (number) | 'txt' (text) | 'sel:a,b,c' (select). Params not listed here
+// are still editable via the card's "{…}" JSON popover or the advanced JSON view.
+const CARD_FIELDS = {
+    roll:    [['heading', '#'], ['speed', '#'], ['duration', '#']],
+    move_to: [['x', '#'], ['y', '#'], ['speed', '#']],
+    circle:  [['radius', '#'], ['speed', '#'], ['duration', '#']],
+    spin:    [['duration', '#'], ['speed', '#']],
+    heading: [['heading', '#']],
+    speed:   [['speed', '#']],
+    set_led: [['led_type', 'sel:main,front,back'], ['red', '#'], ['green', '#'], ['blue', '#']],
+    matrix:  [['pattern', 'txt'], ['red', '#'], ['green', '#'], ['blue', '#']],
+};
+
+// Defaults for the two exclusive owners that have no BROADCAST_DEFAULTS entry.
+BROADCAST_DEFAULTS.jumping_bean = BROADCAST_DEFAULTS.jumping_bean || {};
+
+// Strip the non-serialized _uid before send / serialize (keep the wire clean).
+const stripUid = ({ _uid, ...rest }) => rest;
+let _uidSeq = 0;
+const nextUid = () => `t${++_uidSeq}`;
+const cloneParams = (p) => (typeof structuredClone === 'function'
+    ? structuredClone(p)
+    : JSON.parse(JSON.stringify(p ?? {})));
 
 class ControlStation {
     constructor() {
@@ -77,6 +155,10 @@ class ControlStation {
         this.source = { active: null, running: {} };
         this.linkOk = true;
         this.lastSyncAt = null;
+        // Broadcast builder: single source of truth (wire-format array + _uid).
+        this.bundle = [];
+        this._syncing = false;     // guards JSON<->builder sync feedback loops
+        this._paletteBuilt = false;
         this.init();
     }
 
@@ -146,13 +228,19 @@ class ControlStation {
         $('#detachSelectedBtn').addEventListener('click', () => this.requestBatchDetach([...this.selected]));
         $('#detachAllBtn').addEventListener('click', () => this.requestBatchDetach(this.spheros.map((s) => s.name)));
 
-        // Broadcast modal
+        // Broadcast modal — visual lane builder
         $('#broadcastBtn').addEventListener('click', () => this.openBroadcast());
-        $('#broadcastAddBtn').addEventListener('click', () => this.addBroadcastTask());
-        $('#broadcastClearBtn').addEventListener('click', () => this.clearBroadcastBundle());
-        $('#broadcastParams').addEventListener('input', () => this.renderBroadcastLanes());
+        $('#broadcastClearBtn').addEventListener('click', (e) => {
+            // Button lives inside the <summary>; don't toggle the details panel.
+            e.preventDefault();
+            e.stopPropagation();
+            this.clearBroadcastBundle();
+        });
+        // JSON is canonical-ward only on blur (not input) to avoid sync loops.
+        $('#broadcastParams').addEventListener('blur', () => this.syncBundleFromJson());
         $('#confirmBroadcastBtn').addEventListener('click', () => this.sendBroadcast());
         $('#cancelBroadcastBtn').addEventListener('click', () => this.closeModal('broadcastModal'));
+        this.bindBuilderDnd();
 
         // Generic close-on-X / outside-click
         $$('.modal .close').forEach((btn) => {
@@ -194,7 +282,9 @@ class ControlStation {
             const data = await r.json();
             this.linkUp();
             if (data.success) {
-                this.spheros = data.spheros || [];
+                const next = data.spheros || [];
+                this.flagUnexpectedDrops(this.spheros, next);
+                this.spheros = next;
                 this.lastSyncAt = Date.now();
                 this.renderFleet();
                 this.updateTelemetry();
@@ -203,6 +293,22 @@ class ControlStation {
             this.linkDown();
             console.error('refresh error', err);
         }
+    }
+
+    // A unit that drops from 'running' to a non-running state while still
+    // present in the listing died unexpectedly (BLE link loss / crash) — a
+    // clean DETACH removes the unit from the listing entirely, so it never
+    // trips this. There is no per-unit device_error channel into the
+    // coordinator (instances emit it only to their own console clients), so
+    // this liveness transition is the signal the operator gets centrally.
+    flagUnexpectedDrops(prev, next) {
+        if (!prev || !prev.length) return;
+        const wasRunning = new Map(prev.map((s) => [s.name, s.status === 'running']));
+        next.forEach((s) => {
+            if (wasRunning.get(s.name) && s.status !== 'running' && s.status !== 'starting') {
+                this.toast(`Unit ${s.name} link lost (${(s.status || 'down').toUpperCase()})`, 'error', 'LINK');
+            }
+        });
     }
 
     // Split a textarea blob into clean callsigns: one per line, trimmed,
@@ -770,100 +876,475 @@ class ControlStation {
             this.toast('No units deployed.', 'info', 'BROADCAST');
             return;
         }
-        this.renderBroadcastLanes();
+        // Seed the bundle from whatever JSON is currently in the textarea
+        // (`[]` on first open), then render the full builder.
+        this.syncBundleFromJson();
+        this.renderBuilder();
         $('#broadcastSummary').textContent =
             `${count} unit${count === 1 ? '' : 's'} · fires at now + lead`;
         const cd = $('#broadcastCountdown');
         cd.hidden = true;
         cd.textContent = '';
-        this.openModal('broadcastModal', 'broadcastType');
+        this.openModal('broadcastModal');
     }
 
-    // Parse the bundle editor as a JSON array. Returns the array on success, or
-    // null on parse error / non-array (caller decides how to react).
-    parseBroadcastBundle() {
-        const raw = ($('#broadcastParams').value || '').trim();
-        if (!raw) return [];
-        let arr;
-        try {
-            arr = JSON.parse(raw);
-        } catch (e) {
-            return null;
+    /* ---- builder render ---- */
+
+    renderBuilder() {
+        this.renderPalette();
+        this.renderBundle();
+        this.syncJsonFromBundle();
+        this.updateConflicts();
+    }
+
+    // Palette of draggable task cards, built once from TASK_CLASS.
+    renderPalette() {
+        if (this._paletteBuilt) return;
+        const pal = $('#broadcastPalette');
+        if (!pal) return;
+        pal.textContent = '';
+        Object.keys(TASK_CLASS).forEach((type) => {
+            const cls = classOf(type);
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'palette__card';
+            chip.draggable = true;
+            chip.dataset.type = type;
+            chip.dataset.role = cls.role;
+            chip.setAttribute('role', 'listitem');
+            chip.title = `${type} (${cls.role}) — drag to a lane or click to add`;
+            const glyph = cls.role === 'owner' ? '◆' : '○';
+            chip.textContent = `${type} ${glyph}`;   // textContent: no innerHTML
+            pal.appendChild(chip);
+        });
+        this._paletteBuilt = true;
+    }
+
+    // Build the lane columns (once) then (re)distribute cards into them.
+    renderBundle() {
+        const board = $('#broadcastBoard');
+        if (!board) return;
+        if (!board.children.length) {
+            LANES.forEach((lane) => {
+                const col = document.createElement('div');
+                col.className = 'lane';
+                col.dataset.lane = lane.id;
+                col.setAttribute('role', 'list');
+                col.setAttribute('aria-label', `${lane.label} lane`);
+                const head = document.createElement('div');
+                head.className = 'lane__head';
+                const name = document.createElement('span');
+                name.className = 'lane__name';
+                name.textContent = lane.label;
+                const flag = document.createElement('span');
+                flag.className = 'lane__flag';
+                flag.hidden = true;
+                head.append(name, flag);
+                const items = document.createElement('div');
+                items.className = 'lane__items';
+                const drop = document.createElement('div');
+                drop.className = 'lane__drop';
+                drop.textContent = 'drop task';
+                col.append(head, items, drop);
+                board.appendChild(col);
+            });
         }
-        return Array.isArray(arr) ? arr : null;
+        // Clear all lane item containers.
+        $$('#broadcastBoard .lane__items').forEach((c) => { c.textContent = ''; });
+        // Place each task. '*' (exclusive owners) render into every lane's items
+        // so the operator sees the lane is taken; conflict counting handles them.
+        for (const task of this.bundle) {
+            const lane = laneFor(task);
+            const targets = lane === '*'
+                ? LANES.map((l) => l.id)
+                : [LANES.some((l) => l.id === lane) ? lane : 'CONFIG'];
+            targets.forEach((laneId, idx) => {
+                const items = $(`#broadcastBoard .lane[data-lane="${laneId}"] .lane__items`);
+                if (items) items.appendChild(this.buildCard(task, idx > 0));
+            });
+        }
     }
 
-    // ADD: append the selected type (with its default params) to the bundle.
-    addBroadcastTask() {
-        const type = $('#broadcastType').value;
-        const arr = this.parseBroadcastBundle();
-        if (arr === null) {
-            this.toast('Bundle must be a valid JSON array.', 'error', 'BROADCAST');
+    // Build one placed card. `ghost` = a duplicate rendering of an exclusive
+    // owner in a secondary lane (read-only, no editors).
+    buildCard(task, ghost = false) {
+        const cls = classOf(task.task_type);
+        const card = document.createElement('div');
+        card.className = `card card--${cls.role}`;
+        card.dataset.uid = task._uid;
+        card.draggable = !ghost;
+        card.setAttribute('role', 'listitem');
+        if (ghost) card.classList.add('card--ghost');
+
+        const head = document.createElement('div');
+        head.className = 'card__head';
+        const typeEl = document.createElement('span');
+        typeEl.className = 'card__type';
+        typeEl.textContent = `${cls.role === 'owner' ? '◆' : '○'} ${task.task_type}`;
+        head.appendChild(typeEl);
+        if (!ghost) {
+            const right = document.createElement('span');
+            const jbtn = document.createElement('button');
+            jbtn.type = 'button';
+            jbtn.className = 'card__json';
+            jbtn.textContent = '{…}';
+            jbtn.title = 'Edit full parameters as JSON';
+            jbtn.dataset.uid = task._uid;
+            jbtn.dataset.act = 'json';
+            const rm = document.createElement('button');
+            rm.type = 'button';
+            rm.className = 'card__rm';
+            rm.textContent = '✕';
+            rm.title = 'Remove task';
+            rm.setAttribute('aria-label', `Remove ${task.task_type}`);
+            rm.dataset.uid = task._uid;
+            rm.dataset.act = 'rm';
+            right.append(jbtn, rm);
+            head.appendChild(right);
+        }
+        card.appendChild(head);
+
+        if (ghost) {
+            const note = document.createElement('div');
+            note.className = 'card__ghostnote';
+            note.textContent = '(occupies lane)';
+            card.appendChild(note);
+            return card;
+        }
+
+        // Inline param editors.
+        const fields = CARD_FIELDS[task.task_type] || [];
+        const params = task.parameters || (task.parameters = {});
+        fields.forEach(([key, kind]) => {
+            card.appendChild(this.buildField(task._uid, 'param', key, kind, params[key]));
+        });
+        // Per-card start_offset (always present).
+        card.appendChild(this.buildField(task._uid, 'offset', 'start_offset', '#', task.start_offset));
+        return card;
+    }
+
+    buildField(uid, scope, key, kind, value) {
+        const row = document.createElement('label');
+        row.className = 'card__field';
+        const lbl = document.createElement('span');
+        lbl.textContent = key === 'start_offset' ? '@s' : key;
+        let input;
+        if (kind.startsWith('sel:')) {
+            input = document.createElement('select');
+            kind.slice(4).split(',').forEach((opt) => {
+                const o = document.createElement('option');
+                o.value = opt;
+                o.textContent = opt;
+                if (String(value) === opt) o.selected = true;
+                input.appendChild(o);
+            });
+        } else {
+            input = document.createElement('input');
+            input.type = kind === '#' ? 'number' : 'text';
+            input.value = value == null ? '' : value;
+            if (kind === '#') input.step = 'any';
+        }
+        input.dataset.uid = uid;
+        input.dataset.scope = scope;
+        input.dataset.key = key;
+        input.dataset.kind = kind;
+        row.append(lbl, input);
+        return row;
+    }
+
+    /* ---- mutations ---- */
+
+    addTaskToLane(type, laneId) {
+        const cls = classOf(type);
+        const task = {
+            _uid: nextUid(),
+            task_type: type,
+            parameters: cloneParams(BROADCAST_DEFAULTS[type] ?? {}),
+            start_offset: 0,
+        };
+        // Modifier with a per-lane variant (set_led): seed the lane-deciding
+        // param from the drop target so it lands where it was dropped.
+        if (cls.role === 'modifier' && cls.laneFor && type === 'set_led' && laneId) {
+            const led = Object.keys(LED_LANE_BY_TYPE).find((k) => LED_LANE_BY_TYPE[k] === laneId);
+            if (led) task.parameters.led_type = led;
+        }
+        this.bundle.push(task);
+        this.afterMutate();
+    }
+
+    addTaskToHomeLane(type) {
+        const cls = classOf(type);
+        const home = cls.laneFor ? null : (cls.lane === '*' ? null : cls.lane);
+        this.addTaskToLane(type, home);
+    }
+
+    moveTask(uid, laneId) {
+        const task = this.bundle.find((t) => t._uid === uid);
+        if (!task) return;
+        const cls = classOf(task.task_type);
+        if (cls.role === 'owner') {
+            // Owners have a fixed home lane; can't be relocated.
+            this.toast(`${task.task_type} is an owner — fixed to its lane.`, 'info', 'BROADCAST');
             return;
         }
-        // start_offset is an explicit per-task lane stagger (additive on the
-        // bundle lead). Inject 0 so it's visible in the JSON and easy to edit.
-        arr.push({ task_type: type, parameters: BROADCAST_DEFAULTS[type] ?? {}, start_offset: 0 });
-        $('#broadcastParams').value = JSON.stringify(arr, null, 2);
-        this.renderBroadcastLanes();
+        // Modifier with a lane-deciding param (set_led): update that param.
+        if (cls.laneFor && task.task_type === 'set_led') {
+            const led = Object.keys(LED_LANE_BY_TYPE).find((k) => LED_LANE_BY_TYPE[k] === laneId);
+            if (led) { task.parameters.led_type = led; this.afterMutate(); }
+            return;
+        }
+        // Pure modifiers have a fixed lane by type — moving is a no-op.
+    }
+
+    removeTask(uid) {
+        this.bundle = this.bundle.filter((t) => t._uid !== uid);
+        this.afterMutate();
+    }
+
+    editCardField(uid, scope, key, kind, raw) {
+        const task = this.bundle.find((t) => t._uid === uid);
+        if (!task) return;
+        let value = raw;
+        if (kind === '#') {
+            value = raw === '' ? 0 : Number(raw);
+            if (!Number.isFinite(value)) value = 0;
+        }
+        if (scope === 'offset') {
+            task.start_offset = value;
+        } else {
+            task.parameters = task.parameters || {};
+            task.parameters[key] = value;
+        }
+        // set_led.led_type changes the card's lane → full re-render needed.
+        if (scope === 'param' && key === 'led_type') {
+            this.afterMutate();
+        } else {
+            this.syncJsonFromBundle();
+            this.updateConflicts();
+        }
     }
 
     clearBroadcastBundle() {
-        $('#broadcastParams').value = '[]';
-        this.renderBroadcastLanes();
+        this.bundle = [];
+        this.afterMutate();
     }
 
-    // Lightweight live hint: which lanes the bundle occupies + a conflict
-    // warning when two entries share a lane. Never blocks sending.
-    renderBroadcastLanes() {
+    afterMutate() {
+        this.renderBundle();
+        this.syncJsonFromBundle();
+        this.updateConflicts();
+    }
+
+    /* ---- JSON <-> bundle sync ---- */
+
+    syncJsonFromBundle() {
+        if (this._syncing) return;
+        this._syncing = true;
+        $('#broadcastParams').value = JSON.stringify(this.bundle.map(stripUid), null, 2);
+        this._syncing = false;
+    }
+
+    // Parse the advanced JSON view; on success replace the bundle (fresh _uids)
+    // and re-render. On bad/non-array JSON, leave the bundle untouched + warn.
+    syncBundleFromJson() {
+        if (this._syncing) return;
         const hint = $('#broadcastLanes');
-        if (!hint) return;
-        const arr = this.parseBroadcastBundle();
-        if (arr === null) {
-            hint.hidden = false;
-            hint.textContent = '⚠ bundle is not valid JSON';
-            return;
-        }
-        if (arr.length === 0) {
-            hint.hidden = true;
-            hint.textContent = '';
-            return;
-        }
-        const seen = new Set();
-        const conflicts = new Set();
-        const stagger = [];
-        for (const item of arr) {
-            const type = item && item.task_type;
-            const lanes = TASK_LANES[type] ?? [];
-            for (const lane of lanes) {
-                if (seen.has(lane)) conflicts.add(lane);
-                seen.add(lane);
+        const raw = ($('#broadcastParams').value || '').trim();
+        let arr;
+        if (!raw) {
+            arr = [];
+        } else {
+            try {
+                arr = JSON.parse(raw);
+            } catch (e) {
+                if (hint) { hint.hidden = false; hint.textContent = '⚠ bundle is not valid JSON — board unchanged'; }
+                return;
             }
-            // Per-task stagger readout, e.g. "DRIVE @0s, LED @2s".
-            const off = item && Number.isFinite(item.start_offset) ? item.start_offset : 0;
-            const laneTag = lanes.length ? lanes.join('+') : (type || '?');
-            stagger.push(`${laneTag} @${off}s`);
         }
-        const lanesTxt = seen.size ? [...seen].join(' + ') : '(unknown)';
-        hint.hidden = false;
-        hint.textContent = conflicts.size
-            ? `⚠ lane conflict: ${[...conflicts].join(', ')} · controller will reject`
-            : `lanes: ${lanesTxt} · ${stagger.join(', ')}`;
+        if (!Array.isArray(arr)) {
+            if (hint) { hint.hidden = false; hint.textContent = '⚠ bundle must be a JSON array — board unchanged'; }
+            return;
+        }
+        this.bundle = arr.map((item) => ({
+            _uid: nextUid(),
+            task_type: (item && item.task_type) || '',
+            parameters: (item && item.parameters) || {},
+            start_offset: item && Number.isFinite(item.start_offset) ? item.start_offset : 0,
+        }));
+        this.renderBundle();
+        this.updateConflicts();
+    }
+
+    /* ---- conflict detection + policy ---- */
+
+    // Set of lane ids holding >=2 OWNERS. Modifiers are excluded entirely.
+    // Exclusive owners ('*') count toward every lane.
+    laneConflicts() {
+        const counts = {};
+        for (const task of this.bundle) {
+            if (classOf(task.task_type).role !== 'owner') continue;
+            const lane = laneFor(task);
+            const lanes = lane === '*' ? LANES.map((l) => l.id) : [lane];
+            for (const id of lanes) counts[id] = (counts[id] || 0) + 1;
+        }
+        const out = new Set();
+        Object.keys(counts).forEach((id) => { if (counts[id] >= 2) out.add(id); });
+        return out;
+    }
+
+    updateConflicts() {
+        const conflicts = this.laneConflicts();
+        const ownerCount = {};
+        for (const task of this.bundle) {
+            if (classOf(task.task_type).role !== 'owner') continue;
+            const lane = laneFor(task);
+            const lanes = lane === '*' ? LANES.map((l) => l.id) : [lane];
+            for (const id of lanes) ownerCount[id] = (ownerCount[id] || 0) + 1;
+        }
+        $$('#broadcastBoard .lane').forEach((col) => {
+            const id = col.dataset.lane;
+            const bad = conflicts.has(id);
+            col.dataset.conflict = bad ? 'true' : 'false';
+            col.setAttribute('aria-invalid', bad ? 'true' : 'false');
+            const flag = col.querySelector('.lane__flag');
+            if (flag) {
+                flag.hidden = !bad;
+                if (bad) flag.textContent = `⚠ ${ownerCount[id]} owners — keep one`;
+            }
+        });
+        // BROADCAST disabled while any conflict exists.
+        const confirm = $('#confirmBroadcastBtn');
+        if (confirm) confirm.disabled = conflicts.size > 0;
+        // Summary line in the advanced JSON details.
+        const hint = $('#broadcastLanes');
+        if (hint) {
+            if (this.bundle.length === 0) {
+                hint.hidden = true;
+                hint.textContent = '';
+            } else if (conflicts.size > 0) {
+                hint.hidden = false;
+                hint.textContent = `⚠ lane conflict: ${[...conflicts].join(', ')} · controller will reject`;
+            } else {
+                const stagger = this.bundle.map((t) => {
+                    const lane = laneFor(t);
+                    const off = Number.isFinite(t.start_offset) ? t.start_offset : 0;
+                    return `${lane === '*' ? 'ALL' : lane} @${off}s`;
+                });
+                hint.hidden = false;
+                hint.textContent = `lanes: ${stagger.join(', ')}`;
+            }
+        }
+    }
+
+    /* ---- drag-and-drop (delegated, attached once) ---- */
+
+    bindBuilderDnd() {
+        const palette = $('#broadcastPalette');
+        const board = $('#broadcastBoard');
+        if (!palette || !board) return;
+
+        // Palette: click-to-add (a11y/touch) + dragstart.
+        palette.addEventListener('click', (e) => {
+            const chip = e.target.closest('.palette__card');
+            if (chip) this.addTaskToHomeLane(chip.dataset.type);
+        });
+        palette.addEventListener('dragstart', (e) => {
+            const chip = e.target.closest('.palette__card');
+            if (!chip) return;
+            e.dataTransfer.setData('text/x-task-type', chip.dataset.type);
+            e.dataTransfer.effectAllowed = 'copy';
+        });
+
+        // Board: card actions (remove / JSON popover) + inline field edits.
+        board.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-act]');
+            if (!btn) return;
+            if (btn.dataset.act === 'rm') this.removeTask(btn.dataset.uid);
+            else if (btn.dataset.act === 'json') this.openCardJson(btn.dataset.uid);
+        });
+        board.addEventListener('input', (e) => {
+            const input = e.target.closest('[data-key]');
+            if (!input) return;
+            this.editCardField(input.dataset.uid, input.dataset.scope,
+                input.dataset.key, input.dataset.kind, input.value);
+        });
+        board.addEventListener('dragstart', (e) => {
+            const card = e.target.closest('.card');
+            if (!card || !card.draggable) return;
+            e.dataTransfer.setData('text/x-task-uid', card.dataset.uid);
+            e.dataTransfer.effectAllowed = 'move';
+            card.classList.add('dragging');
+        });
+        board.addEventListener('dragend', (e) => {
+            const card = e.target.closest('.card');
+            if (card) card.classList.remove('dragging');
+            $$('#broadcastBoard .lane').forEach((l) => l.classList.remove('lane--drop-ok', 'lane--drop-block'));
+        });
+        board.addEventListener('dragover', (e) => {
+            const lane = e.target.closest('.lane');
+            if (!lane) return;
+            e.preventDefault();
+            const type = e.dataTransfer.getData('text/x-task-type');
+            // Owner into an occupied owner-lane → block styling (drop still
+            // accepted per policy, but flagged).
+            const occupied = lane.dataset.conflict === 'true'
+                || this.bundle.some((t) => classOf(t.task_type).role === 'owner' && laneFor(t) === lane.dataset.lane);
+            const wouldBeOwner = type && classOf(type).role === 'owner';
+            lane.classList.toggle('lane--drop-block', !!(wouldBeOwner && occupied));
+            lane.classList.toggle('lane--drop-ok', !(wouldBeOwner && occupied));
+        });
+        board.addEventListener('dragleave', (e) => {
+            const lane = e.target.closest('.lane');
+            if (lane) lane.classList.remove('lane--drop-ok', 'lane--drop-block');
+        });
+        board.addEventListener('drop', (e) => {
+            const lane = e.target.closest('.lane');
+            if (!lane) return;
+            e.preventDefault();
+            lane.classList.remove('lane--drop-ok', 'lane--drop-block');
+            const laneId = lane.dataset.lane;
+            const uid = e.dataTransfer.getData('text/x-task-uid');
+            if (uid) { this.moveTask(uid, laneId); return; }
+            const type = e.dataTransfer.getData('text/x-task-type');
+            if (type) this.addTaskToLane(type, laneId);
+        });
+    }
+
+    // Minimal JSON popover for a card's full parameters (edit-on-confirm).
+    openCardJson(uid) {
+        const task = this.bundle.find((t) => t._uid === uid);
+        if (!task) return;
+        const current = JSON.stringify(task.parameters || {}, null, 2);
+        const edited = window.prompt(`Parameters for ${task.task_type} (JSON):`, current);
+        if (edited == null) return;
+        let parsed;
+        try {
+            parsed = JSON.parse(edited);
+        } catch (e) {
+            this.toast('Invalid JSON — parameters unchanged.', 'error', 'BROADCAST');
+            return;
+        }
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            this.toast('Parameters must be a JSON object.', 'error', 'BROADCAST');
+            return;
+        }
+        task.parameters = parsed;
+        this.afterMutate();
     }
 
     async sendBroadcast() {
-        const tasks = this.parseBroadcastBundle();
-        if (tasks === null) {
-            this.toast('Bundle must be a valid JSON array.', 'error', 'BROADCAST');
+        // Guard: never send while any owner-lane conflict exists.
+        if (this.laneConflicts().size > 0) {
+            this.toast('Resolve lane conflicts before broadcasting.', 'error', 'BROADCAST');
             return;
         }
+        const tasks = this.bundle.map(stripUid);
         if (tasks.length === 0) {
-            this.toast('Bundle is empty — ADD at least one task.', 'info', 'BROADCAST');
+            this.toast('Bundle is empty — add at least one task.', 'info', 'BROADCAST');
             return;
         }
         for (const item of tasks) {
-            if (typeof item !== 'object' || item === null || Array.isArray(item)
-                || typeof item.task_type !== 'string' || !item.task_type.trim()) {
+            if (typeof item.task_type !== 'string' || !item.task_type.trim()) {
                 this.toast('Each bundle entry needs a task_type.', 'error', 'BROADCAST');
                 return;
             }

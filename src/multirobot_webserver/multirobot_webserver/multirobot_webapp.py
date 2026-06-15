@@ -1376,6 +1376,11 @@ class SpheroInstanceManager:
 app = Flask(__name__,
             template_folder=str(Path(get_package_share_directory('multirobot_webserver')) / 'templates'),
             static_folder=str(Path(get_package_share_directory('multirobot_webserver')) / 'static'))
+# Re-read templates from disk on each render so a rebuilt index.html is picked
+# up without restarting the server (Jinja otherwise caches the compiled template
+# in memory for the process lifetime when debug is off).
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
 
 # Create instance manager (fleet_node attached in main() after rclpy.init)
 manager = SpheroInstanceManager()

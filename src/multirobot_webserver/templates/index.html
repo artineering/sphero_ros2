@@ -307,39 +307,26 @@
     <!-- BROADCAST TASK MODAL                                             -->
     <!-- ================================================================ -->
     <div id="broadcastModal" class="modal" role="dialog" aria-modal="true">
-        <div class="modal__panel">
+        <div class="modal__panel modal__panel--wide">
             <div class="modal__head">
                 <span class="modal__tag">[ BROADCAST ]</span>
                 <h3 class="modal__title">FAN TASK TO FLEET</h3>
                 <button class="modal__close close" aria-label="Close">×</button>
             </div>
             <div class="modal__body">
-                <label for="broadcastType" class="field__label">[ TASK TYPE ]</label>
-                <select id="broadcastType" class="field">
-                    <option value="roll">roll</option>
-                    <option value="move_to">move_to</option>
-                    <option value="patrol">patrol</option>
-                    <option value="circle">circle</option>
-                    <option value="square">square</option>
-                    <option value="spin">spin</option>
-                    <option value="set_led">set_led</option>
-                    <option value="stop">stop</option>
-                    <option value="heading">heading</option>
-                    <option value="speed">speed</option>
-                    <option value="matrix">matrix</option>
-                    <option value="led_sequence">led_sequence</option>
-                    <option value="matrix_sequence">matrix_sequence</option>
-                    <option value="collision">collision</option>
-                    <option value="reflect">reflect</option>
-                    <option value="custom">custom</option>
-                </select>
-                <div style="display:flex; gap:8px; margin-top:8px;">
-                    <button id="broadcastAddBtn" class="action action--accent" type="button">ADD</button>
-                    <button id="broadcastClearBtn" class="action action--ghost" type="button">CLEAR</button>
-                </div>
-                <label for="broadcastParams" class="field__label">[ BUNDLE TASKS (JSON) ]</label>
-                <textarea id="broadcastParams" class="field" rows="8" autocomplete="off" spellcheck="false">[]</textarea>
-                <p class="field__hint" id="broadcastLanes" hidden></p>
+                <label class="field__label">[ PALETTE — DRAG OR CLICK TO ADD &nbsp;·&nbsp; ◆ OWNER (ONE PER LANE) &nbsp; ○ MODIFIER ]</label>
+                <div id="broadcastPalette" class="palette" role="list"></div>
+
+                <label class="field__label">[ LANES — ONE OWNER ◆ PER LANE ]</label>
+                <div id="broadcastBoard" class="board" role="group" aria-label="Bundle lanes"></div>
+
+                <details class="bundle-json">
+                    <summary class="field__label">[ BUNDLE TASKS (JSON) — ADVANCED ]
+                        <button id="broadcastClearBtn" class="action action--ghost bundle-json__clear" type="button">CLEAR</button>
+                    </summary>
+                    <textarea id="broadcastParams" class="field" rows="6" autocomplete="off" spellcheck="false">[]</textarea>
+                    <p class="field__hint" id="broadcastLanes" hidden></p>
+                </details>
                 <p class="field__hint">// per-task "start_offset" (sec) staggers that lane AFTER the synced start; 0 = with the fleet</p>
                 <label for="broadcastLead" class="field__label">[ LEAD SECONDS ]</label>
                 <input type="number" id="broadcastLead" class="field" value="3.0" min="0.5" step="0.5">

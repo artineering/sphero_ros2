@@ -56,6 +56,7 @@ class TaskType(Enum):
     COLLISION = "collision"
     REFLECT = "reflect"
     JUMPING_BEAN = "jumping_bean"
+    CALIBRATE_COMPASS = "calibrate_compass"
 
 
 # ===== High-level task handlers =====
@@ -308,6 +309,12 @@ def execute_stop(executor, task: TaskDescriptor) -> bool:
     return True
 
 
+def execute_calibrate_compass(executor, task: TaskDescriptor) -> bool:
+    """Trigger a BOLT compass (magnetometer) calibration; the robot spins in place."""
+    executor._send_calibrate_compass_command()
+    return True
+
+
 def execute_custom(executor, task: TaskDescriptor) -> bool:
     """Execute a custom timed sequence of mixed commands."""
     commands = task.parameters.get('commands', [])
@@ -372,7 +379,10 @@ def execute_set_led(executor, task: TaskDescriptor) -> bool:
     else:
         red, green, blue = 255, 255, 255
 
-    executor._send_led_command(red, green, blue)
+    led_type = str(params.get('led_type', params.get('type', 'main'))).lower()
+    if led_type not in ('main', 'front', 'back'):
+        led_type = 'main'
+    executor._send_led_command(red, green, blue, led_type)
     return True
 
 

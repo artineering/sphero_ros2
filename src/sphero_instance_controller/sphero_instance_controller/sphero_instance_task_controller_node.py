@@ -164,6 +164,12 @@ class SpheroInstanceTaskController(Node):
             10
         )
 
+        self.calibrate_compass_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/calibrate_compass',
+            10
+        )
+
         self.matrix_pub = self.create_publisher(
             String,
             f'{self.topic_prefix}/matrix',
@@ -207,6 +213,7 @@ class SpheroInstanceTaskController(Node):
         self.get_logger().info(f'  - {self.topic_prefix}/heading')
         self.get_logger().info(f'  - {self.topic_prefix}/speed')
         self.get_logger().info(f'  - {self.topic_prefix}/spin')
+        self.get_logger().info(f'  - {self.topic_prefix}/calibrate_compass')
         self.get_logger().info(f'  - {self.topic_prefix}/matrix')
         self.get_logger().info(f'  - {self.topic_prefix}/stop')
         self.get_logger().info(f'  - {self.topic_prefix}/stabilization')
@@ -259,6 +266,9 @@ class SpheroInstanceTaskController(Node):
         elif topic_name == 'spin':
             self.spin_pub.publish(msg)
             self.get_logger().debug(f'Published spin: {params}')
+        elif topic_name == 'calibrate_compass':
+            self.calibrate_compass_pub.publish(msg)
+            self.get_logger().debug('Published calibrate_compass command')
         elif topic_name == 'matrix':
             self.matrix_pub.publish(msg)
             self.get_logger().debug(f'Published matrix: {params}')
@@ -342,6 +352,13 @@ class SpheroInstanceTaskController(Node):
                 self.get_logger().error('Task missing required field: task_type')
                 return
 
+            if not self._task_targets_me(self.sphero_name, task_data):
+                self.get_logger().debug(
+                    f"single task {task_data['task_type']} not targeted at "
+                    f"{self.sphero_name}; skipping"
+                )
+                return
+
             start_at = self._compute_start_at(
                 task_data.get('now'), task_data.get('start_offset'))
             task = self._build_task(task_data, start_at)
@@ -365,6 +382,41 @@ class SpheroInstanceTaskController(Node):
         except Exception as e:
             self.get_logger().error(f'Error processing task: {e}')
 
+    @staticmethod
+    def _task_targets_me(sphero_name, item):
+        """True if this Sphero should run `item`.
+
+        Omitted/None `targets` -> applies to all units (back-compat).
+        A list -> case-insensitive membership test. Empty list -> nobody.
+        """
+        targets = item.get('targets')
+        if targets is None:
+            return True
+        if not isinstance(targets, list):
+            return True   # malformed -> fail open; caller logs a warning
+        me = str(sphero_name).strip().upper()
+        return any(str(t).strip().upper() == me for t in targets)
+
+    @staticmethod
+    def _bundle_lane_conflict(tasks):
+        """Find the first OWNER-vs-OWNER same-lane conflict in a bundle.
+
+        Modifiers carry an empty lane set: they reserve nothing, run inline, and
+        never conflict, so they are skipped and never counted. Lane disjointness
+        is enforced only among owners. Returns ``(task, conflict_lanes)`` for the
+        first conflicting owner, or ``(None, frozenset())`` when the bundle is
+        valid.
+        """
+        seen_owner_lanes = set()
+        for t in tasks:
+            if not t.lanes:  # modifier: occupies no lane, always allowed
+                continue
+            conflict = seen_owner_lanes & t.lanes
+            if conflict:
+                return t, frozenset(conflict)
+            seen_owner_lanes |= t.lanes
+        return None, frozenset()
+
     def _handle_bundle(self, task_data):
         """Ingest a concurrent `tasks:[...]` bundle.
 
@@ -375,6 +427,27 @@ class SpheroInstanceTaskController(Node):
         items = task_data['tasks']
         if not items:
             self.get_logger().error('Bundle rejected: empty tasks list')
+            return
+
+        # Self-filter BEFORE building tasks and BEFORE the lane-conflict check:
+        # _bundle_lane_conflict scans ALL tasks, so two DRIVE owners aimed at
+        # different Spheros would be falsely rejected as a lane conflict. Only
+        # sub-tasks that target this unit survive (omitted targets -> all units).
+        for item in items:
+            raw_targets = item.get('targets')
+            if raw_targets is not None and not isinstance(raw_targets, list):
+                self.get_logger().warning(
+                    f'Bundle sub-task has malformed targets {raw_targets!r}; '
+                    f'treating as targeting all units'
+                )
+        items = [
+            item for item in items
+            if self._task_targets_me(self.sphero_name, item)
+        ]
+        if not items:
+            self.get_logger().info(
+                f'bundle: no tasks target {self.sphero_name}'
+            )
             return
 
         now = task_data.get('now')
@@ -390,17 +463,15 @@ class SpheroInstanceTaskController(Node):
                 now, bundle_start_offset + item_start_offset)
             tasks.append(self._build_task(item, start_at))
 
-        # Validate lane disjointness: no two sub-tasks may share a lane, and an
-        # exclusive sub-task cannot coexist with any other in one bundle.
-        seen_lanes = set()
-        for t in tasks:
-            if seen_lanes & t.lanes:
-                self.get_logger().error(
-                    f'Bundle rejected: lane conflict on {sorted(seen_lanes & t.lanes)} '
-                    f'(sub-task {t.task_id} / {t.task_type})'
-                )
-                return
-            seen_lanes |= t.lanes
+        # Validate owner lane disjointness (only OWNER-vs-OWNER same-lane is a
+        # conflict; modifiers carry an empty lane set and never conflict).
+        conflict_task, conflict_lanes = self._bundle_lane_conflict(tasks)
+        if conflict_task is not None:
+            self.get_logger().error(
+                f'Bundle rejected: lane conflict on {sorted(conflict_lanes)} '
+                f'(sub-task {conflict_task.task_id} / {conflict_task.task_type})'
+            )
+            return
 
         for t in tasks:
             self.task_executor.add_task(t)
