@@ -10,6 +10,15 @@ const $$ = (sel) => document.querySelectorAll(sel);
 // names rendered into markup). Mirrors the local `safe` in unitTile.
 const safeHtml = (str) => String(str).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 
+// Known Sphero roster shown as selectable checkboxes in the DEPLOY modal.
+// Edit this list to change which callsigns the picker offers. Names use the
+// SB-XXXX form the deploy endpoint (/api/spheros/batch) expects.
+const KNOWN_SPHEROS = [
+    'SB-3AAC', 'SB-BBBE', 'SB-1F69', 'SB-3660',
+    'SB-E531', 'SB-1FA8', 'SB-5B47', 'SB-418F',
+    'SB-DADB', 'SB-AAAD', 'SB-33E3', 'SB-E12C',
+];
+
 // Per-type default parameters for the BROADCAST composer. Mirrors the
 // per-instance forms' defaults; types absent here default to {} (operator
 // fills the JSON manually).
@@ -192,6 +201,7 @@ class ControlStation {
 
     bindActions() {
         $('#addSpheroBtn').addEventListener('click', () => {
+            this.renderRoster();
             this.openModal('addSpheroModal', 'spheroNamesInput');
             this.refreshUwbTags();
             this.updateBatchSummary();
@@ -211,8 +221,8 @@ class ControlStation {
         const cancelAdd = $('#cancelBtn');
         const namesInput = $('#spheroNamesInput');
         confirmAdd.addEventListener('click', () => {
-            const names = this.parseCallsigns(namesInput.value);
-            if (!names.length) { this.toast('Enter at least one callsign.', 'error', 'DEPLOY'); return; }
+            const names = this.collectDeployNames();
+            if (!names.length) { this.toast('Select or enter at least one callsign.', 'error', 'DEPLOY'); return; }
             this.deploySpheros(names);
         });
         cancelAdd.addEventListener('click', () => this.closeModal('addSpheroModal'));
@@ -317,7 +327,7 @@ class ControlStation {
         if (!prev || !prev.length) return;
         const wasRunning = new Map(prev.map((s) => [s.name, s.status === 'running']));
         next.forEach((s) => {
-            if (wasRunning.get(s.name) && s.status !== 'running' && s.status !== 'starting') {
+            if (wasRunning.get(s.name) && s.status !== 'running' && s.status !== 'starting' && s.status !== 'connecting') {
                 this.toast(`Unit ${s.name} link lost (${(s.status || 'down').toUpperCase()})`, 'error', 'LINK');
             }
         });
@@ -336,10 +346,50 @@ class ControlStation {
         return out;
     }
 
+    // Build the known-Sphero checkbox grid. Units already deployed are marked
+    // and disabled so the picker can't re-queue them. Toggling refreshes the
+    // batch summary count.
+    renderRoster() {
+        const grid = $('#rosterGrid');
+        if (!grid) return;
+        const deployed = new Set(this.spheros.map((s) => s.name));
+        grid.innerHTML = KNOWN_SPHEROS.map((name) => {
+            const isOn = deployed.has(name);
+            const cls = `roster__item${isOn ? ' roster__item--on' : ''}`;
+            const dis = isOn ? ' checked disabled' : '';
+            return `<label class="${cls}">`
+                + `<input type="checkbox" value="${safeHtml(name)}"${dis}>`
+                + `<span>${safeHtml(name)}</span></label>`;
+        }).join('');
+        grid.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+            cb.addEventListener('change', () => {
+                cb.closest('.roster__item').classList.toggle('roster__item--on', cb.checked);
+                this.updateBatchSummary();
+            });
+        });
+    }
+
+    // Names ticked in the roster (excluding disabled/already-deployed).
+    selectedRosterNames() {
+        return [...$$('#rosterGrid input[type="checkbox"]:checked:not(:disabled)')]
+            .map((cb) => cb.value);
+    }
+
+    // Union of roster selections and manual textarea entries, de-duped.
+    collectDeployNames() {
+        const seen = new Set();
+        const out = [];
+        [...this.selectedRosterNames(), ...this.parseCallsigns($('#spheroNamesInput').value)]
+            .forEach((name) => {
+                if (name && !seen.has(name)) { seen.add(name); out.push(name); }
+            });
+        return out;
+    }
+
     updateBatchSummary() {
         const el = $('#batchSummary');
         if (!el) return;
-        const n = this.parseCallsigns($('#spheroNamesInput').value).length;
+        const n = this.collectDeployNames().length;
         const free = this.uwbTags.free.length;
         el.textContent = `${n} callsign${n === 1 ? '' : 's'} · ${free} tag${free === 1 ? '' : 's'} free`;
     }
@@ -371,6 +421,9 @@ class ControlStation {
             } else {
                 const failed = (data.results || []).filter((x) => !x.success).map((x) => x.name);
                 $('#spheroNamesInput').value = failed.join('\n');
+                // Re-render roster so just-deployed units disable and ticks
+                // reset; failed names now live solely in the textarea.
+                this.renderRoster();
                 this.updateBatchSummary();
             }
         } catch (err) {
@@ -792,7 +845,7 @@ class ControlStation {
     unitTile(s, i) {
         const state = (s.status || 'stopped').toLowerCase();
         const stateLabel = state.toUpperCase();
-        const dotState = state === 'running' ? 'online' : (state === 'starting' ? 'starting' : 'error');
+        const dotState = state === 'running' ? 'online' : ((state === 'starting' || state === 'connecting') ? 'starting' : 'error');
         const uptime = this.formatAge(s.added_at);
         const safe = (str) => String(str).replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
         const delay = (i * 60).toString();

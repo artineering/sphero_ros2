@@ -26,6 +26,7 @@ from ament_index_python.packages import get_package_share_directory
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import String
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 from geometry_msgs.msg import Point, PoseStamped
 from sphero_instance_controller.msg import SpheroSensor
@@ -59,6 +60,22 @@ AGENT_TIMEOUT = (3, 5)
 # Liveness cache TTL (seconds): remote-instance status is derived from a cached
 # per-worker GET /status so per-request listing can't stall on a dead agent.
 AGENT_STATUS_TTL = 2.0
+# Local-instance health cache. Each local instance exposes GET /api/status with
+# real BLE telemetry (controller_ready, connected); we cache it so the /spheros
+# listing can't stall on a slow/unanswering instance. (connect, read) timeout
+# keeps a hung instance from blocking the request.
+INSTANCE_HEALTH_TTL = 2.0
+INSTANCE_HEALTH_TIMEOUT = (2, 3)
+# Grace window (seconds) after spawn during which a local instance with no BLE
+# telemetry yet reads 'connecting' rather than 'failed'. Covers BLE scan +
+# connect + first heartbeat.
+INSTANCE_CONNECT_WINDOW = 45.0
+# Heartbeat freshness (seconds): a Sphero reads 'running' only if FleetNode
+# received telemetry (a /sphero/<name>/status heartbeat or a sensor message)
+# within this window. The device controller's heartbeat timer + sensor stream
+# only fire while the BLE link is live, so a stale last_seen means the link is
+# down -- the real liveness signal, uniform for local AND remote instances.
+HEARTBEAT_FRESH_SEC = 15.0
 
 # Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
 # can never block the others; worker pool capped at the fleet ceiling (16 units /
@@ -211,6 +228,16 @@ class FleetNode(Node):
                 lambda msg, n=name: self._on_localization(n, msg),
                 self._uwb_qos,
             )
+            # Heartbeat: the device controller publishes a /status JSON on a
+            # timer while the BLE link is live. Refreshing last_seen from it
+            # makes connection liveness robust even when sensors aren't streaming
+            # -- and works for remote instances too (topic crosses the graph).
+            status_sub = self.create_subscription(
+                String,
+                f'/sphero/{name_safe}/status',
+                lambda msg, n=name: self._on_heartbeat(n),
+                10,
+            )
             if tag_id:
                 self.tag_assignments_map[tag_id] = name
             if marker_slot >= 0:
@@ -227,6 +254,7 @@ class FleetNode(Node):
                 'tag_id': tag_id,
                 'sensor_sub': sub,
                 'pos_sub': pos_sub,
+                'status_sub': status_sub,
             }
         self._publish_fleet_state()
 
@@ -242,6 +270,8 @@ class FleetNode(Node):
             self.destroy_subscription(entry['sensor_sub'])
             if entry.get('pos_sub') is not None:
                 self.destroy_subscription(entry['pos_sub'])
+            if entry.get('status_sub') is not None:
+                self.destroy_subscription(entry['status_sub'])
             self._publish_fleet_state()
 
     def free_tag_ids(self) -> List[int]:
@@ -289,6 +319,13 @@ class FleetNode(Node):
             entry['last_seen'] = time.time()
             entry['battery'] = int(msg.battery_percentage)
             entry['heading'] = int(msg.yaw)
+
+    def _on_heartbeat(self, name: str):
+        """A /status heartbeat arrived -> the BLE link is live; refresh last_seen."""
+        with self._lock:
+            entry = self.robots.get(name)
+            if entry is not None:
+                entry['last_seen'] = time.time()
 
     def _on_localization(self, name: str, msg: PoseStamped):
         # Active positioning source publishes in cm; convert to meters once.
@@ -366,6 +403,9 @@ class SpheroInstanceManager:
         # Per-worker cached agent /status: name -> {'ts', 'online', 'data'}.
         # Populated lazily by _agent_status_cached(); TTL AGENT_STATUS_TTL.
         self._agent_status_cache: Dict[str, Dict] = {}
+        # Per-local-instance cached /api/status: name -> {'ts', 'data'}.
+        # Populated lazily by _instance_health_cached(); TTL INSTANCE_HEALTH_TTL.
+        self._instance_health_cache: Dict[str, Dict] = {}
 
     def _load_worker_registry(self) -> Optional[WorkerRegistry]:
         """Load config/workers.yaml into a WorkerRegistry, or None if absent."""
@@ -473,6 +513,33 @@ class SpheroInstanceManager:
             self.worker_registry.set_online(worker.name, online)
         return data
 
+    def _instance_health_cached(self, instance: Dict) -> Optional[Dict]:
+        """
+        Cached GET {instance.url}/api/status for a LOCAL instance (TTL
+        INSTANCE_HEALTH_TTL). Returns the instance's status dict (with
+        'controller_ready' and 'connected' BLE telemetry), or None if the
+        instance isn't answering yet / is unreachable. Mirrors the
+        _agent_status_cached TTL+caching pattern so a slow instance can't stall
+        the /spheros listing. Never raises.
+        """
+        name = instance['name']
+        now = time.time()
+        cached = self._instance_health_cache.get(name)
+        if cached is not None and (now - cached['ts']) < INSTANCE_HEALTH_TTL:
+            return cached['data']
+        data: Optional[Dict] = None
+        try:
+            resp = requests.get(
+                f"{instance['url']}/api/status",
+                timeout=INSTANCE_HEALTH_TIMEOUT,
+            )
+            if resp.status_code // 100 == 2:
+                data = resp.json()
+        except (requests.RequestException, ValueError):
+            data = None
+        self._instance_health_cache[name] = {'ts': now, 'data': data}
+        return data
+
     def add_sphero(self, sphero_name: str, tag_id: int) -> Dict:
         """
         Add a new Sphero instance and launch its WebSocket server.
@@ -551,9 +618,12 @@ class SpheroInstanceManager:
             # Wait a bit for server to start
             time.sleep(2)
 
-            # Check if process is still running
+            # Check if process is still running. The shell being alive only
+            # means the websocket server launched -- the BLE link comes later,
+            # so seed 'connecting'. _instance_status() promotes to 'running'
+            # once /api/status reports a live BLE connection.
             if process.poll() is None:
-                instance_info['status'] = 'running'
+                instance_info['status'] = 'connecting'
                 print(f"✓ {sphero_name} added successfully on port {port} (tag {tag_id})")
                 instance_info['tag_id'] = tag_id
                 # Allocate a marker pool slot alongside the UWB tag_id so the
@@ -1091,32 +1161,56 @@ class SpheroInstanceManager:
 
     def _instance_status(self, instance: Dict) -> str:
         """
-        Liveness for one instance. Local: subprocess poll. Remote: cached agent
-        /status (so a dead Pi can't stall the listing). Remote status is
-        'running' only when the agent is reachable AND reports this Sphero.
-        """
-        worker_name = instance.get('worker')
-        if worker_name is None:
-            return 'running' if instance['process'].poll() is None else 'stopped'
+        Liveness for one instance, derived from HEARTBEAT freshness.
 
-        worker = (self.worker_registry.get(worker_name)
-                  if self.worker_registry is not None else None)
-        if worker is None:
-            return 'unknown'
-        data = self._agent_status_cached(worker)
-        if data is None:
-            return 'unreachable'
-        # Agent /status is expected to list its live spheros under 'spheros'
-        # (list of names or list of dicts with 'name'). Be tolerant of shape.
-        names = set()
-        for item in (data.get('spheros') or []):
-            if isinstance(item, dict):
-                names.add(item.get('name'))
-            else:
-                names.add(item)
-        if names and instance['name'] not in names:
-            return 'stopped'
-        return 'running'
+        "Connected" truth = whether FleetNode received telemetry (a
+        /sphero/<name>/status heartbeat or a sensor message) recently -- those
+        only flow while the BLE link is live. This is uniform for local and
+        remote (worker-agent) instances: a spawned-but-not-BLE-connected unit
+        emits no heartbeat, so it never reads 'running'. The process/agent
+        signals are used only to tell a still-coming-up unit
+        ('connecting'/'unreachable'/'stopped') from a dead one ('failed').
+        """
+        name = instance['name']
+        worker_name = instance.get('worker')
+        now = time.time()
+
+        # Local: a dead subprocess is definitively failed (no BLE link possible).
+        if worker_name is None and instance['process'].poll() is not None:
+            return 'failed'
+
+        # Connection truth: heartbeat/telemetry freshness from FleetNode.
+        last_seen = 0.0
+        added_at = instance.get('added_at', now)
+        if self.fleet_node is not None:
+            entry = self.fleet_node.robots.get(name)
+            if entry is not None:
+                last_seen = entry.get('last_seen', 0.0)
+                added_at = entry.get('added_at', added_at)
+        if last_seen > 0.0 and (now - last_seen) <= HEARTBEAT_FRESH_SEC:
+            return 'running'
+
+        # No recent heartbeat -> not (yet) connected. Surface remote agent
+        # problems if any.
+        if worker_name is not None:
+            worker = (self.worker_registry.get(worker_name)
+                      if self.worker_registry is not None else None)
+            if worker is None:
+                return 'unknown'
+            data = self._agent_status_cached(worker)
+            if data is None:
+                return 'unreachable'
+            names = set()
+            for item in (data.get('spheros') or []):
+                names.add(item.get('name') if isinstance(item, dict) else item)
+            if names and name not in names:
+                return 'stopped'
+
+        # Up at the process/agent level but no live BLE telemetry yet: still
+        # connecting inside the grace window, otherwise the link is down.
+        if (now - added_at) <= INSTANCE_CONNECT_WINDOW:
+            return 'connecting'
+        return 'failed'
 
     def workers_snapshot(self) -> Dict:
         """

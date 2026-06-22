@@ -305,6 +305,9 @@
                 <button class="modal__close close" aria-label="Close">×</button>
             </div>
             <div class="modal__body">
+                <label class="field__label">[ ROSTER ]</label>
+                <div id="rosterGrid" class="roster" role="group" aria-label="Known Spheros"></div>
+                <p class="field__hint">Tick known units to queue them, or type custom callsigns below. Both feed the same deploy.</p>
                 <label for="spheroNamesInput" class="field__label">[ CALLSIGNS ]</label>
                 <textarea id="spheroNamesInput" class="field" rows="6" autocomplete="off" spellcheck="false" placeholder="SB-3660&#10;SB-58EF"></textarea>
                 <p class="field__hint">One callsign per line (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). UWB tags (1–16) and channels are auto-assigned to free slots.</p>
