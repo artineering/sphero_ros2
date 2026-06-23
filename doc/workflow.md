@@ -25,33 +25,32 @@ target**, not a description of current behavior.
 
 ## Mental model: Session vs. Trial
 
-The workflow is **not** a single linear sequence. Because the work is *repeated
-trials with data capture*, it is a short, fast **loop** nested inside a one-time
-**setup**.
+The workflow is **not** a single linear sequence. It splits into two macro-phases:
 
-- **Session** — set up **once** per lab visit: localization online, fleet deployed
-  and connected. Stable across many trials. Once it is green, it should *fade into
-  the background*.
-- **Trial** — the unit you **repeat**: configure behavior → arm → run → capture →
-  reset. This is the loop we want tight enough to run dozens of times in an
-  afternoon.
+- **Sphero Management Phase** — set up **once** per session: hardware up, software
+  up, fleet deployed, tracking configured and publishing. Stable across many trials.
+  Once it is green, it should *fade into the background*.
+- **Experiment Phase (Trial Loop)** — the unit you **repeat**: configure behavior →
+  arm → run → capture → reset. This is the loop we want tight enough to run dozens
+  of times in an afternoon.
 
-Streamlining the dashboard = making Session state recede once healthy, and making
-the Trial loop a gated, low-friction cycle.
+Streamlining the dashboard = making management state recede once healthy, and making
+the trial loop a gated, low-friction cycle.
 
 ```mermaid
 flowchart TD
-    Start([Operator opens<br/>Control Station]) --> S0
-    subgraph SESSION["SESSION SETUP — once per lab visit"]
-        S0[S0 · System online<br/>coordinator + dashboard up] --> S1
-        S1[S1 · Localization up<br/>source · anchors · calibrate] --> S2
-        S2[S2 · Deploy fleet<br/>add callsigns · BLE connect] --> S3
+    Start([Researcher begins]) --> A1
+    subgraph MGMT["SPHERO MANAGEMENT PHASE — once per session"]
+        A1[1 · Initialize Hardware<br/>start Raspberry Pi cluster] --> A2
+        A2[2 · Initialize Software<br/>login · cd sphero_ros2 ·<br/>source env · launch webapp] --> A3
+        A3[3 · Deployment<br/>deploy all spheros · wait for init] --> A4
+        A4[4 · Configure Tracking<br/>calibrate · capture · link · publish]
     end
-    S3{S3 · Ready check<br/>all robots green?}
-    S3 -->|no| Fix[Resolve: reconnect,<br/>swap battery, recalibrate]
-    Fix --> S3
-    S3 -->|yes| T1
-    subgraph TRIAL["TRIAL LOOP — repeat per trial"]
+    A4 --> Ready{All spheros tracked<br/>and healthy?}
+    Ready -->|no| Fix[Resolve: reconnect,<br/>recapture track, recalibrate]
+    Fix --> Ready
+    Ready -->|yes| T1
+    subgraph TRIAL["EXPERIMENT PHASE · TRIAL LOOP — repeat per trial"]
         T1[T1 · Configure trial<br/>task bundle / FSM · label] --> T2
         T2{T2 · Arm<br/>pre-flight green?}
         T2 -->|no| T1
@@ -62,86 +61,112 @@ flowchart TD
     end
     T5 -->|next trial| T1
     T5 -->|done| TD
-    TD[Teardown<br/>detach fleet · stop localization]
+    TD[Teardown<br/>detach fleet · stop tracking]
     TD --> End([Session complete])
 ```
 
 ---
 
-## Session setup (do once)
+## Sphero Management Phase (do once per session)
 
-### S0 · System online
+This is the researcher's real setup sequence. It ends when every sphero is deployed,
+tracked, and publishing a position — the system is then ready for trials.
 
-Bring the control station up and confirm the operator is talking to a live backend.
+### 1 · Initialize Hardware
 
-- **Operator actions:** launch the coordinator stack; open the dashboard.
-- **Information to surface:** backend link state (NOMINAL / NO LINK); active
-  positioning source on boot; whether Foxglove bridge is up.
-- **Gate to advance:** dashboard shows a live link to the coordinator.
-- **Backend mapping:** coordinator Flask app + `FleetNode` (port 5000); link state
-  is inferred from the status poll succeeding.
-- **Current gap:** several pieces (Foxglove bridge, sometimes the whole stack) are
-  started from the CLI / launch files rather than from one operator action. The
-  "uptime" chip is a cosmetic browser timer, not backend uptime.
+Bring the physical compute platform up.
 
-### S1 · Localization up
+- **Operator actions:** start the Raspberry Pi cluster (coordinator + worker Pis).
+- **Information to surface:** which cluster nodes are powered and reachable; cluster
+  online count.
+- **Gate to advance:** all intended cluster nodes reachable.
+- **Backend mapping:** distributed mode runs a worker agent per Pi; the coordinator
+  selects workers via the worker registry (`config/workers.yaml`).
+- **Current gap:** this happens entirely outside the dashboard (physical / network).
+  The dashboard has **no cluster-health view**, so "is the cluster up?" is answered
+  off-screen today.
 
-Choose and start the position source the trials will use, and confirm it is
-actually producing positions.
+### 2 · Initialize Software
 
-- **Operator actions:** pick source (NONE / ARUCO / MATRIX / UWB); for UWB, enter
-  and **save the 4 anchor coordinates** (cm) before starting; set camera id for
-  ArUco/Matrix; start the source.
-- **Information to surface:** source state (running?); ArUco `calibrated` flag (all
-  4 field corners seen); UWB anchors configured? live or fake mode?; **field-ready:
-  yes/no**.
-- **Gate to advance:** the source is not merely "started" but **emitting positions**
-  on `/localization/<robot>/position`.
-- **Backend mapping:** single-active-publisher rule — selecting a source stops the
-  others. ArUco auto-calibrates when all 4 corners are visible; UWB requires manual
-  anchors first and does not auto-start.
-- **Current gap:** the UI shows "started" but not "actually localizing." Anchor edits
-  do **not** apply to a running UWB node — positioning must be restarted, and the UI
-  only says so in a transient toast. Standalone START/STOP ARUCO/UWB buttons overlap
-  confusingly with the source selector (and there is no MATRIX start/stop button).
+Get the control station process running and reachable.
 
-### S2 · Deploy fleet
+- **Operator actions:** log in to the Pi cluster (SSH); `cd` to `sphero_ros2`; source
+  the ROS 2 + workspace environment; launch `multirobot_webapp`.
+- **Information to surface:** webapp up (port 5000 reachable, link NOMINAL); worker
+  agents registered/checked in; default positioning source; Foxglove bridge up.
+- **Gate to advance:** dashboard loads and shows a live link to the coordinator.
+- **Backend mapping:** Flask app + `FleetNode` on port 5000; reads `workers.yaml`
+  for distributed spawn; Foxglove bridge self-starts.
+- **Current gap:** multi-step CLI with no single launch command, and no readiness
+  summary confirming all workers checked in. The "uptime" chip is a cosmetic browser
+  timer, not backend uptime.
 
-Add the robots for this session and get them connected over BLE.
+### 3 · Deployment
 
-- **Operator actions:** enter callsigns (one per line, e.g. `SB-3660`); deploy the
-  batch. Tags/ports are auto-assigned.
-- **Information to surface, per robot:** connection state (STARTING / RUNNING /
-  STOPPED); **battery %**; assigned tag_id. Failed callsigns called out explicitly.
-- **Gate to advance:** every intended robot is `running` and BLE-connected.
+Add every sphero and wait for it to come up.
+
+- **Operator actions:** enter all callsigns (one per line, e.g. `SB-3660`); deploy
+  the batch; **wait for each to initialize**. Tags/ports auto-assigned.
+- **Information to surface, per robot:** connection state (STARTING → RUNNING);
+  **battery %**; assigned tag_id; failed callsigns called out explicitly.
+- **Gate to advance:** every deployed robot is `running` and BLE-connected.
 - **Backend mapping:** batch deploy spawns a 4-process tree per robot (device, task,
-  state-machine controllers + per-robot websocket server) and registers it with
-  `FleetNode`.
-- **Current gap:** **battery is collected but never shown on the dashboard** — a
-  low robot is invisible until it dies mid-trial. Device errors (`ble_lost`,
+  state-machine controllers + per-robot websocket server), locally or via a worker
+  agent, and registers it with `FleetNode`.
+- **Current gap:** **battery is collected but never shown on the dashboard** — a low
+  robot is invisible until it dies mid-trial. Device errors (`ble_lost`,
   `connect_failed`) reach only that robot's own console tab, not the coordinator, so
-  a drop shows up centrally as a vague "link lost" at best.
+  a drop shows up centrally as a vague "link lost" at best. "Wait for init" has no
+  explicit per-robot ready signal beyond the polled status.
 
-### S3 · Ready check — the gate into the trial loop
+### 4 · Configure Tracking
 
-The bridge from Setup to repeatable trials. Once green, the operator stops thinking
-about Setup.
+Calibrate the field, then for each sphero capture a track, bind that track to the
+sphero's identity, and begin publishing its position. This is the step that turns a
+pile of connected robots into a *localized fleet*.
 
-- **Operator actions:** review the readiness board; resolve anything not green
-  (reconnect, swap battery, recalibrate field) and re-check.
-- **Information to surface, per robot, all green:** has a **fresh position**
-  (`last_seen` recent); **battery above threshold**; localization confidence OK;
-  controller healthy.
-- **Gate to advance:** all deployed robots pass; field is calibrated.
-- **Backend mapping:** data exists in `FleetState` (pose, battery, heading, tag_id,
-  last_seen) but is published only to ROS2/Foxglove today.
-- **Current gap:** **this gate does not exist.** Nothing prevents starting a run
-  before robots are localized or charged. There is no unified position-confidence
-  value (UWB computes covariance but discards it).
+```mermaid
+flowchart LR
+    C1[Calibrate field<br/>4 corner markers] --> C2
+    C2[Capture initial track<br/>per sphero] --> C3
+    C3[Link track to sphero<br/>identity association] --> C4
+    C4[Start publishing<br/>tracking per sphero]
+    C4 --> Check{Every sphero<br/>publishing a<br/>fresh position?}
+    Check -->|no| C2
+    Check -->|yes| Done([Tracking online])
+```
+
+- **4a · Calibrate field** — establish the field-frame coordinate system.
+  - *Info:* calibration status (calibrated yes/no), all 4 corner markers seen,
+    field dimensions.
+- **4b · Capture initial track per sphero** — the camera detects candidate tracks;
+  the operator captures one as the starting track for a given sphero.
+  - *Info:* detected/candidate tracks, which are still unassigned, the captured
+    track's position.
+- **4c · Link track to sphero** — bind each captured track to a sphero callsign
+  (identity association).
+  - *Info:* the track ↔ callsign mapping, any tracks or robots still unlinked.
+- **4d · Start publishing tracking per sphero** — begin emitting each sphero's
+  position on `/localization/<robot>/position`.
+  - *Info:* per-robot position now live, `last_seen` fresh, confidence OK.
+- **Gate to advance (into the trial loop):** every sphero has a linked track that is
+  publishing a fresh position; field is calibrated.
+- **Backend mapping:** camera-based source (ArUco / MATRIX) publishing the shared
+  `/localization/<robot>/position` contract (cm, `field` frame); marker/track pool
+  via `/api/markers`. `FleetState` aggregates pose/heading/last_seen.
+- **Current gap / open question:** the explicit **capture → link → publish** per-robot
+  association is not exposed as distinct steps in the dashboard today. ArUco uses
+  fixed marker IDs (10–13) where identity is baked into the marker — no manual link.
+  A capture-and-link flow implies a different tracking mechanism (e.g. MATRIX / track
+  identity assignment). **See open decision #5 — the exact tracking mechanism and how
+  linking works need confirmation before this phase can be designed precisely.**
+
+> **End of the Sphero Management Phase.** The fleet is deployed, tracked, and
+> localized — the system is ready to run trials.
 
 ---
 
-## Trial loop (repeat per trial)
+## Experiment Phase — Trial loop (repeat per trial)
 
 ```mermaid
 stateDiagram-v2
@@ -230,12 +255,12 @@ Return the fleet to a known starting condition for the next trial.
 
 ## Teardown
 
-- **Operator actions:** detach the fleet; stop localization; (optionally) stop the
-  stack.
-- **Information to surface:** all robots detached; sources stopped; where the
+- **Operator actions:** detach the fleet; stop tracking; (optionally) stop the
+  stack and shut down the cluster.
+- **Information to surface:** all robots detached; tracking stopped; where the
   session's trial data lives.
 - **Backend mapping:** batch detach tears down each robot's process tree;
-  positioning source stop.
+  positioning/tracking source stop.
 
 ---
 
@@ -283,6 +308,12 @@ These shape the design and are not yet settled:
    parts of S2/S3 into the loop)?
 4. **Live view scope.** Minimum viable run monitor: position map only, or
    map + per-robot status + battery + errors in one view?
+5. **Tracking mechanism & linking (Phase 4).** How does *capture → link → publish*
+   actually work? ArUco today bakes identity into fixed marker IDs (10–13) with no
+   manual link, so the capture-and-link flow implies a different mechanism (MATRIX /
+   manual track-identity assignment). Need: what the camera detects as a "track,"
+   how the operator captures and binds it to a callsign, and what "start publishing"
+   toggles. This determines the entire Phase 4 design.
 
 ---
 
