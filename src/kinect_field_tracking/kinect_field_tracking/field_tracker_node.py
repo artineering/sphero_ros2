@@ -974,7 +974,7 @@ class FieldTrackerNode(Node):
             self.get_logger().warning(f"{name}: pre RGB grab failed: {e}")
             pre_rgb = None
         self._light_probe(name)
-        result, post_rgb, lit_blobs = self._wait_until_lit_overlap(projected, pre_rgb)
+        result, post_rgb, lit_blobs = self._wait_until_lit_overlap(name, projected, pre_rgb)
         ok = result['matched']
         if ok:
             m = meas[int(result['depth_index'])]
@@ -992,7 +992,7 @@ class FieldTrackerNode(Node):
 
         # 6. reset + confirm off (no lit blob overlaps any depth blob)
         self._reset_leds(name)
-        if not self._wait_until_off_overlap(projected, pre_rgb):
+        if not self._wait_until_off_overlap(name, projected, pre_rgb):
             self.get_logger().warning(f"{name}: still lit after reset (timeout)")
         return ok
 
@@ -1016,8 +1016,12 @@ class FieldTrackerNode(Node):
             min_area=self._probe_min_area_px)
         return blobs
 
-    def _wait_until_lit_overlap(self, projected, pre_rgb):
+    def _wait_until_lit_overlap(self, name, projected, pre_rgb):
         """Poll RGB until a newly-bright blob overlaps a depth blob, or timeout.
+
+        Re-asserts the probe colour every poll: a deployed Sphero's other LED
+        writers (websocket/task) can stomp the probe green ~1s after we set it, so
+        re-sending it each iteration keeps it lit through the capture window.
 
         Returns (match_result, last_post_rgb, last_lit_blobs).
         """
@@ -1026,16 +1030,23 @@ class FieldTrackerNode(Node):
         lit = self._detect_lit(post, pre_rgb)
         result = match_lit_depth_blob(projected, lit, self._overlap_tol_px)
         while not result['matched'] and time.monotonic() < deadline:
+            self._light_probe(name)        # re-assert green against competing LED writers
             time.sleep(self._probe_poll)
             post = self._grab_rgb()
             lit = self._detect_lit(post, pre_rgb)
             result = match_lit_depth_blob(projected, lit, self._overlap_tol_px)
         return result, post, lit
 
-    def _wait_until_off_overlap(self, projected, pre_rgb):
-        """Poll RGB until NO newly-bright blob overlaps a depth blob, or timeout."""
+    def _wait_until_off_overlap(self, name, projected, pre_rgb):
+        """Re-assert OFF and poll until NO bright blob overlaps a depth blob.
+
+        Symmetric to the re-light in _wait_until_lit_overlap: we re-send the reset
+        each poll because a single off command can be dropped (BLE), which would
+        leave this Sphero lit and let greens accumulate across the serial probe.
+        """
         deadline = time.monotonic() + self._off_timeout
         while time.monotonic() < deadline:
+            self._reset_leds(name)         # re-assert off against BLE drops
             lit = self._detect_lit(self._grab_rgb(), pre_rgb)
             if not match_lit_depth_blob(projected, lit, self._overlap_tol_px)['matched']:
                 return True

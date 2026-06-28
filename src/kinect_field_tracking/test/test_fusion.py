@@ -6,7 +6,7 @@ from kinect_field_tracking.fusion import (
     FusionKF,
     FusionParams,
     rotate_body_to_field,
-    PX, VX, VY, YAW,
+    PX, VX, VY, YAW, AX, AY,
 )
 
 
@@ -23,6 +23,38 @@ def test_predict_only_dead_reckons_and_grows_covariance():
     assert abs(kf.pos_cm[0] - 10.0) < 1e-9
     # covariance grew (uncertainty increases without measurement)
     assert kf.P[PX, PX] > p_before
+
+
+def test_accel_does_not_drive_motion_constant_velocity():
+    # Constant-velocity model: accel is a passive measured state and must NOT
+    # move position or velocity (prevents gravity/bias double-integration runaway).
+    kf = _kf()
+    kf.x[AX] = 500.0   # large field-frame accel state
+    kf.x[AY] = -300.0
+    kf.predict(1.0)
+    assert abs(kf.pos_cm[0]) < 1e-9 and abs(kf.pos_cm[1]) < 1e-9
+    assert abs(kf.x[VX]) < 1e-9 and abs(kf.x[VY]) < 1e-9
+    # velocity still integrates to position (constant-velocity term kept)
+    kf.x[VX] = 7.0
+    kf.predict(1.0)
+    assert abs(kf.pos_cm[0] - 7.0) < 1e-9
+
+
+def test_no_runaway_with_large_accel_and_camera_pinning():
+    # Regression for the "racing around" bug: a large constant telemetry accel
+    # (gravity/bias leak) with zero velocity and repeated camera updates at a
+    # fixed point must keep the estimate near that point -- no quadratic runaway.
+    cx, cy = 50.0, 30.0
+    kf = FusionKF(cx, cy, FusionParams())
+    for _ in range(300):
+        kf.predict(0.1)
+        kf.update_camera(cx, cy)
+        kf.update_orientation(0.0, 0.0, 0.0)
+        kf.update_velocity_body(0.0, 0.0)       # Sphero stationary
+        kf.update_accel_body_g(0.9, 0.5, 1.0)   # large leaked accel (g)
+        kf.update_gyro(0.0, 0.0, 0.0)
+    x, y = kf.pos_cm
+    assert abs(x - cx) < 5.0 and abs(y - cy) < 5.0
 
 
 def test_camera_update_reduces_position_covariance():

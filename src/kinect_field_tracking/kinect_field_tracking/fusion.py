@@ -83,13 +83,17 @@ class FusionKF:
 
     # ---------------------------------------------------------------- predict
     def _F(self, dt):
+        # Constant-VELOCITY model. The accelerometer is NOT integrated into
+        # velocity/position: the Sphero accel is body-frame and gets only a yaw
+        # rotation (no pitch/roll), so gravity (~1g) + bias leak into the
+        # field-plane accel; double-integrating it caused a quadratic runaway that
+        # drifted past the association gate. ax/ay/az remain passive measured
+        # states (updated by telemetry) but no longer drive motion. Position
+        # integrates VELOCITY only and is pinned by the per-frame camera update;
+        # yaw still integrates gyro (gz).
         F = np.eye(NSTATE)
         F[PX, VX] = dt
-        F[PX, AX] = 0.5 * dt * dt
         F[PY, VY] = dt
-        F[PY, AY] = 0.5 * dt * dt
-        F[VX, AX] = dt
-        F[VY, AY] = dt
         F[YAW, GZ] = dt
         return F
 

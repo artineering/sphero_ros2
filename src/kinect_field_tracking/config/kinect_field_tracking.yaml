@@ -37,7 +37,7 @@ field_tracker_node:
     # ONLY, to collapse depth-subtraction speckle into clean blobs. Blob z/position
     # is still taken from RAW depth. <=1 disables. The fixed heightmap is blurred
     # once (cached); live is blurred per frame.
-    smooth_ksize: 25
+    smooth_ksize: 35
     sphere_radius_mm: 36.5
     gate_cm: 22.0
 
