@@ -34,9 +34,6 @@ from multirobot_msgs.msg import FleetRobot, FleetState
 
 from multirobot_webserver.worker_registry import WorkerRegistry
 
-# UWB tag pool: 16 tags, ids 1-16.
-UWB_TAG_IDS = list(range(1, 17))
-
 # Marker pool: 16 LED-matrix markers (8 hues x {filled, ring}). Allocation
 # order per the Interface Contract: filled across all 8 hues first (slots 0-7),
 # then ring across all 8 hues (slots 8-15). Maximizes hue diversity for small
@@ -46,13 +43,6 @@ MARKER_HUE_ORDER = [
 ]
 MARKER_FILLS = ['filled', 'ring']
 MARKER_POOL = [(hue, fill) for fill in MARKER_FILLS for hue in MARKER_HUE_ORDER]
-
-# Positioning sources that publish the shared /localization/<name>/position
-# contract. Exactly one may be active at a time (single-active-publisher rule).
-POSITIONING_SOURCES = ('aruco', 'matrix', 'uwb')
-# Selectable sources including 'none' (no localization running / camera free).
-# 'none' is ordered first since it is the default.
-ALL_SOURCES = ('none',) + POSITIONING_SOURCES
 
 # Worker launcher-agent HTTP client tuning. (connect, read) seconds — every
 # agent call MUST pass this so a dead/slow Pi can never hang the webserver.
@@ -79,7 +69,7 @@ HEARTBEAT_FRESH_SEC = 15.0
 
 # Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
 # can never block the others; worker pool capped at the fleet ceiling (16 units /
-# UWB tags). Fan-out is parallel, so worst-case wall time is one read timeout.
+# channel tags). Fan-out is parallel, so worst-case wall time is one read timeout.
 BROADCAST_POST_TIMEOUT = (3, 5)
 BROADCAST_MAX_WORKERS = 16
 
@@ -191,25 +181,21 @@ class FleetNode(Node):
         self.publisher = self.create_publisher(FleetState, '/sphero_fleet/robots', latched)
         # QoS for /localization position subscriptions: depth-10 VOLATILE to
         # match the position publishers' default PoseStamped profile.
-        self._uwb_qos = QoSProfile(
+        self._loc_qos = QoSProfile(
             depth=10,
             durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
         )
         # robots[name] = {'name_safe', 'status', 'added_at', 'last_seen',
-        #                 'battery', 'x', 'y', 'heading', 'tag_id',
+        #                 'battery', 'x', 'y', 'heading',
         #                 'sensor_sub', 'pos_sub'}
         self.robots: Dict[str, Dict] = {}
-        # tag_id -> sphero name (live assignments)
-        self.tag_assignments_map: Dict[int, str] = {}
         # sphero name -> marker slot index (live assignments)
         self.marker_assignments_map: Dict[str, int] = {}
-        self.aruco_slam_running = False
         self._lock = threading.Lock()
         self.timer = self.create_timer(1.0, self._publish_fleet_state)
 
-    def add_robot(self, name: str, name_safe: str, tag_id: int = 0,
-                  marker_slot: int = -1):
+    def add_robot(self, name: str, name_safe: str, marker_slot: int = -1):
         with self._lock:
             if name in self.robots:
                 return
@@ -219,14 +205,14 @@ class FleetNode(Node):
                 lambda msg, n=name: self._on_sensor(n, msg),
                 10,
             )
-            # Shared localization position contract: subscribe by name, not
-            # tag_id. Receives pose from whichever source is the active
-            # publisher (aruco/matrix/uwb) — source-agnostic.
+            # Shared localization position contract: subscribe by name_safe.
+            # Receives pose from the active localization publisher (the overhead
+            # Kinect) — source-agnostic.
             pos_sub = self.create_subscription(
                 PoseStamped,
                 f'/localization/{name_safe}/position',
                 lambda msg, n=name: self._on_localization(n, msg),
-                self._uwb_qos,
+                self._loc_qos,
             )
             # Heartbeat: the device controller publishes a /status JSON on a
             # timer while the BLE link is live. Refreshing last_seen from it
@@ -238,8 +224,6 @@ class FleetNode(Node):
                 lambda msg, n=name: self._on_heartbeat(n),
                 10,
             )
-            if tag_id:
-                self.tag_assignments_map[tag_id] = name
             if marker_slot >= 0:
                 self.marker_assignments_map[name] = marker_slot
             self.robots[name] = {
@@ -251,7 +235,6 @@ class FleetNode(Node):
                 'x': 0.0,
                 'y': 0.0,
                 'heading': 0,
-                'tag_id': tag_id,
                 'sensor_sub': sub,
                 'pos_sub': pos_sub,
                 'status_sub': status_sub,
@@ -262,9 +245,6 @@ class FleetNode(Node):
         with self._lock:
             entry = self.robots.pop(name, None)
             if entry is not None:
-                tag_id = entry.get('tag_id', 0)
-                if tag_id and self.tag_assignments_map.get(tag_id) == name:
-                    del self.tag_assignments_map[tag_id]
                 self.marker_assignments_map.pop(name, None)
         if entry is not None:
             self.destroy_subscription(entry['sensor_sub'])
@@ -273,17 +253,6 @@ class FleetNode(Node):
             if entry.get('status_sub') is not None:
                 self.destroy_subscription(entry['status_sub'])
             self._publish_fleet_state()
-
-    def free_tag_ids(self) -> List[int]:
-        """Tag ids (1-16) not currently assigned to a robot."""
-        with self._lock:
-            assigned = set(self.tag_assignments_map.keys())
-        return [tid for tid in UWB_TAG_IDS if tid not in assigned]
-
-    def tag_assignments(self) -> Dict[int, str]:
-        """Snapshot of the live tag_id -> sphero name map."""
-        with self._lock:
-            return dict(self.tag_assignments_map)
 
     def free_marker_slots(self) -> List[int]:
         """Marker pool slot indices (0-15) not currently assigned to a robot."""
@@ -305,9 +274,6 @@ class FleetNode(Node):
         with self._lock:
             if name in self.robots:
                 self.robots[name]['status'] = status
-
-    def set_aruco_slam_running(self, running: bool):
-        self.aruco_slam_running = running
 
     def _on_sensor(self, name: str, msg: SpheroSensor):
         # Pose (x/y) now comes from localization (_on_localization); sensor
@@ -339,7 +305,6 @@ class FleetNode(Node):
     def _publish_fleet_state(self):
         msg = FleetState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.aruco_slam_running = self.aruco_slam_running
         with self._lock:
             for name, entry in self.robots.items():
                 robot = FleetRobot()
@@ -349,7 +314,6 @@ class FleetNode(Node):
                 robot.battery_percentage = entry['battery']
                 robot.pose = Point(x=entry['x'], y=entry['y'], z=0.0)
                 robot.heading = entry['heading']
-                robot.tag_id = entry['tag_id']
                 robot.added_at = entry['added_at']
                 robot.last_seen = entry['last_seen']
                 msg.robots.append(robot)
@@ -373,24 +337,13 @@ class SpheroInstanceManager:
         #     }
         # }
         self.next_port = 5001  # Starting port for WebSocket servers
-        self.aruco_slam_process: Optional[subprocess.Popen] = None
-        self.aruco_slam_enabled = False
-        # Matrix (LED-matrix marker) positioning lifecycle
-        self.matrix_slam_process: Optional[subprocess.Popen] = None
-        self.matrix_camera_id = 0
-        # UWB positioning (BLE node) lifecycle
-        self.uwb_process: Optional[subprocess.Popen] = None
-        self.uwb_fake_mode = False
-        # Flat 8-float list (4 anchors x (x,y) in cm); None until configured.
-        self.anchor_positions_cm: Optional[List[float]] = None
-        self.uwb_tag_ids = list(UWB_TAG_IDS)
-        # Active positioning source — the three real sources share
-        # /localization/<name>/... so only one may publish at a time. 'none'
-        # runs no localization (leaves the camera free). Initial value set via
-        # env POSITIONING_SOURCE (launch-arg/param compatible), default 'none'.
-        initial = os.environ.get('POSITIONING_SOURCE', 'none').lower()
-        self.positioning_source = (
-            initial if initial in ALL_SOURCES else 'none'
+        # External localization (set_external_location on spawned instances) is
+        # on by default: the overhead Kinect (kinect_field_tracking, launched
+        # outside the webserver) publishes /localization/<name>/position for all
+        # units. Override with EXTERNAL_LOCALIZATION=0/false to disable.
+        self.external_localization_enabled = (
+            os.environ.get('EXTERNAL_LOCALIZATION', 'true').lower()
+            not in ('0', 'false', 'no')
         )
 
         # Worker registry for distributed BLE workers (Phase 2). Loaded from
@@ -539,13 +492,12 @@ class SpheroInstanceManager:
         self._instance_health_cache[name] = {'ts': now, 'data': data}
         return data
 
-    def add_sphero(self, sphero_name: str, tag_id: int) -> Dict:
+    def add_sphero(self, sphero_name: str) -> Dict:
         """
         Add a new Sphero instance and launch its WebSocket server.
 
         Args:
             sphero_name: Name of the Sphero (e.g., 'SB-3660')
-            tag_id: UWB tag id (1-16) that drives this Sphero's pose. Required.
 
         Returns:
             Dictionary with instance information
@@ -559,26 +511,11 @@ class SpheroInstanceManager:
                              if k not in ('process', 'relay')}
             }
 
-        # A Sphero requires a valid, free tag id to join.
-        if tag_id not in self.uwb_tag_ids:
-            return {
-                'success': False,
-                'message': f'tag_id {tag_id} out of range (1-16)',
-                'instance': None
-            }
-        if self.fleet_node is not None and tag_id not in self.fleet_node.free_tag_ids():
-            assigned_to = self.fleet_node.tag_assignments().get(tag_id, '?')
-            return {
-                'success': False,
-                'message': f'tag_id {tag_id} already assigned to {assigned_to}',
-                'instance': None
-            }
-
         # Distributed path: when a worker registry is loaded, spawn on the
         # least-loaded remote worker instead of locally. Falls through to the
         # local subprocess path below when no registry is present.
         if self.worker_registry is not None:
-            return self._add_sphero_remote(sphero_name, tag_id)
+            return self._add_sphero_remote(sphero_name)
 
         try:
             # Assign port
@@ -595,8 +532,10 @@ class SpheroInstanceManager:
                 str(port)
             ]
 
-            # Add external_localization parameter if ArUco SLAM is enabled
-            if self.aruco_slam_enabled:
+            # Enable external_localization by default: the overhead Kinect
+            # publishes /localization/<name>/position for all units. Overridable
+            # via the EXTERNAL_LOCALIZATION env flag.
+            if self.external_localization_enabled:
                 cmd.append('true')
                 print(f"   External localization enabled for {sphero_name}")
 
@@ -623,16 +562,14 @@ class SpheroInstanceManager:
             # once /api/status reports a live BLE connection.
             if process.poll() is None:
                 instance_info['status'] = 'connecting'
-                print(f"✓ {sphero_name} added successfully on port {port} (tag {tag_id})")
-                instance_info['tag_id'] = tag_id
-                # Allocate a marker pool slot alongside the UWB tag_id so the
-                # matrix source can address this robot. -1 if pool is full.
+                print(f"✓ {sphero_name} added successfully on port {port}")
+                # Allocate a marker pool slot for this robot. -1 if pool is full.
                 marker_slot = -1
                 if self.fleet_node is not None:
                     marker_slot = self.fleet_node.allocate_marker_slot()
                     self.fleet_node.add_robot(
                         sphero_name, sphero_name.replace('-', '_'),
-                        tag_id, marker_slot,
+                        marker_slot,
                     )
                 instance_info['marker_slot'] = marker_slot
                 return {
@@ -659,7 +596,7 @@ class SpheroInstanceManager:
                 'instance': None
             }
 
-    def _add_sphero_remote(self, sphero_name: str, tag_id: int) -> Dict:
+    def _add_sphero_remote(self, sphero_name: str) -> Dict:
         """
         Spawn `sphero_name` on the least-loaded remote worker via its launcher
         agent. Capacity is accounted only after a confirmed spawn; any failure
@@ -678,11 +615,11 @@ class SpheroInstanceManager:
         self.next_port += 1
 
         print(f"➕ Adding {sphero_name} on worker {worker.name} "
-              f"({worker.base_url}) port {port} tag {tag_id}...")
+              f"({worker.base_url}) port {port}...")
         try:
             payload = self._agent_spawn(
                 worker, sphero_name, port,
-                external_localization=self.aruco_slam_enabled,
+                external_localization=self.external_localization_enabled,
             )
         except RuntimeError as exc:
             print(f"✗ Remote spawn of {sphero_name} on {worker.name} failed: {exc}")
@@ -707,7 +644,7 @@ class SpheroInstanceManager:
                 marker_slot = self.fleet_node.allocate_marker_slot()
                 self.fleet_node.add_robot(
                     sphero_name, sphero_name.replace('-', '_'),
-                    tag_id, marker_slot,
+                    marker_slot,
                 )
             instance_info = {
                 'name': sphero_name,
@@ -717,7 +654,6 @@ class SpheroInstanceManager:
                 'status': 'running',
                 'added_at': time.time(),
                 'url': url,
-                'tag_id': tag_id,
                 'marker_slot': marker_slot,
                 'worker': worker.name,
                 'host': worker.host,
@@ -732,7 +668,7 @@ class SpheroInstanceManager:
             self.instances.pop(sphero_name, None)
             return {'success': False, 'message': f'Error: {exc}', 'instance': None}
 
-        print(f"✓ {sphero_name} added on {worker.name} at {url} (tag {tag_id})")
+        print(f"✓ {sphero_name} added on {worker.name} at {url}")
         return {
             'success': True,
             'message': f'Sphero {sphero_name} added on worker {worker.name}',
@@ -808,31 +744,17 @@ class SpheroInstanceManager:
                 'message': f'Error: {str(e)}'
             }
 
-    def _free_tag_ids(self) -> List[int]:
-        """
-        Authoritative free UWB tag ids (1-16). Delegates to fleet_node when
-        present; otherwise derives from tag_ids already tracked on local
-        instances so the no-fleet_node path still avoids in-batch collisions.
-        """
-        if self.fleet_node is not None:
-            return self.fleet_node.free_tag_ids()
-        used = {inst.get('tag_id') for inst in self.instances.values()}
-        return [tid for tid in self.uwb_tag_ids if tid not in used]
-
     def add_spheros_batch(self, names: List[str]) -> Dict:
         """
-        Deploy several Spheros in one call, auto-assigning the next free UWB
-        tag to each. Tags are recomputed per-iteration so a successful add
-        within this batch removes its tag from the pool before the next name is
-        processed (no intra-batch collision). Per-item results carry the
-        assigned tag/port on success or a failure reason.
+        Deploy several Spheros in one call by callsign. Per-item results carry
+        the assigned port on success or a failure reason.
 
         Args:
             names: Raw callsigns; normalized here (strip, drop blanks, dedupe
                 preserving first-seen order).
 
         Returns: {success, deployed, failed, results:[{name, success,
-                  tag_id?, port?, reason?}]}
+                  port?, reason?}]}
         """
         seen = set()
         ordered: List[str] = []
@@ -850,20 +772,13 @@ class SpheroInstanceManager:
                 results.append({'name': name, 'success': False,
                                 'reason': f'{name} already deployed'})
                 continue
-            free = self._free_tag_ids()
-            if not free:
-                results.append({'name': name, 'success': False,
-                                'reason': 'no free UWB tags'})
-                continue
-            tag_id = free[0]
-            res = self.add_sphero(name, tag_id)
+            res = self.add_sphero(name)
             if res.get('success'):
                 deployed += 1
                 inst = res.get('instance') or {}
                 results.append({
                     'name': name,
                     'success': True,
-                    'tag_id': inst.get('tag_id', tag_id),
                     'port': inst.get('port'),
                 })
             else:
@@ -1249,360 +1164,11 @@ class SpheroInstanceManager:
             'worker': instance.get('worker'),  # None for local instances
         }
 
-    def start_aruco_slam(self, camera_id: int = 0) -> Dict:
-        """
-        Start the ArUco SLAM node for external localization.
-
-        Args:
-            camera_id: Camera ID to use
-
-        Returns:
-            Dictionary with result
-        """
-        if self.aruco_slam_process is not None:
-            return {
-                'success': False,
-                'message': 'ArUco SLAM is already running'
-            }
-
-        try:
-            print(f"Starting ArUco SLAM node with camera {camera_id}...")
-            self.aruco_slam_process = subprocess.Popen([
-                'ros2', 'run', 'aruco_slam', 'aruco_slam_node',
-                '--ros-args', '-p', f'camera_id:={camera_id}'
-            ], stdout=None, stderr=None)
-
-            time.sleep(2)
-
-            if self.aruco_slam_process.poll() is None:
-                self.aruco_slam_enabled = True
-                if self.fleet_node is not None:
-                    self.fleet_node.set_aruco_slam_running(True)
-                print(f"ArUco SLAM node started successfully")
-                return {
-                    'success': True,
-                    'message': f'ArUco SLAM started with camera {camera_id}'
-                }
-            else:
-                self.aruco_slam_process = None
-                print(f"Failed to start ArUco SLAM node")
-                return {
-                    'success': False,
-                    'message': 'ArUco SLAM process died on startup'
-                }
-
-        except Exception as e:
-            print(f"Error starting ArUco SLAM: {e}")
-            return {
-                'success': False,
-                'message': f'Error: {str(e)}'
-            }
-
-    def stop_aruco_slam(self) -> Dict:
-        """
-        Stop the ArUco SLAM node.
-
-        Returns:
-            Dictionary with result
-        """
-        if self.aruco_slam_process is None:
-            return {
-                'success': False,
-                'message': 'ArUco SLAM is not running'
-            }
-
-        try:
-            print("Stopping ArUco SLAM node...")
-            self.aruco_slam_process.terminate()
-
-            try:
-                self.aruco_slam_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print("   ArUco SLAM did not terminate, killing...")
-                self.aruco_slam_process.kill()
-                self.aruco_slam_process.wait()
-
-            self.aruco_slam_process = None
-            self.aruco_slam_enabled = False
-            if self.fleet_node is not None:
-                self.fleet_node.set_aruco_slam_running(False)
-            print("ArUco SLAM node stopped")
-            return {
-                'success': True,
-                'message': 'ArUco SLAM stopped successfully'
-            }
-
-        except Exception as e:
-            print(f"Error stopping ArUco SLAM: {e}")
-            return {
-                'success': False,
-                'message': f'Error: {str(e)}'
-            }
-
-    def is_aruco_slam_running(self) -> bool:
-        """Check if ArUco SLAM is currently running."""
-        if self.aruco_slam_process is None:
-            return False
-        return self.aruco_slam_process.poll() is None
-
-    def _marker_assignments_json(self) -> str:
-        """Build the matrix node's marker_assignments JSON from the live
-        name -> marker-slot map: [{"name", "hue", "fill"}, ...]."""
-        entries = []
-        if self.fleet_node is not None:
-            for name, slot in self.fleet_node.marker_assignments().items():
-                if 0 <= slot < len(MARKER_POOL):
-                    hue, fill = MARKER_POOL[slot]
-                    entries.append({'name': name, 'hue': hue, 'fill': fill})
-        return json.dumps(entries)
-
-    def start_matrix_slam(self, camera_id: int = 0) -> Dict:
-        """
-        Start the matrix-marker SLAM node for external localization.
-
-        Mirrors start_aruco_slam; passes the live marker_assignments JSON
-        (name -> hue/fill) plus camera_id to matrix_slam_node.
-        """
-        if self.matrix_slam_process is not None:
-            return {
-                'success': False,
-                'message': 'Matrix SLAM is already running'
-            }
-
-        try:
-            marker_json = self._marker_assignments_json()
-            print(f"Starting Matrix SLAM node with camera {camera_id}...")
-            self.matrix_slam_process = subprocess.Popen([
-                'ros2', 'run', 'aruco_slam', 'matrix_slam_node',
-                '--ros-args',
-                '-p', f'camera_id:={camera_id}',
-                # Single-quote so ros2's YAML parser treats the JSON as a string
-                # (an unquoted '[]' / '[{...}]' parses as a list, breaking the param).
-                '-p', f"marker_assignments:='{marker_json}'",
-            ], stdout=None, stderr=None)
-
-            time.sleep(2)
-
-            if self.matrix_slam_process.poll() is None:
-                self.aruco_slam_enabled = True
-                self.matrix_camera_id = camera_id
-                if self.fleet_node is not None:
-                    self.fleet_node.set_aruco_slam_running(True)
-                print("Matrix SLAM node started successfully")
-                return {
-                    'success': True,
-                    'message': f'Matrix SLAM started with camera {camera_id}'
-                }
-            else:
-                self.matrix_slam_process = None
-                print("Failed to start Matrix SLAM node")
-                return {
-                    'success': False,
-                    'message': 'Matrix SLAM process died on startup'
-                }
-
-        except Exception as e:
-            print(f"Error starting Matrix SLAM: {e}")
-            return {
-                'success': False,
-                'message': f'Error: {str(e)}'
-            }
-
-    def stop_matrix_slam(self) -> Dict:
-        """Stop the matrix-marker SLAM node."""
-        if self.matrix_slam_process is None:
-            return {
-                'success': False,
-                'message': 'Matrix SLAM is not running'
-            }
-
-        try:
-            print("Stopping Matrix SLAM node...")
-            self.matrix_slam_process.terminate()
-
-            try:
-                self.matrix_slam_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print("   Matrix SLAM did not terminate, killing...")
-                self.matrix_slam_process.kill()
-                self.matrix_slam_process.wait()
-
-            self.matrix_slam_process = None
-            self.aruco_slam_enabled = False
-            if self.fleet_node is not None:
-                self.fleet_node.set_aruco_slam_running(False)
-            print("Matrix SLAM node stopped")
-            return {
-                'success': True,
-                'message': 'Matrix SLAM stopped successfully'
-            }
-
-        except Exception as e:
-            print(f"Error stopping Matrix SLAM: {e}")
-            return {
-                'success': False,
-                'message': f'Error: {str(e)}'
-            }
-
-    def is_matrix_slam_running(self) -> bool:
-        """Check if Matrix SLAM is currently running."""
-        if self.matrix_slam_process is None:
-            return False
-        return self.matrix_slam_process.poll() is None
-
-    def set_positioning_source(self, source: str) -> Dict:
-        """
-        Select the active positioning source
-        ('none' | 'aruco' | 'matrix' | 'uwb').
-
-        The three real sources publish the shared /localization/<name>/position
-        topic, so exactly one may run at a time. Starts the chosen source and
-        stops the other two (single-active-publisher rule). 'none' stops all
-        sources and starts nothing (leaves the camera free).
-        """
-        source = (source or '').lower()
-        if source not in ALL_SOURCES:
-            return {
-                'success': False,
-                'message': f"source must be one of {list(ALL_SOURCES)}"
-            }
-
-        # Stop the non-selected sources first so nothing else publishes.
-        # For 'none' none of the guards match, so all three are stopped.
-        if source != 'aruco' and self.is_aruco_slam_running():
-            self.stop_aruco_slam()
-        if source != 'matrix' and self.is_matrix_slam_running():
-            self.stop_matrix_slam()
-        if source != 'uwb' and self.is_uwb_running():
-            self.stop_uwb()
-
-        # Start the selected source (if not already running).
-        if source == 'none':
-            result = {'success': True, 'message': 'No positioning source active'}
-        elif source == 'aruco':
-            result = (self.start_aruco_slam(self.matrix_camera_id)
-                      if not self.is_aruco_slam_running()
-                      else {'success': True, 'message': 'ArUco already running'})
-        elif source == 'matrix':
-            result = (self.start_matrix_slam(self.matrix_camera_id)
-                      if not self.is_matrix_slam_running()
-                      else {'success': True, 'message': 'Matrix already running'})
-        else:  # uwb
-            result = (self.start_uwb(self.uwb_fake_mode)
-                      if not self.is_uwb_running()
-                      else {'success': True, 'message': 'UWB already running'})
-
-        if result['success']:
-            self.positioning_source = source
-        return result
-
-    def set_anchor_positions(self, coords: List[Dict]) -> Dict:
-        """
-        Store the 4-anchor coordinate map (A0..A3, x/y in cm).
-
-        Args:
-            coords: list of exactly 4 {'x', 'y'} dicts, in cm.
-
-        Returns:
-            Dictionary with result.
-        """
-        if not isinstance(coords, list) or len(coords) != 4:
-            return {'success': False, 'message': 'expected exactly 4 anchors'}
-
-        try:
-            flat: List[float] = []
-            for a in coords:
-                flat.append(float(a['x']))
-                flat.append(float(a['y']))
-        except (KeyError, TypeError, ValueError):
-            return {'success': False, 'message': 'each anchor needs numeric x and y'}
-
-        self.anchor_positions_cm = flat
-        if self.is_uwb_running():
-            return {'success': True, 'message': 'Stored; stop/start positioning to apply'}
-        return {'success': True, 'message': 'Anchor map stored'}
-
-    def start_uwb(self, fake_mode: bool = False) -> Dict:
-        """Start the BLE positioning node as a child process (Foxglove-style)."""
-        if self.is_uwb_running():
-            return {'success': False, 'message': 'UWB positioning already running'}
-        if self.anchor_positions_cm is None:
-            return {'success': False, 'message': 'anchors not configured'}
-
-        anchors_arg = '[' + ','.join(str(v) for v in self.anchor_positions_cm) + ']'
-        tag_ids_arg = '[' + ','.join(str(t) for t in self.uwb_tag_ids) + ']'
-        # tag_names aligned 1:1 with tag_ids so the UWB node can publish the
-        # shared /localization/<name>/position contract (name-keyed). Empty
-        # string for unassigned tags.
-        assignments = (
-            self.fleet_node.tag_assignments() if self.fleet_node is not None else {}
-        )
-        tag_names = [assignments.get(t, '') for t in self.uwb_tag_ids]
-        tag_names_arg = '[' + ','.join(f'"{n}"' for n in tag_names) + ']'
-        cmd = [
-            'ros2', 'run', 'sphero_uwb_positioning', 'ble_position_node',
-            '--ros-args',
-            '-p', f'anchor_positions_cm:={anchors_arg}',
-            '-p', f'tag_ids:={tag_ids_arg}',
-            '-p', f'tag_names:={tag_names_arg}',
-        ]
-        if fake_mode:
-            cmd += ['-p', 'fake_mode:=true']
-
-        print(f"Starting UWB positioning node (fake_mode={fake_mode})...")
-        self.uwb_process = subprocess.Popen(cmd)
-        self.uwb_fake_mode = fake_mode
-
-        time.sleep(2)
-        if self.uwb_process.poll() is None:
-            print("UWB positioning node started")
-            return {'success': True, 'message': 'UWB positioning started'}
-
-        self.uwb_process = None
-        self.uwb_fake_mode = False
-        return {'success': False, 'message': 'UWB positioning process died on startup'}
-
-    def stop_uwb(self) -> Dict:
-        """Stop the BLE positioning node."""
-        if not self.is_uwb_running():
-            return {'success': False, 'message': 'UWB positioning is not running'}
-
-        print("Stopping UWB positioning node...")
-        self.uwb_process.terminate()
-        try:
-            self.uwb_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            print("   UWB positioning did not terminate, killing...")
-            self.uwb_process.kill()
-            self.uwb_process.wait()
-        self.uwb_process = None
-        self.uwb_fake_mode = False
-        print("UWB positioning node stopped")
-        return {'success': True, 'message': 'UWB positioning stopped'}
-
-    def is_uwb_running(self) -> bool:
-        """Check if the UWB positioning node is currently running."""
-        if self.uwb_process is None:
-            return False
-        return self.uwb_process.poll() is None
-
     def shutdown_all(self):
-        """Shutdown all Sphero instances and ArUco SLAM."""
+        """Shutdown all Sphero instances."""
         print("Shutting down all Sphero instances...")
         for name in list(self.instances.keys()):
             self.remove_sphero(name)
-
-        if self.aruco_slam_process is not None:
-            print("Shutting down ArUco SLAM...")
-            self.stop_aruco_slam()
-
-        if self.matrix_slam_process is not None:
-            print("Shutting down Matrix SLAM...")
-            self.stop_matrix_slam()
-
-        if self.uwb_process is not None:
-            print("Shutting down UWB positioning...")
-            self.stop_uwb()
 
 
 # Create Flask app
@@ -1662,7 +1228,7 @@ def get_sphero(sphero_name):
 
 @app.route('/api/spheros', methods=['POST'])
 def add_sphero():
-    """Add a new Sphero instance. Requires a valid, free tag_id (1-16)."""
+    """Add a new Sphero instance by callsign."""
     data = request.get_json()
 
     if not data or 'sphero_name' not in data:
@@ -1671,22 +1237,8 @@ def add_sphero():
             'message': 'Missing sphero_name in request'
         }), 400
 
-    if 'tag_id' not in data:
-        return jsonify({
-            'success': False,
-            'message': 'Missing tag_id in request'
-        }), 400
-
-    try:
-        tag_id = int(data['tag_id'])
-    except (TypeError, ValueError):
-        return jsonify({
-            'success': False,
-            'message': 'tag_id must be an integer (1-16)'
-        }), 400
-
     sphero_name = data['sphero_name']
-    result = manager.add_sphero(sphero_name, tag_id)
+    result = manager.add_sphero(sphero_name)
 
     if result['success']:
         return jsonify(result), 201
@@ -1696,7 +1248,7 @@ def add_sphero():
 
 @app.route('/api/spheros/batch', methods=['POST'])
 def add_spheros_batch():
-    """Deploy several Spheros at once with server-assigned UWB tags.
+    """Deploy several Spheros at once by callsign.
 
     Request: {names: [...]}. Per-item failures are reported in `results`
     rather than as HTTP errors; 400 only if `names` is missing/not a
@@ -1850,65 +1402,13 @@ def health():
     return jsonify({
         'status': 'healthy',
         'sphero_count': len(manager.instances),
-        'aruco_slam_running': manager.is_aruco_slam_running()
-    })
-
-
-@app.route('/api/aruco_slam/start', methods=['POST'])
-def start_aruco_slam():
-    """Start ArUco SLAM node."""
-    data = request.get_json() or {}
-    camera_id = data.get('camera_id', 0)
-    result = manager.start_aruco_slam(camera_id)
-
-    if result['success']:
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 400
-
-
-@app.route('/api/aruco_slam/stop', methods=['POST'])
-def stop_aruco_slam():
-    """Stop ArUco SLAM node."""
-    result = manager.stop_aruco_slam()
-
-    if result['success']:
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 400
-
-
-@app.route('/api/aruco_slam/status', methods=['GET'])
-def aruco_slam_status():
-    """Get ArUco SLAM status."""
-    return jsonify({
-        'success': True,
-        'running': manager.is_aruco_slam_running(),
-        'enabled': manager.aruco_slam_enabled
-    })
-
-
-@app.route('/api/uwb/tags', methods=['GET'])
-def uwb_tags():
-    """Report the UWB tag pool: all ids, free ids, and current assignments."""
-    if manager.fleet_node is None:
-        free = list(UWB_TAG_IDS)
-        assigned: Dict[str, str] = {}
-    else:
-        free = manager.fleet_node.free_tag_ids()
-        assigned = {str(k): v for k, v in manager.fleet_node.tag_assignments().items()}
-    return jsonify({
-        'success': True,
-        'all': list(UWB_TAG_IDS),
-        'free': free,
-        'assigned': assigned,
     })
 
 
 @app.route('/api/markers', methods=['GET'])
 def markers():
     """Report the LED-matrix marker pool: all slots, free slots, and current
-    assignments (mirrors GET /api/uwb/tags)."""
+    assignments."""
     pool = [{'slot': i, 'hue': hue, 'fill': fill}
             for i, (hue, fill) in enumerate(MARKER_POOL)]
     if manager.fleet_node is None:
@@ -1922,95 +1422,6 @@ def markers():
         'all': pool,
         'free': free,
         'assigned': assigned,
-    })
-
-
-@app.route('/api/positioning_source', methods=['GET'])
-def get_positioning_source():
-    """Report the active positioning source and per-source running state."""
-    return jsonify({
-        'success': True,
-        'source': manager.positioning_source,
-        'sources': list(ALL_SOURCES),
-        'running': {
-            'aruco': manager.is_aruco_slam_running(),
-            'matrix': manager.is_matrix_slam_running(),
-            'uwb': manager.is_uwb_running(),
-        },
-    })
-
-
-@app.route('/api/positioning_source', methods=['POST'])
-def set_positioning_source():
-    """Select the active positioning source (starts it, stops the others)."""
-    data = request.get_json() or {}
-    source = data.get('source')
-    result = manager.set_positioning_source(source)
-    if result['success']:
-        return jsonify({**result, 'source': manager.positioning_source}), 200
-    return jsonify(result), 400
-
-
-@app.route('/api/uwb/anchors', methods=['GET'])
-def get_uwb_anchors():
-    """Return the currently stored anchor map (in cm), or null if unset."""
-    flat = manager.anchor_positions_cm
-    if flat is None:
-        return jsonify({'success': True, 'anchors_cm': None, 'configured': False})
-    anchors = [{'x': flat[i], 'y': flat[i + 1]} for i in range(0, len(flat), 2)]
-    return jsonify({'success': True, 'anchors_cm': anchors, 'configured': True})
-
-
-@app.route('/api/uwb/anchors', methods=['POST'])
-def set_uwb_anchors():
-    """Store the 4-anchor coordinate map (A0..A3, x/y in cm)."""
-    data = request.get_json() or {}
-    coords = data.get('anchors_cm')
-    result = manager.set_anchor_positions(coords)
-
-    if result['success']:
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 400
-
-
-@app.route('/api/uwb/start', methods=['POST'])
-def start_uwb():
-    """Start the UWB positioning node (requires anchors configured)."""
-    data = request.get_json() or {}
-    fake_mode = bool(data.get('fake_mode', False))
-    result = manager.start_uwb(fake_mode)
-
-    if result['success']:
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 400
-
-
-@app.route('/api/uwb/stop', methods=['POST'])
-def stop_uwb():
-    """Stop the UWB positioning node."""
-    result = manager.stop_uwb()
-
-    if result['success']:
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 400
-
-
-@app.route('/api/uwb/status', methods=['GET'])
-def uwb_status():
-    """Get UWB positioning status (for polling)."""
-    assigned_count = (
-        len(manager.fleet_node.tag_assignments())
-        if manager.fleet_node is not None else 0
-    )
-    return jsonify({
-        'success': True,
-        'running': manager.is_uwb_running(),
-        'anchors_configured': manager.anchor_positions_cm is not None,
-        'fake_mode': manager.uwb_fake_mode,
-        'assigned_count': assigned_count,
     })
 
 
@@ -2053,27 +1464,12 @@ def main():
     _ros_executor.add_node(fleet_node)
     threading.Thread(target=_ros_executor.spin, daemon=True).start()
 
-    # Prompt for ArUco SLAM startup
     print("="*60)
     print("Multi-Robot Sphero Web Server")
     print("="*60)
-
-    # Bring up the configured positioning source automatically (default
-    # 'matrix', overridable via POSITIONING_SOURCE env / launch). The source
-    # can be changed at runtime via the web UI / REST API. UWB needs anchors
-    # configured first, so it is left for the operator to start via the API.
-    source = manager.positioning_source
-    print(f"Positioning source: {source}")
-    if source == 'none':
-        print("No positioning source — start one from the UI/API.")
-    elif source == 'uwb':
-        print("UWB selected — configure anchors then start via API/UI.")
-    else:
-        result = manager.set_positioning_source(source)
-        if result['success']:
-            print(f"{source} positioning started: {result['message']}")
-        else:
-            print(f"Failed to start {source} positioning: {result['message']}")
+    # Localization is provided externally by the overhead Kinect
+    # (kinect_field_tracking), launched separately from this web server.
+    print(f"External localization: {manager.external_localization_enabled}")
 
     # Run Flask app
     print("-"*60)

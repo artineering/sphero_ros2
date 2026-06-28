@@ -67,34 +67,14 @@ A comprehensive web-based interface for managing and controlling multiple Sphero
   - Real-time state updates
   - Command publishing to ROS2 topics
 
-## Positioning Sources
+## Localization
 
-The webserver can drive exactly one positioning source at a time. The three real
-sources (`aruco`, `matrix`, `uwb`) all publish the shared
-`/localization/<name>/position` contract, so only one may run at once
-(single-active-publisher rule). A fourth pseudo-source, `none`, runs no
-localization at all (leaving the camera free).
-
-| Source   | Description |
-|----------|-------------|
-| `none`   | Default. No positioning runs; nothing publishes `/localization/*`. |
-| `aruco`  | ArUco-marker SLAM (camera-based). |
-| `matrix` | LED-matrix marker positioning (camera-based). |
-| `uwb`    | UWB anchor/tag positioning. |
-
-### Startup behavior
-
-The initial source is read from the `POSITIONING_SOURCE` environment variable
-(default `none`) when the app starts:
-
-- `none` — nothing is started; pick a source from the UI/API.
-- `uwb` — selected but **not** auto-started, because UWB needs its anchor
-  coordinates configured first. Configure anchors, then start it via the UI/API.
-- `aruco` / `matrix` — started automatically at boot.
-
-The active source can be changed at runtime through the dashboard's positioning-
-source ribbon or the `POST /api/positioning_source` endpoint. Switching sources
-starts the chosen one and stops the other two.
+Localization is provided externally by the overhead Kinect
+(`kinect_field_tracking`), which is launched separately from this web server and
+publishes the shared `/localization/<name>/position` contract per unit. The
+`FleetNode` subscribes to it and republishes each robot's pose on
+`/sphero_fleet/robots`. Deployed instances are started with external
+localization enabled by default; set `EXTERNAL_LOCALIZATION=0` to disable.
 
 A `foxglove_bridge` (`ws://<host>:8765`) for Foxglove Studio monitoring is
 launched separately and independently of the webserver via
@@ -200,15 +180,6 @@ The system will:
 
 Click the "**Open Controller**" button on any Sphero card to open its dedicated controller interface in a new tab.
 
-### Selecting a Positioning Source
-
-Use the **Positioning Source** ribbon to switch the active source with one click:
-**NONE**, **ARUCO**, **MATRIX**, or **UWB**. The active source is highlighted and
-also shown in the header **SOURCE** status chip. Only one source publishes
-`/localization` at a time; selecting a new source stops the previous one. UWB
-requires its anchor coordinates to be configured (in the positioning panel)
-before it can start. See [Positioning Sources](#positioning-sources).
-
 ### Removing a Sphero
 
 1. Click the "**Remove**" button on the Sphero card
@@ -269,34 +240,6 @@ GET /api/spheros/{sphero_name}
 GET /health
 ```
 
-### Get Positioning Source
-```http
-GET /api/positioning_source
-```
-**Response:**
-```json
-{
-  "success": true,
-  "source": "matrix",
-  "sources": ["none", "aruco", "matrix", "uwb"],
-  "running": { "aruco": false, "matrix": true, "uwb": false }
-}
-```
-
-### Set Positioning Source
-```http
-POST /api/positioning_source
-Content-Type: application/json
-
-{
-  "source": "matrix"
-}
-```
-Selects the active source, starting it and stopping the other two
-(single-active-publisher rule). `source` must be one of `none`, `aruco`,
-`matrix`, `uwb`. Returns `200` with the resolved `source` on success, `400`
-otherwise. See [Positioning Sources](#positioning-sources).
-
 ### Get Workers
 ```http
 GET /api/workers
@@ -326,14 +269,12 @@ present). Refreshes each worker's `online` flag from its cached agent `/status`.
 When no registry is loaded, `registry_loaded` is `false` and `workers` is empty.
 See [Distributed Workers](#distributed-workers--worker-registry).
 
-> **Note:** The Add Sphero endpoint (`POST /api/spheros`) now also requires a
-> `tag_id` field (integer, 1–16) in addition to `sphero_name`. When a worker
-> registry is loaded, the instance is spawned on the least-loaded remote worker
-> instead of locally.
+> **Note:** The Add Sphero endpoint (`POST /api/spheros`) requires only a
+> `sphero_name` field; units join by callsign. When a worker registry is loaded,
+> the instance is spawned on the least-loaded remote worker instead of locally.
 
-> The webserver additionally exposes positioning-source control endpoints under
-> `/api/aruco_slam/*`, `/api/uwb/*` (start/stop/status, anchors, tags), and
-> `/api/markers`. These are primarily driven by the dashboard UI.
+> The webserver additionally exposes the LED-matrix marker pool
+> (`GET /api/markers`), primarily driven by the dashboard UI.
 
 ## WebSocket Events (Instance Server)
 
@@ -419,7 +360,7 @@ Each Sphero uses namespaced topics:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `POSITIONING_SOURCE` | `none` | Initial positioning source brought up at startup. One of `none`, `aruco`, `matrix`, `uwb` (case-insensitive; unknown values fall back to `none`). See [Positioning Sources](#positioning-sources). |
+| `EXTERNAL_LOCALIZATION` | `true` | Whether deployed instances accept external localization (the overhead Kinect publishes `/localization/<name>/position`). Set to `0`/`false`/`no` to disable. |
 | `SPHERO_AGENT_TOKEN` | _(from `config/workers.yaml`)_ | Bearer token the coordinator presents to every worker launcher agent (`Authorization: Bearer <token>`). Overrides the `agent.token` value in `workers.yaml` so the secret can stay out of the repo. Empty means no auth header (dev mode). See [Distributed Workers](#distributed-workers--worker-registry). |
 
 ## Example Workflow

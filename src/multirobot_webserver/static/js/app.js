@@ -162,10 +162,6 @@ class ControlStation {
         this.pendingBatchDetach = null;
         this.selected = new Set();
         this.bootedAt = Date.now();
-        this.aruco = { running: false, enabled: false };
-        this.uwb = { running: false, anchorsConfigured: false, fakeMode: false, assignedCount: 0 };
-        this.uwbTags = { all: [], free: [], assigned: {} };
-        this.source = { active: null, running: {} };
         this.linkOk = true;
         this.lastSyncAt = null;
         // Broadcast builder: single source of truth (wire-format array + _uid).
@@ -186,35 +182,15 @@ class ControlStation {
         this.refresh();
         // Fleet polling — every 5s
         setInterval(() => this.refresh(), 5000);
-        // ArUco status polling — every 4s
-        this.refreshAruco();
-        setInterval(() => this.refreshAruco(), 4000);
-        // UWB status polling — every 4s
-        this.refreshUwb();
-        setInterval(() => this.refreshUwb(), 4000);
-        // Positioning-source status polling — every 4s
-        this.refreshSource();
-        setInterval(() => this.refreshSource(), 4000);
-        // Prefill anchor inputs once on load
-        this.refreshAnchors();
     }
 
     bindActions() {
         $('#addSpheroBtn').addEventListener('click', () => {
             this.renderRoster();
             this.openModal('addSpheroModal', 'spheroNamesInput');
-            this.refreshUwbTags();
             this.updateBatchSummary();
         });
-        $('#refreshBtn').addEventListener('click', () => { this.refresh(); this.refreshAruco(); this.refreshUwb(); });
-        $('#arucoStartBtn').addEventListener('click', () => this.startAruco());
-        $('#arucoStopBtn').addEventListener('click', () => this.stopAruco());
-        $('#uwbStartBtn').addEventListener('click', () => this.startUwb());
-        $('#uwbStopBtn').addEventListener('click', () => this.stopUwb());
-        $('#saveAnchorsBtn').addEventListener('click', () => this.saveAnchors());
-        $$('[data-source]').forEach((btn) => {
-            btn.addEventListener('click', () => this.setSource(btn.dataset.source));
-        });
+        $('#refreshBtn').addEventListener('click', () => { this.refresh(); });
 
         // Deploy modal
         const confirmAdd = $('#confirmAddBtn');
@@ -335,7 +311,7 @@ class ControlStation {
 
     // Split a textarea blob into clean callsigns: one per line, trimmed,
     // blanks dropped, deduped preserving first-seen order (server is the
-    // authoritative tag/dup arbiter — this is just client-side tidy-up).
+    // authoritative dup arbiter — this is just client-side tidy-up).
     parseCallsigns(text) {
         const seen = new Set();
         const out = [];
@@ -390,8 +366,7 @@ class ControlStation {
         const el = $('#batchSummary');
         if (!el) return;
         const n = this.collectDeployNames().length;
-        const free = this.uwbTags.free.length;
-        el.textContent = `${n} callsign${n === 1 ? '' : 's'} · ${free} tag${free === 1 ? '' : 's'} free`;
+        el.textContent = `${n} callsign${n === 1 ? '' : 's'}`;
     }
 
     async deploySpheros(names) {
@@ -414,7 +389,6 @@ class ControlStation {
             }
             this.summarizeBatch(data, 'DEPLOY', 'deployed');
             this.refresh();
-            this.refreshUwbTags();
             // Full success → close; partial → keep open with the failed lines.
             if (data.failed === 0) {
                 this.closeModal('addSpheroModal');
@@ -465,7 +439,6 @@ class ControlStation {
             (data.results || []).forEach((x) => { if (x.success) this.selected.delete(x.name); });
             this.summarizeBatch(data, 'DETACH', 'removed');
             this.refresh();
-            this.refreshUwb();
         } catch (err) {
             this.toast('Detach uplink lost.', 'error', 'DETACH');
         }
@@ -484,268 +457,6 @@ class ControlStation {
         } catch (err) {
             this.toast('Detach uplink lost.', 'error', 'DETACH');
         }
-    }
-
-    /* -------------------------------------------------------- ArUco API */
-    async refreshAruco() {
-        try {
-            const r = await fetch('/api/aruco_slam/status');
-            const data = await r.json();
-            this.aruco = { running: !!data.running, enabled: !!data.enabled };
-            this.renderAruco();
-        } catch (err) {
-            // Silent — link state is already covered by /api/spheros polling.
-        }
-    }
-
-    async startAruco() {
-        const camId = parseInt($('#cameraIdInput').value, 10) || 0;
-        try {
-            const r = await fetch('/api/aruco_slam/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ camera_id: camId }),
-            });
-            const data = await r.json();
-            if (data.success) {
-                this.toast(`ArUco SLAM online (cam ${camId})`, 'success', 'ARUCO');
-                this.refreshAruco();
-            } else {
-                this.toast(`ArUco start failed: ${data.message}`, 'error', 'ARUCO');
-            }
-        } catch (err) {
-            this.toast('ArUco uplink lost.', 'error', 'ARUCO');
-        }
-    }
-
-    async stopAruco() {
-        try {
-            const r = await fetch('/api/aruco_slam/stop', { method: 'POST' });
-            const data = await r.json();
-            if (data.success) {
-                this.toast('ArUco SLAM offline', 'success', 'ARUCO');
-                this.refreshAruco();
-            } else {
-                this.toast(`ArUco stop failed: ${data.message}`, 'error', 'ARUCO');
-            }
-        } catch (err) {
-            this.toast('ArUco uplink lost.', 'error', 'ARUCO');
-        }
-    }
-
-    /* -------------------------------------------------------- UWB API */
-    async refreshUwb() {
-        try {
-            const r = await fetch('/api/uwb/status');
-            const data = await r.json();
-            this.uwb = {
-                running: !!data.running,
-                anchorsConfigured: !!data.anchors_configured,
-                fakeMode: !!data.fake_mode,
-                assignedCount: data.assigned_count || 0,
-            };
-            this.renderUwb();
-        } catch (err) {
-            // Silent — link state is covered by /api/spheros polling.
-        }
-        this.refreshUwbTags();
-    }
-
-    async refreshUwbTags() {
-        try {
-            const r = await fetch('/api/uwb/tags');
-            const data = await r.json();
-            if (data.success) {
-                this.uwbTags = {
-                    all: data.all || [],
-                    free: data.free || [],
-                    assigned: data.assigned || {},
-                };
-                if ($('#addSpheroModal').classList.contains('show')) {
-                    this.updateBatchSummary();
-                }
-            }
-        } catch (err) {
-            // Silent.
-        }
-    }
-
-    async refreshAnchors() {
-        try {
-            const r = await fetch('/api/uwb/anchors');
-            const data = await r.json();
-            if (data.success && data.configured && Array.isArray(data.anchors_cm)) {
-                data.anchors_cm.forEach((a, i) => {
-                    const xi = $(`#anchorA${i}x`);
-                    const yi = $(`#anchorA${i}y`);
-                    if (xi && a && a.x != null) xi.value = a.x;
-                    if (yi && a && a.y != null) yi.value = a.y;
-                });
-            }
-        } catch (err) {
-            // Silent.
-        }
-    }
-
-    async saveAnchors() {
-        const anchors = [];
-        for (let i = 0; i < 4; i++) {
-            const x = parseFloat($(`#anchorA${i}x`).value);
-            const y = parseFloat($(`#anchorA${i}y`).value);
-            if (!Number.isFinite(x) || !Number.isFinite(y)) {
-                this.toast(`Anchor A${i} needs numeric X and Y.`, 'error', 'UWB');
-                return;
-            }
-            anchors.push({ x, y });
-        }
-        try {
-            const r = await fetch('/api/uwb/anchors', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ anchors_cm: anchors }),
-            });
-            const data = await r.json();
-            if (data.success) {
-                this.toast(data.message, 'success', 'UWB');
-                this.refreshUwb();
-                this.refreshAnchors();
-            } else {
-                this.toast(`Anchor save failed: ${data.message}`, 'error', 'UWB');
-            }
-        } catch (err) {
-            this.toast('UWB uplink lost.', 'error', 'UWB');
-        }
-    }
-
-    async startUwb() {
-        if (!this.uwb.anchorsConfigured) {
-            this.toast('Configure anchors first.', 'error', 'UWB');
-            return;
-        }
-        const fakeMode = $('#uwbFakeMode').checked;
-        try {
-            const r = await fetch('/api/uwb/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fake_mode: fakeMode }),
-            });
-            const data = await r.json();
-            if (data.success) {
-                this.toast(`UWB positioning online${fakeMode ? ' (fake)' : ''}`, 'success', 'UWB');
-                this.refreshUwb();
-            } else {
-                this.toast(`UWB start failed: ${data.message}`, 'error', 'UWB');
-            }
-        } catch (err) {
-            this.toast('UWB uplink lost.', 'error', 'UWB');
-        }
-    }
-
-    async stopUwb() {
-        try {
-            const r = await fetch('/api/uwb/stop', { method: 'POST' });
-            const data = await r.json();
-            if (data.success) {
-                this.toast('UWB positioning offline', 'success', 'UWB');
-                this.refreshUwb();
-            } else {
-                this.toast(`UWB stop failed: ${data.message}`, 'error', 'UWB');
-            }
-        } catch (err) {
-            this.toast('UWB uplink lost.', 'error', 'UWB');
-        }
-    }
-
-    renderUwb() {
-        const dot = $('#uwbDot');
-        const label = $('#uwbLabel');
-        const stateText = $('#uwbStateText');
-        const anchorsText = $('#uwbAnchorsText');
-        const modeText = $('#uwbModeText');
-        const assignedText = $('#uwbAssignedText');
-        const startBtn = $('#uwbStartBtn');
-        const stopBtn = $('#uwbStopBtn');
-
-        if (this.uwb.running) {
-            dot.dataset.state = 'online';
-            label.textContent = 'ONLINE';
-            stateText.textContent = 'RUNNING';
-            stateText.style.color = 'var(--green)';
-            startBtn.hidden = true;
-            stopBtn.hidden = false;
-        } else {
-            dot.dataset.state = 'offline';
-            label.textContent = 'OFFLINE';
-            stateText.textContent = 'OFFLINE';
-            stateText.style.color = 'var(--fg-2)';
-            startBtn.hidden = false;
-            stopBtn.hidden = true;
-            startBtn.disabled = !this.uwb.anchorsConfigured;
-        }
-
-        if (this.uwb.anchorsConfigured) {
-            anchorsText.textContent = 'CONFIGURED';
-            anchorsText.style.color = 'var(--green)';
-        } else {
-            anchorsText.textContent = 'UNSET';
-            anchorsText.style.color = 'var(--amber)';
-        }
-
-        if (this.uwb.running) {
-            modeText.textContent = this.uwb.fakeMode ? 'FAKE' : 'LIVE';
-            modeText.style.color = this.uwb.fakeMode ? 'var(--amber)' : 'var(--fg)';
-        } else {
-            modeText.textContent = '—';
-            modeText.style.color = 'var(--fg-2)';
-        }
-
-        assignedText.textContent = this.uwb.assignedCount;
-    }
-
-    /* -------------------------------------------------------- positioning source */
-    async refreshSource() {
-        try {
-            const r = await fetch('/api/positioning_source');
-            const data = await r.json();
-            if (data.success) {
-                this.source = { active: data.source, running: data.running || {} };
-                this.renderSource();
-            }
-        } catch (err) {
-            // Silent — link state is covered by /api/spheros polling.
-        }
-    }
-
-    async setSource(source) {
-        try {
-            const r = await fetch('/api/positioning_source', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ source }),
-            });
-            const data = await r.json();
-            if (data.success) {
-                this.toast(`Positioning source → ${source.toUpperCase()}`, 'success', 'SOURCE');
-                this.refreshSource();
-                this.refreshAruco();
-                this.refreshUwb();
-            } else {
-                this.toast(`Source switch failed: ${data.message}`, 'error', 'SOURCE');
-            }
-        } catch (err) {
-            this.toast('Source uplink lost.', 'error', 'SOURCE');
-        }
-    }
-
-    renderSource() {
-        const label = $('#sourceLabel');
-        if (label) {
-            label.textContent = this.source.active ? this.source.active.toUpperCase() : '—';
-        }
-        $$('[data-source]').forEach((btn) => {
-            const isActive = btn.dataset.source === this.source.active;
-            btn.classList.toggle('action--primary', isActive);
-        });
     }
 
     /* -------------------------------------------------------- render: fleet */
@@ -1082,38 +793,11 @@ class ControlStation {
         }
     }
 
-    /* -------------------------------------------------------- render: header / aruco */
+    /* -------------------------------------------------------- render: header */
     updateTelemetry() {
         $('#spheroCount').textContent = this.spheros.length;
         $('#capacityFill').textContent = this.spheros.length;
         $('#lastSync').textContent = this.lastSyncAt ? this.formatClock(this.lastSyncAt) : '—';
-    }
-
-    renderAruco() {
-        const dot = $('#arucoDot');
-        const label = $('#arucoLabel');
-        const stateText = $('#arucoStateText');
-        const enabledText = $('#arucoEnabledText');
-        const startBtn = $('#arucoStartBtn');
-        const stopBtn = $('#arucoStopBtn');
-
-        if (this.aruco.running) {
-            dot.dataset.state = 'online';
-            label.textContent = 'ONLINE';
-            stateText.textContent = 'RUNNING';
-            stateText.style.color = 'var(--green)';
-            startBtn.hidden = true;
-            stopBtn.hidden = false;
-        } else {
-            dot.dataset.state = 'offline';
-            label.textContent = 'OFFLINE';
-            stateText.textContent = 'OFFLINE';
-            stateText.style.color = 'var(--fg-2)';
-            startBtn.hidden = false;
-            stopBtn.hidden = true;
-        }
-        enabledText.textContent = this.aruco.enabled ? 'TRUE' : 'FALSE';
-        enabledText.style.color = this.aruco.enabled ? 'var(--amber)' : 'var(--fg-2)';
     }
 
     /* -------------------------------------------------------- link health */

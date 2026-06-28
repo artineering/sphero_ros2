@@ -17,8 +17,7 @@
       "scene": {},
       "transforms": {},
       "topics": {
-        "/aruco_slam/.*": { "visible": true },
-        "/sphero/.*/uwb/position": { "visible": true }
+        "/localization/.*/position": { "visible": true }
       },
       "layers": {},
       "publish": { "type": "point", "poseTopic": "/move_base_simple/goal", "pointTopic": "/clicked_point", "poseEstimateTopic": "/initialpose", "poseEstimateXDeviation": 0.5, "poseEstimateYDeviation": 0.5, "poseEstimateThetaDeviation": 0.2618 },

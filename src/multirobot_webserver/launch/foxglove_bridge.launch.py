@@ -35,7 +35,6 @@ def generate_launch_description():
                     '/sphero_fleet/.*',
                     '/field_tracker_node/.*',
                     '/localization/.*',
-                    '/uwb/.*',
                     '/rosout',
                     '/parameter_events',
                     '/tf',

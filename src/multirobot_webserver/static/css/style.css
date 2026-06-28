@@ -369,55 +369,6 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
 }
 
 /* ============================================================
-   Localization (ArUco) panel
-   ============================================================ */
-.localization {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    flex-wrap: wrap;
-}
-.loc__readout { display: flex; gap: 20px; flex-wrap: wrap; }
-.readout {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 120px;
-}
-.readout__k {
-    color: var(--fg-3);
-    font-size: 10px;
-    letter-spacing: 0.12em;
-}
-.readout__v {
-    color: var(--fg);
-    font-size: 14px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-}
-.readout__input {
-    background: var(--bg-3);
-    border: 1px solid var(--line-strong);
-    color: var(--fg);
-    padding: 4px 8px;
-    width: 80px;
-    font-family: var(--mono);
-    font-size: 13px;
-    border-radius: var(--rad);
-    transition: border-color 0.14s ease;
-}
-.readout__input:focus { border-color: var(--amber); }
-.loc__hint {
-    color: var(--fg-2);
-    font-size: 10.5px;
-    letter-spacing: 0.04em;
-    max-width: 260px;
-    text-align: right;
-    line-height: 1.6;
-}
-
-/* ============================================================
    Footer
    ============================================================ */
 .footer {
@@ -626,61 +577,6 @@ select.field option { background: var(--bg-1); color: var(--fg); }
 select.field option:disabled { color: var(--fg-3); }
 
 /* ============================================================
-   UWB anchor configuration
-   ============================================================ */
-.anchors { margin-top: 18px; }
-.anchors__grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-}
-.anchor {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: var(--rad);
-}
-.anchor__id {
-    color: var(--amber);
-    font-family: var(--mono);
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    min-width: 26px;
-}
-.anchor__field {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--fg-3);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-}
-.anchor__field .readout__input { width: 72px; }
-.anchors__foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-    margin-top: 16px;
-}
-.anchors__fake {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--fg-1);
-    font-size: 10.5px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    cursor: pointer;
-}
-.anchors__fake input { accent-color: var(--amber); width: 14px; height: 14px; cursor: pointer; }
-.anchors__foot .loc__hint { text-align: left; flex: 1; min-width: 180px; }
-
-/* ============================================================
    Responsive
    ============================================================ */
 @media (max-width: 720px) {
@@ -690,9 +586,6 @@ select.field option:disabled { color: var(--fg-3); }
     .ribbon__hint { display: none; }
     .footer { grid-template-columns: 1fr; gap: 4px; text-align: left; }
     .footer__center, .footer__right { text-align: left; }
-    .localization { flex-direction: column; align-items: flex-start; }
-    .loc__hint { text-align: left; }
-    .anchors__grid { grid-template-columns: 1fr; }
 }
 
 /* ============================================================

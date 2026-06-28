@@ -33,20 +33,6 @@
                     <span class="chip__label">FLEET</span>
                     <span class="chip__value" id="spheroCount">0</span>
                 </div>
-                <div class="chip chip--state" title="External localization">
-                    <span class="chip__label">ARUCO</span>
-                    <span class="dot" id="arucoDot" data-state="offline"></span>
-                    <span class="chip__value" id="arucoLabel">OFFLINE</span>
-                </div>
-                <div class="chip chip--state" title="UWB positioning">
-                    <span class="chip__label">UWB</span>
-                    <span class="dot" id="uwbDot" data-state="offline"></span>
-                    <span class="chip__value" id="uwbLabel">OFFLINE</span>
-                </div>
-                <div class="chip chip--state" title="Active positioning source">
-                    <span class="chip__label">SOURCE</span>
-                    <span class="chip__value" id="sourceLabel">—</span>
-                </div>
                 <div class="chip chip--state" title="Backend health">
                     <span class="chip__label">LINK</span>
                     <span class="dot" id="linkDot" data-state="online"></span>
@@ -71,43 +57,7 @@
                 <span class="action__glyph">⇶</span>
                 <span class="action__label">BROADCAST TASK</span>
             </button>
-            <button class="action action--accent" id="arucoStartBtn">
-                <span class="action__glyph">⚡</span>
-                <span class="action__label">START ARUCO</span>
-            </button>
-            <button class="action action--ghost" id="arucoStopBtn" hidden>
-                <span class="action__glyph">■</span>
-                <span class="action__label">STOP ARUCO</span>
-            </button>
-            <button class="action action--accent" id="uwbStartBtn">
-                <span class="action__glyph">◎</span>
-                <span class="action__label">START UWB</span>
-            </button>
-            <button class="action action--ghost" id="uwbStopBtn" hidden>
-                <span class="action__glyph">■</span>
-                <span class="action__label">STOP UWB</span>
-            </button>
             <span class="ribbon__hint">DEPLOY → enter callsign → unit binds to next channel</span>
-        </section>
-
-        <!-- ============================================================ -->
-        <!-- SOURCE SELECT — single-active positioning publisher          -->
-        <!-- ============================================================ -->
-        <section class="ribbon" aria-label="Positioning source">
-            <span class="ribbon__hint">POSITIONING SOURCE →</span>
-            <button class="action" id="srcNoneBtn" data-source="none">
-                <span class="action__label">NONE</span>
-            </button>
-            <button class="action" id="srcArucoBtn" data-source="aruco">
-                <span class="action__label">ARUCO</span>
-            </button>
-            <button class="action" id="srcMatrixBtn" data-source="matrix">
-                <span class="action__label">MATRIX</span>
-            </button>
-            <button class="action" id="srcUwbBtn" data-source="uwb">
-                <span class="action__label">UWB</span>
-            </button>
-            <span class="ribbon__hint">Only one source publishes /localization at a time.</span>
         </section>
 
         <!-- ============================================================ -->
@@ -183,108 +133,6 @@
         </section>
 
         <!-- ============================================================ -->
-        <!-- LOCALIZATION — ArUco SLAM panel                              -->
-        <!-- ============================================================ -->
-        <section class="panel panel--narrow">
-            <div class="panel__head">
-                <h2 class="panel__title">// LOCALIZATION</h2>
-                <div class="panel__meta">
-                    <span class="meta__row"><span class="meta__k">SUBSYSTEM</span><span class="meta__v">ARUCO·SLAM</span></span>
-                </div>
-            </div>
-
-            <div class="localization">
-                <div class="loc__readout">
-                    <div class="readout">
-                        <span class="readout__k">[STATE]</span>
-                        <span class="readout__v" id="arucoStateText">OFFLINE</span>
-                    </div>
-                    <div class="readout">
-                        <span class="readout__k">[ENABLED]</span>
-                        <span class="readout__v" id="arucoEnabledText">FALSE</span>
-                    </div>
-                    <div class="readout">
-                        <span class="readout__k">[CAMERA]</span>
-                        <input type="number" id="cameraIdInput" value="0" min="0" max="9" class="readout__input">
-                    </div>
-                </div>
-                <div class="loc__hint">External marker tracking provides absolute positioning to all units.</div>
-            </div>
-        </section>
-
-        <!-- ============================================================ -->
-        <!-- POSITIONING — UWB panel                                      -->
-        <!-- ============================================================ -->
-        <section class="panel panel--narrow">
-            <div class="panel__head">
-                <h2 class="panel__title">// POSITIONING</h2>
-                <div class="panel__meta">
-                    <span class="meta__row"><span class="meta__k">SUBSYSTEM</span><span class="meta__v">UWB</span></span>
-                </div>
-            </div>
-
-            <div class="loc__readout">
-                <div class="readout">
-                    <span class="readout__k">[STATE]</span>
-                    <span class="readout__v" id="uwbStateText">OFFLINE</span>
-                </div>
-                <div class="readout">
-                    <span class="readout__k">[ANCHORS]</span>
-                    <span class="readout__v" id="uwbAnchorsText">UNSET</span>
-                </div>
-                <div class="readout">
-                    <span class="readout__k">[MODE]</span>
-                    <span class="readout__v" id="uwbModeText">—</span>
-                </div>
-                <div class="readout">
-                    <span class="readout__k">[ASSIGNED]</span>
-                    <span class="readout__v" id="uwbAssignedText">0</span>
-                </div>
-            </div>
-
-            <div class="anchors">
-                <div class="anchors__grid">
-                    <div class="anchor">
-                        <span class="anchor__id">A0</span>
-                        <label class="anchor__field"><span>X</span>
-                            <input type="number" id="anchorA0x" step="0.1" inputmode="decimal" class="readout__input"></label>
-                        <label class="anchor__field"><span>Y</span>
-                            <input type="number" id="anchorA0y" step="0.1" inputmode="decimal" class="readout__input"></label>
-                    </div>
-                    <div class="anchor">
-                        <span class="anchor__id">A1</span>
-                        <label class="anchor__field"><span>X</span>
-                            <input type="number" id="anchorA1x" step="0.1" inputmode="decimal" class="readout__input"></label>
-                        <label class="anchor__field"><span>Y</span>
-                            <input type="number" id="anchorA1y" step="0.1" inputmode="decimal" class="readout__input"></label>
-                    </div>
-                    <div class="anchor">
-                        <span class="anchor__id">A2</span>
-                        <label class="anchor__field"><span>X</span>
-                            <input type="number" id="anchorA2x" step="0.1" inputmode="decimal" class="readout__input"></label>
-                        <label class="anchor__field"><span>Y</span>
-                            <input type="number" id="anchorA2y" step="0.1" inputmode="decimal" class="readout__input"></label>
-                    </div>
-                    <div class="anchor">
-                        <span class="anchor__id">A3</span>
-                        <label class="anchor__field"><span>X</span>
-                            <input type="number" id="anchorA3x" step="0.1" inputmode="decimal" class="readout__input"></label>
-                        <label class="anchor__field"><span>Y</span>
-                            <input type="number" id="anchorA3y" step="0.1" inputmode="decimal" class="readout__input"></label>
-                    </div>
-                </div>
-                <div class="anchors__foot">
-                    <label class="anchors__fake">
-                        <input type="checkbox" id="uwbFakeMode">
-                        <span>FAKE MODE</span>
-                    </label>
-                    <span class="loc__hint">Anchor coordinates in cm. Configure before starting positioning.</span>
-                    <button class="action action--primary" id="saveAnchorsBtn">SAVE ANCHORS</button>
-                </div>
-            </div>
-        </section>
-
-        <!-- ============================================================ -->
         <!-- FOOTER                                                       -->
         <!-- ============================================================ -->
         <footer class="footer">
@@ -310,8 +158,8 @@
                 <p class="field__hint">Tick known units to queue them, or type custom callsigns below. Both feed the same deploy.</p>
                 <label for="spheroNamesInput" class="field__label">[ CALLSIGNS ]</label>
                 <textarea id="spheroNamesInput" class="field" rows="6" autocomplete="off" spellcheck="false" placeholder="SB-3660&#10;SB-58EF"></textarea>
-                <p class="field__hint">One callsign per line (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). UWB tags (1–16) and channels are auto-assigned to free slots.</p>
-                <p class="field__hint"><span id="batchSummary">0 callsigns · — tags free</span></p>
+                <p class="field__hint">One callsign per line (e.g. <code>SB-3660</code>, <code>SB-58EF</code>). Units join by name.</p>
+                <p class="field__hint"><span id="batchSummary">0 callsigns</span></p>
             </div>
             <div class="modal__foot">
                 <button id="cancelBtn" class="action action--ghost">CANCEL</button>
