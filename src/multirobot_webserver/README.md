@@ -96,8 +96,9 @@ The active source can be changed at runtime through the dashboard's positioning-
 source ribbon or the `POST /api/positioning_source` endpoint. Switching sources
 starts the chosen one and stops the other two.
 
-On startup the webserver also self-starts a `foxglove_bridge`
-(`ws://<host>:8765`) for Foxglove Studio monitoring; it is stopped on shutdown.
+A `foxglove_bridge` (`ws://<host>:8765`) for Foxglove Studio monitoring is
+launched separately and independently of the webserver via
+`ros2 launch multirobot_webserver foxglove_bridge.launch.py`.
 
 ## Distributed Workers / Worker Registry
 

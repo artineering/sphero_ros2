@@ -378,7 +378,6 @@ class SpheroInstanceManager:
         # Matrix (LED-matrix marker) positioning lifecycle
         self.matrix_slam_process: Optional[subprocess.Popen] = None
         self.matrix_camera_id = 0
-        self.foxglove_bridge_process: Optional[subprocess.Popen] = None
         # UWB positioning (BLE node) lifecycle
         self.uwb_process: Optional[subprocess.Popen] = None
         self.uwb_fake_mode = False
@@ -1587,37 +1586,6 @@ class SpheroInstanceManager:
             return False
         return self.uwb_process.poll() is None
 
-    def start_foxglove_bridge(self) -> Dict:
-        """Start the foxglove_bridge for Foxglove Studio monitoring."""
-        if self.foxglove_bridge_process is not None and self.foxglove_bridge_process.poll() is None:
-            return {'success': False, 'message': 'foxglove_bridge is already running'}
-
-        print("Starting foxglove_bridge on port 8765...")
-        self.foxglove_bridge_process = subprocess.Popen([
-            'ros2', 'launch', 'multirobot_webserver', 'foxglove_bridge.launch.py',
-        ])
-
-        time.sleep(1)
-        if self.foxglove_bridge_process.poll() is None:
-            print("foxglove_bridge started")
-            return {'success': True, 'message': 'foxglove_bridge started on ws://0.0.0.0:8765'}
-
-        self.foxglove_bridge_process = None
-        return {'success': False, 'message': 'foxglove_bridge died on startup'}
-
-    def stop_foxglove_bridge(self):
-        """Stop the foxglove_bridge subprocess."""
-        if self.foxglove_bridge_process is None:
-            return
-        print("Stopping foxglove_bridge...")
-        self.foxglove_bridge_process.terminate()
-        try:
-            self.foxglove_bridge_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.foxglove_bridge_process.kill()
-            self.foxglove_bridge_process.wait()
-        self.foxglove_bridge_process = None
-
     def shutdown_all(self):
         """Shutdown all Sphero instances and ArUco SLAM."""
         print("Shutting down all Sphero instances...")
@@ -1635,9 +1603,6 @@ class SpheroInstanceManager:
         if self.uwb_process is not None:
             print("Shutting down UWB positioning...")
             self.stop_uwb()
-
-        if self.foxglove_bridge_process is not None:
-            self.stop_foxglove_bridge()
 
 
 # Create Flask app
@@ -2110,14 +2075,11 @@ def main():
         else:
             print(f"Failed to start {source} positioning: {result['message']}")
 
-    # Start foxglove_bridge for Foxglove Studio monitoring
-    fg_result = manager.start_foxglove_bridge()
-    print(fg_result['message'])
-
     # Run Flask app
     print("-"*60)
     print("Starting server on http://localhost:5000")
-    print("Foxglove Studio: connect to ws://<host>:8765")
+    print("Foxglove bridge runs separately: "
+          "ros2 launch multirobot_webserver foxglove_bridge.launch.py")
     print("Press Ctrl+C to shutdown")
     print("="*60)
 

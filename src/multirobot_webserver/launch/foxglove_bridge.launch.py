@@ -18,10 +18,14 @@ def generate_launch_description():
                 'address': LaunchConfiguration('address'),
                 'tls': False,
                 'send_buffer_limit': 10000000,
+                # NOTE: 'parameters'/'parametersSubscribe' are intentionally
+                # omitted. With them on, the bridge probes every node's parameter
+                # service on discovery; a freshly-deployed sphero controller's
+                # param service isn't ready in time, so the bridge errors and
+                # ignore-lists the node. We use Foxglove for visualization, not
+                # param editing, so we drop param support to kill that noise.
                 'capabilities': [
                     'clientPublish',
-                    'parameters',
-                    'parametersSubscribe',
                     'services',
                     'connectionGraph',
                     'assets',
@@ -29,7 +33,8 @@ def generate_launch_description():
                 'topic_whitelist': [
                     '/sphero/.*',
                     '/sphero_fleet/.*',
-                    '/aruco_slam/.*',
+                    '/field_tracker_node/.*',
+                    '/localization/.*',
                     '/uwb/.*',
                     '/rosout',
                     '/parameter_events',

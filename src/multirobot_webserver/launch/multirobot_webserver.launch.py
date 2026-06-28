@@ -5,10 +5,11 @@ from launch_ros.actions import Node
 def generate_launch_description():
     """Bring up the multi-robot web server.
 
-    The web server self-starts the foxglove_bridge in its main() and starts
-    the UWB positioning (BLE) node on demand via its REST API, so neither is
-    launched here. The webapp uses a blocking input() prompt at startup, so it
-    runs with output='screen' on the attached TTY.
+    The foxglove_bridge is launched separately via
+    foxglove_bridge.launch.py, and the UWB positioning (BLE) node is started
+    on demand via the web server's REST API, so neither is launched here. The
+    webapp uses a blocking input() prompt at startup, so it runs with
+    output='screen' on the attached TTY.
     """
     return LaunchDescription([
         Node(
