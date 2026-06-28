@@ -1,0 +1,7 @@
+string[] callsigns   # empty => register all currently-deployed Spheros
+bool skip_compass    # true => skip the compass-cal phase (for re-registering a failed subset)
+---
+bool success
+string[] registered  # turned solid green
+string[] failed      # turned solid red
+string message

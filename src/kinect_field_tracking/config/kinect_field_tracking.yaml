@@ -1,0 +1,94 @@
+field_tracker_node:
+  ros__parameters:
+    source: sim                  # 'kinect' | 'sim'
+    auto_calibrate: false        # run ~/calibrate on startup if no YAML exists
+    auto_baseline: false         # also capture the heightmap during ~/calibrate
+    field_yaml_path: ''          # '' -> share/kinect_field_tracking/config/kinect_field.yaml
+    heightmap_path: ''           # '' -> share/kinect_field_tracking/config/kinect_heightmap.npy
+    publish_rate_hz: 10.0
+    marker_republish_hz: 1.0     # persistent field-corners marker for Foxglove/late subs
+    preview_enabled: true        # RGB preview for Foxglove in idle states only
+    preview_rate_hz: 5.0         # low-rate; never streams during track/register/calibrate
+    heartbeat_fresh_sec: 15.0    # "deployed" = last_seen within this window
+    sensor_fresh_sec: 1.0        # telemetry older than this => predict-only
+
+    # intrinsics (Kinect v1 canonical, 640x480 depth) -- used for the plane fit
+    # and ALL Sphero depth back-projection.
+    fx: 594.21
+    fy: 591.04
+    cx: 339.31
+    cy: 242.74
+    # RGB intrinsics (Kinect v1 canonical) -- used ONLY to back-project the
+    # field-rectangle corners, which are detected in the RGB image (a different
+    # sensor). INTERIM: ignores the ~2.5cm RGB-depth baseline; proper fix is
+    # registered depth or a homography to measured field dims.
+    fx_rgb: 525.0
+    fy_rgb: 525.0
+    cx_rgb: 319.5
+    cy_rgb: 239.5
+
+    # foreground segmentation (vs. per-pixel heightmap)
+    fg_threshold_mm: 25.0
+    fg_height_max_mm: 300.0
+    include_holes: true
+    min_area: 40
+    max_area: 6000
+    # masked Gaussian blur (px, odd) applied to baseline+live for SEGMENTATION
+    # ONLY, to collapse depth-subtraction speckle into clean blobs. Blob z/position
+    # is still taken from RAW depth. <=1 disables. The fixed heightmap is blurred
+    # once (cached); live is blurred per frame.
+    smooth_ksize: 25
+    sphere_radius_mm: 36.5
+    gate_cm: 22.0
+
+    # field calibration
+    calib_depth_frames: 30
+    calib_rgb_frames: 5
+    ransac_thresh_mm: 15.0
+    # field-rectangle detection: multi-channel (luminance + LAB chroma) auto-Canny
+    # so a COLOURED tape boundary on a neutral floor is found (grayscale misses it).
+    canny_sigma: 0.33          # auto-Canny threshold band around the per-channel median
+    morph_close_iters: 3       # bridge gaps in the thin tape loop
+    border_margin_px: 6        # zero a frame-edge margin (drops walls/doors/baseboards)
+    min_quad_area_frac: 0.05   # reject tiny spurious quads
+    approx_eps_frac: 0.02      # base polygon-approx tolerance (escalated if needed)
+
+    # registration / LED probe (one Sphero lit at a time)
+    probe_red: 0               # colour used to LIGHT the matrix (not to detect)
+    probe_green: 255
+    probe_blue: 0
+    # lit-confirmation by BRIGHTNESS INCREASE vs the dark pre-frame + depth OVERLAP.
+    # The bright LED saturates the Kinect RGB to ~white (green-hue detection fails),
+    # so we detect the region that got much brighter than when it was off, then
+    # match it to the depth blob projected into RGB. Serial one-at-a-time probing
+    # means brightness alone disambiguates; simultaneous multi-colour probing
+    # (future) would need hue + registered depth.
+    brightness_delta_thresh: 50.0  # min post-pre luma jump to count as lit
+    probe_min_area_px: 15      # min lit-blob area (px)
+    overlap_tol_px: 25.0       # lit<->projected-depth-centre match radius (px)
+    rgb_du: 0                  # optional extra constant RGB-x projection offset (px)
+    rgb_dv: 0                  # optional extra constant RGB-y projection offset (px)
+    render_timeout_seconds: 6.0
+    off_timeout_seconds: 4.0
+    probe_poll_seconds: 0.2
+    reset_settle_seconds: 0.5
+    discovery_settle_seconds: 1.0
+    compass_timeout_seconds: 25.0
+
+    # fusion / Kalman
+    body_to_field_yaw_offset: 0.0   # deg: magnetic-north -> field +x
+    r_cam: 1.0
+    r_vel: 4.0
+    r_ori: 2.0
+    r_acc: 50.0
+    r_gyro: 4.0
+    q_pos: 0.04
+    q_vel: 1.0
+    q_yaw: 1.0
+    q_angle: 1.0
+    q_acc: 100.0
+    q_gyro: 25.0
+
+    # sim only
+    sim_spheres: 4
+    seed: 0

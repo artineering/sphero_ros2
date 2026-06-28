@@ -21,7 +21,7 @@ from contextlib import contextmanager
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import PoseStamped
 
@@ -298,6 +298,13 @@ class SpheroInstanceDeviceController(Node):
         self.obstacle_pub = self.create_publisher(
             String, f'{self.topic_prefix}/obstacle', 10)
 
+        # Completion signal for compass calibration. calibrate_compass_callback
+        # BLOCKS (~seconds) while the robot spins; an overhead registrar fires
+        # calibration on many robots in parallel and waits for each to report
+        # done. Published in a finally so the registrar always unblocks.
+        self.calibrate_compass_done_pub = self.create_publisher(
+            Bool, f'{self.topic_prefix}/calibrate_compass_done', 10)
+
     def _log_initialization(self):
         """Log initialization information."""
         self.get_logger().info('='*70)
@@ -479,6 +486,7 @@ class SpheroInstanceDeviceController(Node):
 
     def calibrate_compass_callback(self, msg: String):
         """Handle compass calibration commands (BOLT only)."""
+        success = False
         try:
             self.get_logger().info('Calibrating compass (robot will spin)...')
             # NOTE: this BLOCKS this callback thread until calibration completes
@@ -493,6 +501,12 @@ class SpheroInstanceDeviceController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Error in calibrate_compass callback: {str(e)}')
+        finally:
+            # Always signal completion so a waiting registrar unblocks even on
+            # failure/unsupported (success flag carries the outcome).
+            done = Bool()
+            done.data = bool(success)
+            self.calibrate_compass_done_pub.publish(done)
 
     def matrix_callback(self, msg: String):
         """Handle LED matrix commands (BOLT only)."""
