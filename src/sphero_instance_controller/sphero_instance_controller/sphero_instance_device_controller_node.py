@@ -172,7 +172,7 @@ class SpheroInstanceDeviceController(Node):
 
         # Declare and get ROS parameters
         self.declare_parameter('sensor_rate', 10.0)  # Default: 10 Hz
-        self.declare_parameter('heartbeat_rate', 0)  # Default: 5 seconds
+        self.declare_parameter('heartbeat_rate', 5)  # Default: 5 seconds
         self.declare_parameter('external_localization', False) # Default: turned OFF
 
         self.sensor_rate = self.get_parameter('sensor_rate').value

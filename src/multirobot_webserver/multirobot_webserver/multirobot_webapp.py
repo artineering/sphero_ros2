@@ -57,9 +57,15 @@ AGENT_STATUS_TTL = 2.0
 INSTANCE_HEALTH_TTL = 2.0
 INSTANCE_HEALTH_TIMEOUT = (2, 3)
 # Grace window (seconds) after spawn during which a local instance with no BLE
-# telemetry yet reads 'connecting' rather than 'failed'. Covers BLE scan +
-# connect + first heartbeat.
-INSTANCE_CONNECT_WINDOW = 45.0
+# telemetry yet reads 'connecting' rather than 'failed'. Measured from spawn, so
+# it must cover the worst-case *serialized* batch: per-host BLE connects are
+# serialized through a file lock (BLE_CONNECT_LOCK_TIMEOUT=90s) and the sensor
+# publisher -- the telemetry FleetNode honors -- is created only after a
+# successful connect. In a one-host batch deploy, units deep in the lock queue
+# can't begin connecting for tens of seconds, so a flat 45s falsely latched them
+# to 'failed' seconds before they connected. Widened to accommodate a realistic
+# queued batch (multiple units x up to 90s each) before declaring failure.
+INSTANCE_CONNECT_WINDOW = 180.0
 # Heartbeat freshness (seconds): a Sphero reads 'running' only if FleetNode
 # received telemetry (a /sphero/<name>/status heartbeat or a sensor message)
 # within this window. The device controller's heartbeat timer + sensor stream
