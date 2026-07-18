@@ -433,14 +433,28 @@ def execute_speed(executor, task: TaskDescriptor) -> bool:
 
 
 def execute_matrix(executor, task: TaskDescriptor) -> bool:
-    """Display one BOLT matrix pattern."""
+    """Display one BOLT matrix pattern or custom 8x8 matrix.
+
+    Surface selection: a 64-element ``matrix`` renders the custom grid; else a
+    named ``pattern``. An explicit empty ``pattern`` ('') with no custom matrix
+    blanks the display (device honors empty pattern + empty matrix as clear).
+    A bare task with neither key keeps the legacy 'smile' default.
+    """
     params = task.parameters
-    pattern = params.get('pattern', 'smile')
+    custom_matrix = params.get('matrix') or params.get('custom_matrix')
+    if 'pattern' in params:
+        pattern = params.get('pattern')  # may be '' to request a blank
+    elif custom_matrix:
+        pattern = None
+    else:
+        pattern = 'smile'
     red = params.get('red', 255)
     green = params.get('green', 255)
     blue = params.get('blue', 255)
 
-    executor._send_matrix_command(pattern=pattern, red=red, green=green, blue=blue)
+    executor._send_matrix_command(
+        pattern=pattern or None, custom_matrix=custom_matrix or None,
+        red=red, green=green, blue=blue)
     return True
 
 

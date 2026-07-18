@@ -92,10 +92,12 @@ class TopicTaskExecutor(SpheroTaskExecutorBase):
         """Publish compass calibration command (empty payload) to ROS topic."""
         self.command_publisher('calibrate_compass', {})
 
-    def _send_matrix_command(self, pattern: str = None, red: int = 255, green: int = 255, blue: int = 255):
+    def _send_matrix_command(self, pattern: str = None, custom_matrix: list = None,
+                              red: int = 255, green: int = 255, blue: int = 255):
         """Publish matrix command to ROS topic."""
         self.command_publisher('matrix', {
             'pattern': pattern,
+            'matrix': custom_matrix,
             'red': red,
             'green': green,
             'blue': blue

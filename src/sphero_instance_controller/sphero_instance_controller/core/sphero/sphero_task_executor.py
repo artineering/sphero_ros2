@@ -225,7 +225,7 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
     def _send_calibrate_compass_command(self):
         raise NotImplementedError("Subclass must implement _send_calibrate_compass_command")
 
-    def _send_matrix_command(self, pattern: str = None,
+    def _send_matrix_command(self, pattern: str = None, custom_matrix: list = None,
                               red: int = 255, green: int = 255, blue: int = 255):
         raise NotImplementedError("Subclass must implement _send_matrix_command")
 

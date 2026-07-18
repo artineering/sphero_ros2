@@ -17,8 +17,10 @@ import signal
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from std_msgs.msg import String
+from multirobot_msgs.msg import FleetPolicy, SimilarityCue
 
 from sphero_instance_controller.core.common.task import TaskDescriptor, TaskStatus
 from sphero_instance_controller.core.sphero.topic_task_executor import TopicTaskExecutor
@@ -51,7 +53,19 @@ class SpheroInstanceTaskController(Node):
         self.sphero_name = sphero_name
         # Sanitize topic name: replace hyphens with underscores (ROS2 topic naming rules)
         topic_name_safe = name_safe
+        self.name_safe = name_safe
         self.topic_prefix = f'sphero/{topic_name_safe}'
+
+        # Fleet-policy (Similarity cue) state. The cue is applied THROUGH the
+        # task / state-machine stack, never by touching the device directly:
+        # steady IDENTITY enqueues a one-shot render task; BEHAVIOR (blink) is
+        # handed to the state machine controller as a two-state timer loop.
+        self._active_policy_id = None
+        self._policy_surface = None  # 'led' | 'matrix' | None
+        self._policy_mode = None     # 'steady' | 'blink' | None
+        # Spin is a Behavioral Similarity sub-behavior: a finite spin task on the
+        # DRIVE lane, composable with the blink SM (LED/matrix lane).
+        self._policy_spin_active = False
 
         # Note: Task controller does NOT connect to hardware
         # It only communicates through ROS topics with the device controller
@@ -115,6 +129,19 @@ class SpheroInstanceTaskController(Node):
             f'{self.topic_prefix}/reset_aim',
             self.reset_aim_callback,
             10,
+            callback_group=self.callback_group
+        )
+
+        # Fleet-wide policy broadcast. Single latched topic shared by every unit;
+        # transient-local QoS so a (re)started controller immediately receives
+        # the current policy. Typed multirobot_msgs/FleetPolicy, not JSON String.
+        policy_qos = QoSProfile(depth=1)
+        policy_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.policy_sub = self.create_subscription(
+            FleetPolicy,
+            '/fleet/policy',
+            self.policy_callback,
+            policy_qos,
             callback_group=self.callback_group
         )
 
@@ -197,6 +224,21 @@ class SpheroInstanceTaskController(Node):
         self.ir_pub = self.create_publisher(
             String,
             f'{self.topic_prefix}/ir',
+            10
+        )
+
+        # State-machine hand-off for ticking cues (BEHAVIOR blink). The task
+        # controller builds a state machine config and drives the state machine
+        # controller through its config / control topics.
+        self.sm_config_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/state_machine/config',
+            10
+        )
+
+        self.sm_control_pub = self.create_publisher(
+            String,
+            f'{self.topic_prefix}/state_machine/control',
             10
         )
 
@@ -499,6 +541,238 @@ class SpheroInstanceTaskController(Node):
             f'({", ".join(t.task_type for t in tasks)}) to queue. '
             f'Starts: {", ".join(starts)}'
         )
+
+    # ===== Fleet Policy (broadcast cues) =====
+
+    def policy_callback(self, msg: FleetPolicy):
+        """Apply a fleet-wide policy broadcast to this unit via the task stack.
+
+        Phase 1 implements the Similarity cue only. Proximity and Common Fate
+        flags are accepted and logged but not acted on yet.
+        """
+        try:
+            # Membership: raw callsigns (e.g. 'SB-33E3') normalized to compare
+            # against our sanitized name (e.g. 'SB_33E3').
+            is_member = any(
+                m.replace('-', '_') == self.name_safe for m in msg.members)
+
+            # Revoke (active=false) or not addressed to us -> tear everything down.
+            if not msg.active or not is_member:
+                self._clear_similarity()
+                self._active_policy_id = None
+                return
+
+            self._active_policy_id = msg.policy_id
+
+            if msg.enable_similarity:
+                self._apply_similarity(msg.similarity)
+            else:
+                self._clear_similarity()
+
+            if msg.enable_proximity:
+                self.get_logger().warning(
+                    'proximity cue not yet implemented (phase 2)',
+                    throttle_duration_sec=30.0)
+            if msg.enable_common_fate:
+                self.get_logger().warning(
+                    'common fate cue not yet implemented (phase 3)',
+                    throttle_duration_sec=30.0)
+
+        except Exception as e:
+            self.get_logger().error(f'Error in policy callback: {str(e)}')
+
+    def _apply_similarity(self, cue):
+        """Route the Similarity cue into the task / state-machine stack.
+
+        IDENTITY: steady visual render (surface chosen by content: RGB-only ->
+        LED, pattern/custom-matrix -> matrix).
+        BEHAVIOR: composable sub-behaviors -- `behavior_blink` runs the blink
+        state machine on the visual surface, and `behavior_spin` enqueues a
+        finite spin task on the DRIVE lane. Both may run at once (LED/matrix and
+        DRIVE are disjoint lanes).
+        """
+        red, green, blue = int(cue.red), int(cue.green), int(cue.blue)
+        pattern = cue.pattern or None
+        matrix = list(cue.matrix) if len(cue.matrix) == 64 else None
+        surface = 'matrix' if (pattern or matrix) else 'led'
+
+        if cue.cue_type == SimilarityCue.BEHAVIOR:
+            visual_mode = 'blink' if cue.behavior_blink else None
+            want_spin = bool(cue.behavior_spin)
+        else:  # IDENTITY: steady visual, no behaviors
+            visual_mode = 'steady'
+            want_spin = False
+
+        # ----- Visual behavior (LED / matrix surface) -----
+        # Leaving blink -> stop the blink state machine so it stops ticking.
+        if self._policy_mode == 'blink' and visual_mode != 'blink':
+            self._clear_blink_sm()
+        # Blank the previously-lit surface if the visual moved or went away.
+        new_surface = surface if visual_mode is not None else None
+        if self._policy_surface is not None and self._policy_surface != new_surface:
+            self._enqueue_policy_task(
+                self._similarity_blank_task(self._policy_surface))
+
+        if visual_mode == 'steady':
+            self._enqueue_policy_task(
+                self._similarity_render_task(surface, red, green, blue, pattern, matrix))
+        elif visual_mode == 'blink':
+            self._publish_blink_sm(
+                self._similarity_render_task(surface, red, green, blue, pattern, matrix),
+                self._similarity_blank_task(surface), cue.blink_hz)
+
+        self._policy_surface = new_surface
+        self._policy_mode = visual_mode
+
+        # ----- Spin behavior (DRIVE lane) -----
+        if want_spin:
+            self._apply_spin(cue)
+        else:
+            self._clear_spin()
+
+    def _clear_similarity(self):
+        """Tear down the Similarity cue deterministically.
+
+        Fix for the revoke bug where the blink kept running on some members
+        (their SM status kept changing while one unit terminated cleanly):
+
+          * Stop the blink SM UNCONDITIONALLY -- not gated on the in-memory
+            ``_policy_mode`` flag. That gate was the race: on a unit whose cached
+            state did not say 'blink', the clear was never sent, so the SM kept
+            ticking forever while a lone LED-blank could not stop it. Sending the
+            clear on every revoke removes the dependence on cached state.
+          * ``state_machine/control`` -> ``clear`` makes the SM controller HALT
+            and DROP the running machine (``StateMachine.clear()`` empties the
+            config so ``process()`` returns None), driving its status to
+            ``configured: false`` -- a terminated machine, verifiable on
+            ``sphero/<name>/state_machine/status``. Not just a dark LED.
+          * Idempotent: clearing an already-empty SM is a harmless no-op, so a
+            repeated revoke is safe.
+
+        Order: stop the SM FIRST, then blank the surface, so the terminated SM
+        cannot re-light after the blank. (Clear latency is << the blink half-
+        period, so no stray transition fires in the window.)
+
+        Pre-SM-lanes this clears the single SM slot (decision B); Phase-2 SM
+        lanes will scope it to the blink's own lane so a user SM survives.
+        """
+        self._clear_blink_sm()
+        # Blank the tracked surface; fall back to LED if state was lost so a
+        # desynced unit still goes dark.
+        self._enqueue_policy_task(
+            self._similarity_blank_task(self._policy_surface or 'led'))
+        self._policy_surface = None
+        self._policy_mode = None
+        self._clear_spin()
+
+    def _similarity_render_task(self, surface, red, green, blue, pattern, matrix):
+        """Build the on-surface render task dict for the cue."""
+        if surface == 'led':
+            return {
+                'task_id': 'policy_similarity',
+                'task_type': 'set_led',
+                'parameters': {'red': red, 'green': green, 'blue': blue},
+            }
+        params = {'red': red, 'green': green, 'blue': blue}
+        if matrix:
+            params['matrix'] = matrix
+        else:
+            params['pattern'] = pattern or ''
+        return {
+            'task_id': 'policy_similarity',
+            'task_type': 'matrix',
+            'parameters': params,
+        }
+
+    @staticmethod
+    def _similarity_blank_task(surface):
+        """Build a task that blanks the given surface (LED off / matrix clear)."""
+        if surface == 'led':
+            return {
+                'task_type': 'set_led',
+                'parameters': {'red': 0, 'green': 0, 'blue': 0},
+            }
+        # Empty pattern + no custom matrix is the device's blank convention.
+        return {'task_type': 'matrix', 'parameters': {'pattern': ''}}
+
+    def _enqueue_policy_task(self, item):
+        """Enqueue a policy-generated task onto our own executor."""
+        task = self._build_task(item, None)
+        self.task_executor.add_task(task)
+        self.publish_task_status(task)
+
+    def _publish_blink_sm(self, render, blank, blink_hz):
+        """Hand a blink cue to the state machine controller as a timer loop.
+
+        Two states, ``on`` (render) and ``off`` (blank), alternate every
+        half-period. One full on+off cycle completes at blink_hz; the rate is
+        clamped to avoid divide-by-zero / absurd timer periods.
+        """
+        half_period = 1.0 / (2.0 * max(float(blink_hz), 0.1))
+        config = {
+            'name': 'policy_similarity_blink',
+            'initial_state': 'on',
+            'states': [
+                {
+                    'name': 'on',
+                    'tasks': [render],
+                    'exits': [{
+                        'condition': {'type': 'timer', 'duration': half_period},
+                        'destination': 'off',
+                    }],
+                },
+                {
+                    'name': 'off',
+                    'tasks': [blank],
+                    'exits': [{
+                        'condition': {'type': 'timer', 'duration': half_period},
+                        'destination': 'on',
+                    }],
+                },
+            ],
+        }
+        msg = String()
+        msg.data = json.dumps(config)
+        self.sm_config_pub.publish(msg)
+
+    def _clear_blink_sm(self):
+        """Clear the blink state machine on the state machine controller."""
+        msg = String()
+        msg.data = json.dumps({'action': 'clear'})
+        self.sm_control_pub.publish(msg)
+
+    def _apply_spin(self, cue):
+        """Apply the spin Behavioral Similarity sub-behavior as a finite DRIVE task.
+
+        Path A: `spin` is a FINITE task (spin_duration_s takes precedence, else
+        spin_rotations, else a long default). It owns the DRIVE lane, so it
+        composes with the blink SM (LED/matrix lane). A persistent spin that
+        lasts as long as the cue is active awaits the Phase-2 SM-lanes work.
+        """
+        speed = int(cue.spin_speed) if cue.spin_speed > 0 else 100
+        duration = float(cue.spin_duration_s)
+        rotations = int(cue.spin_rotations)
+
+        params = {'speed': speed}
+        if duration > 0:
+            params['duration'] = duration
+        elif rotations > 0:
+            params['rotations'] = rotations
+        else:
+            params['duration'] = 30.0  # long default
+
+        self._enqueue_policy_task({
+            'task_id': 'policy_spin',
+            'task_type': 'spin',
+            'parameters': params,
+        })
+        self._policy_spin_active = True
+
+    def _clear_spin(self):
+        """Stop the spin behavior on the DRIVE lane if one was applied."""
+        if self._policy_spin_active:
+            self._enqueue_policy_task({'task_type': 'stop', 'parameters': {}})
+            self._policy_spin_active = False
 
     def state_callback(self, msg: String):
         """Handle Sphero state updates."""

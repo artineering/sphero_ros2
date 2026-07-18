@@ -13,6 +13,7 @@ instances to run simultaneously.
 import time
 import json
 import signal
+import threading
 import random
 import os
 import fcntl
@@ -20,14 +21,12 @@ from contextlib import contextmanager
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from std_msgs.msg import String, Bool
 from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import PoseStamped
 
 from sphero_instance_controller.msg import SpheroSensor
-from multirobot_msgs.msg import FleetPolicy, SimilarityCue
 
 from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
@@ -207,11 +206,6 @@ class SpheroInstanceDeviceController(Node):
         self.ble_link_down = False
         self._device_error_pub = None  # lazily created on first ble_lost publish
 
-        # Fleet-policy (broadcast cue) state. Phase 1 implements the Similarity
-        # cue only; Proximity / Common Fate flags are accepted but no-op.
-        self._policy_blink_timer = None  # ROS timer driving the BEHAVIOR blink
-        self._active_policy_id = None    # policy_id currently applied to this unit
-
         # Create timers
         self.sensor_timer = self.create_timer(self.sensor_period, self.publish_sensors)
 
@@ -284,15 +278,6 @@ class SpheroInstanceDeviceController(Node):
 
         self.ir_sub = self.create_subscription(
             String, f'{self.topic_prefix}/ir', self.ir_callback, 10)
-
-        # Fleet-wide policy broadcast. Single latched topic shared by every
-        # controller; transient-local QoS so a (re)started node immediately
-        # receives the current policy. Unlike the command subs above this is a
-        # typed multirobot_msgs/FleetPolicy, not std_msgs/String JSON.
-        policy_qos = QoSProfile(depth=1)
-        policy_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
-        self.policy_sub = self.create_subscription(
-            FleetPolicy, '/fleet/policy', self.policy_callback, policy_qos)
 
     def _create_publishers(self):
         """Create all ROS publishers for status and sensor topics."""
@@ -397,15 +382,35 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().error(f'Error in roll callback: {str(e)}')
 
     def spin_callback(self, msg: String):
-        """Handle spin commands."""
+        """Handle spin commands.
+
+        spherov2's ``api.spin()`` BUSY-LOOPS for the whole ``duration`` (ramping
+        heading) and holds its movement lock the entire time. Calling it inline
+        would block this node's single callback thread and starve every other
+        device command -- e.g. a concurrent Similarity blink's ``set_led`` would
+        be queued until the spin ends, making blink and spin run sequentially
+        instead of together. Run the spin on a background daemon thread so this
+        callback returns immediately and LED/matrix/sensor callbacks keep flowing.
+
+        Safe to overlap: ``set_main_led`` / ``set_matrix_pixel`` do NOT take
+        spherov2's movement lock, and all BLE writes are serialized onto the
+        bleak adapter's own loop thread, so the spin's heading writes and the
+        blink's LED writes interleave without corruption.
+        """
         try:
             data = json.loads(msg.data)
             angle = int(data.get('angle', 360))
             duration = float(data.get('duration', 1.0))
 
-            success = self.sphero.spin(angle, duration)
-            if success:
-                self.get_logger().info(f'Spinning {angle}deg over {duration}s')
+            def _run_spin():
+                try:
+                    self.sphero.spin(angle, duration)
+                except Exception as e:
+                    self.get_logger().error(f'Error during background spin: {str(e)}')
+
+            threading.Thread(
+                target=_run_spin, name='sphero-spin', daemon=True).start()
+            self.get_logger().info(f'Spinning {angle}deg over {duration}s (async)')
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Invalid JSON in spin command: {str(e)}')
@@ -562,103 +567,6 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().error(f'Invalid JSON in matrix command: {str(e)}')
         except Exception as e:
             self.get_logger().error(f'Error in matrix callback: {str(e)}')
-
-    # ===== Fleet Policy (broadcast cues) =====
-
-    def policy_callback(self, msg: FleetPolicy):
-        """Apply a fleet-wide policy broadcast to this unit.
-
-        Phase 1 implements the Similarity cue only. Proximity and Common Fate
-        flags are accepted and logged but not acted on yet.
-        """
-        try:
-            # Membership: tolerant raw-or-safe match. members[] carries raw
-            # callsigns (e.g. 'SB-33E3'); normalize hyphens to underscores to
-            # compare against our sanitized topic name (e.g. 'SB_33E3').
-            is_member = any(
-                m.replace('-', '_') == self.topic_name_safe for m in msg.members)
-
-            # Revoke (active=false) or not addressed to us -> tear everything down.
-            if not msg.active or not is_member:
-                self._clear_all_policy_cues()
-                return
-
-            self._active_policy_id = msg.policy_id
-
-            # --- Similarity (implemented) ---
-            if msg.enable_similarity:
-                self._apply_similarity(msg.similarity)
-            else:
-                self._clear_similarity()
-
-            # --- Proximity / Common Fate (deferred) ---
-            if msg.enable_proximity:
-                self.get_logger().warning(
-                    'proximity cue not yet implemented (phase 2)',
-                    throttle_duration_sec=30.0)
-            if msg.enable_common_fate:
-                self.get_logger().warning(
-                    'common fate cue not yet implemented (phase 3)',
-                    throttle_duration_sec=30.0)
-
-        except Exception as e:
-            self.get_logger().error(f'Error in policy callback: {str(e)}')
-
-    def _apply_similarity(self, cue):
-        """Render the Similarity cue on the LED matrix (BOLT only).
-
-        IDENTITY -> steady fill at (red, green, blue).
-        BEHAVIOR -> blink the fill on/off at cue.blink_hz.
-        """
-        red, green, blue = int(cue.red), int(cue.green), int(cue.blue)
-
-        if cue.cue_type == SimilarityCue.BEHAVIOR:
-            # Blink: full duty cycle toggle. One toggle every half-period, so a
-            # full on+off cycle completes at blink_hz. Clamp the rate to avoid
-            # divide-by-zero / absurd timer periods.
-            blink_hz = max(float(cue.blink_hz), 0.1)
-            half_period = 1.0 / (2.0 * blink_hz)
-
-            # Restart the timer cleanly so a re-published policy re-arms blinking.
-            self._cancel_blink_timer()
-            self._blink_on = False
-
-            def _toggle():
-                self._blink_on = not self._blink_on
-                if self._blink_on:
-                    self.sphero.set_matrix(
-                        custom_matrix=[1] * 64, red=red, green=green, blue=blue)
-                else:
-                    self.sphero.clear_matrix()
-
-            self._policy_blink_timer = self.create_timer(half_period, _toggle)
-        else:
-            # IDENTITY (default): steady fill, no blink timer.
-            self._cancel_blink_timer()
-            self.sphero.set_matrix(
-                custom_matrix=[1] * 64, red=red, green=green, blue=blue)
-
-    def _clear_similarity(self):
-        """Tear down the Similarity cue: stop blinking and blank the matrix."""
-        self._cancel_blink_timer()
-        self.sphero.clear_matrix()
-
-    def _cancel_blink_timer(self):
-        """Cancel and drop the blink timer if one is running."""
-        if self._policy_blink_timer is not None:
-            self._policy_blink_timer.cancel()
-            self.destroy_timer(self._policy_blink_timer)
-            self._policy_blink_timer = None
-
-    def _clear_all_policy_cues(self):
-        """Tear down every policy cue applied to this unit and reset state.
-
-        Phase 1 only owns the Similarity matrix cue. Extension point: when
-        Proximity (phase 2) / Common Fate (phase 3) land, stop their IR /
-        localization machinery here as well.
-        """
-        self._clear_similarity()
-        self._active_policy_id = None
 
     def collision_callback(self, msg: String):
         """Handle collision detection commands."""
