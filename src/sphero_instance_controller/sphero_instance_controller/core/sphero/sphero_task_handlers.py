@@ -45,6 +45,7 @@ class TaskType(Enum):
     LED_SEQUENCE = "led_sequence"
     MATRIX_SEQUENCE = "matrix_sequence"
     SPIN = "spin"
+    PROXIMITY_STEP = "proximity_step"
     STOP = "stop"
     CUSTOM = "custom"
     # Basic/immediate commands
@@ -313,6 +314,102 @@ def execute_spin(executor, task: TaskDescriptor) -> bool:
 def execute_stop(executor, task: TaskDescriptor) -> bool:
     """Stop the Sphero."""
     executor._send_stop_command()
+    return True
+
+
+# Anchor modes for the fleet-policy Proximity cue (mirror ProximityCue.msg).
+PROXIMITY_ANCHOR_CENTROID = 0
+PROXIMITY_ANCHOR_FIELD_POINT = 1
+
+
+def execute_proximity_step(executor, task: TaskDescriptor) -> bool:
+    """One clustering step for the fleet-policy Proximity cue (single-shot).
+
+    Per-unit, localization-fed: reads the live group snapshot from the executor
+    and issues ONE roll (or stop) toward the unit's computed target, then returns
+    True. The per-unit two-state timer SM re-issues this every tick, giving the
+    control cadence. Motion stays on the DRIVE lane.
+
+    The target is a superposition of two components, so ~target_spacing emerges
+    as the equilibrium:
+      * ATTRACTION toward the anchor (FIELD_POINT = a fixed field point, trivially
+        consistent across units; CENTROID = the mean of member fixes, a damped
+        consensus).
+      * REPULSION from any neighbor closer than ``target_spacing_cm`` (grows as
+        the gap shrinks), so units spread out instead of piling onto the anchor.
+
+    No-fix handling: a member without a localization fix is excluded from the
+    centroid and from neighbor repulsion. If CENTROID has no fixes at all, the
+    unit idles (stops). Determinism: the member list is pre-sorted by the caller.
+    Settle: when the net vector is below ``position_tolerance`` AND no neighbor is
+    inside ``min_separation_cm``, the unit stops and holds.
+    """
+    p = task.parameters
+    me = p.get('me')
+    members = p.get('members', [])
+    anchor_mode = int(p.get('anchor', PROXIMITY_ANCHOR_FIELD_POINT))
+    target_spacing = float(p.get('target_spacing_cm', 30.0))
+    min_sep = float(p.get('min_separation_cm', 15.0))
+    max_speed = int(p.get('max_speed', 60) or 60)
+    bounds = p.get('bounds')  # optional [min_x, min_y, max_x, max_y]
+
+    own = executor.get_current_position()
+    ox, oy = own['x'], own['y']
+
+    snapshot = executor.get_member_positions() or {}
+    # Member points that currently have a localization fix.
+    fixes = {
+        m: snapshot[m] for m in members
+        if m in snapshot and snapshot[m] is not None
+    }
+
+    # ----- Anchor -----
+    if anchor_mode == PROXIMITY_ANCHOR_CENTROID:
+        if not fixes:
+            # No group anchor to seek -> idle (do not drag the group).
+            executor._send_stop_command()
+            return True
+        ax = sum(f['x'] for f in fixes.values()) / len(fixes)
+        ay = sum(f['y'] for f in fixes.values()) / len(fixes)
+    else:  # FIELD_POINT
+        ax = float(p.get('anchor_x', 0.0))
+        ay = float(p.get('anchor_y', 0.0))
+
+    if bounds:
+        ax = min(max(ax, bounds[0]), bounds[2])
+        ay = min(max(ay, bounds[1]), bounds[3])
+
+    # ----- Attraction toward anchor -----
+    vx = ax - ox
+    vy = ay - oy
+
+    # ----- Repulsion from too-close neighbors -----
+    too_close = False
+    for m, pos in fixes.items():
+        if m == me:
+            continue
+        dx = ox - pos['x']
+        dy = oy - pos['y']
+        d = math.hypot(dx, dy)
+        if d <= 1e-6:
+            continue  # coincident fix: undefined direction, skip
+        if d < min_sep:
+            too_close = True
+        if d < target_spacing:
+            push = (target_spacing - d) / d
+            vx += dx * push
+            vy += dy * push
+
+    mag = math.hypot(vx, vy)
+
+    # ----- Settle / stop -----
+    if mag < executor.position_tolerance and not too_close:
+        executor._send_stop_command()
+        return True
+
+    heading = int(math.degrees(math.atan2(vy, vx))) % 360
+    speed = int(min(max_speed, max(mag, 1.0)))
+    executor._send_roll_command(heading, speed)
     return True
 
 

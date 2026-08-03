@@ -20,7 +20,8 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
 from std_msgs.msg import String
-from multirobot_msgs.msg import FleetPolicy, SimilarityCue
+from geometry_msgs.msg import PoseStamped
+from multirobot_msgs.msg import FleetPolicy, SimilarityCue, ProximityCue
 
 from sphero_instance_controller.core.common.task import TaskDescriptor, TaskStatus
 from sphero_instance_controller.core.sphero.topic_task_executor import TopicTaskExecutor
@@ -67,6 +68,14 @@ class SpheroInstanceTaskController(Node):
         # DRIVE lane, composable with the blink SM (LED/matrix lane).
         self._policy_spin_active = False
 
+        # Proximity cue (phase 2). Per-unit clustering driven by a two-state
+        # timer SM on the DRIVE lane; the step handler reads live group positions
+        # from the executor. Member localization subscriptions are held here and
+        # exposed to the executor via `get_member_positions`.
+        self._policy_proximity_active = False
+        self._member_positions = {}       # name_safe -> {'x','y','t'}
+        self._member_position_subs = {}   # name_safe -> Subscription
+
         # Note: Task controller does NOT connect to hardware
         # It only communicates through ROS topics with the device controller
 
@@ -88,7 +97,8 @@ class SpheroInstanceTaskController(Node):
         self.task_executor = TopicTaskExecutor(
             command_publisher=self.publish_command,
             position_callback=self.get_current_position,
-            heading_callback=self.get_current_heading
+            heading_callback=self.get_current_heading,
+            member_positions_callback=self.get_member_positions
         )
 
         # Create timer for task execution (10 Hz)
@@ -278,6 +288,10 @@ class SpheroInstanceTaskController(Node):
     def get_current_heading(self):
         """Get current heading for task executor."""
         return self.current_heading
+
+    def get_member_positions(self):
+        """Group localization snapshot for the executor's Proximity handler."""
+        return self._member_positions
 
     def publish_command(self, topic_name: str, params: dict):
         """
@@ -547,8 +561,9 @@ class SpheroInstanceTaskController(Node):
     def policy_callback(self, msg: FleetPolicy):
         """Apply a fleet-wide policy broadcast to this unit via the task stack.
 
-        Phase 1 implements the Similarity cue only. Proximity and Common Fate
-        flags are accepted and logged but not acted on yet.
+        Phases 1-2 implement the Similarity (LED/matrix lanes) and Proximity
+        (DRIVE lane) cues, which compose on disjoint lanes. Common Fate is
+        accepted and logged but not acted on yet.
         """
         try:
             # Membership: raw callsigns (e.g. 'SB-33E3') normalized to compare
@@ -559,6 +574,7 @@ class SpheroInstanceTaskController(Node):
             # Revoke (active=false) or not addressed to us -> tear everything down.
             if not msg.active or not is_member:
                 self._clear_similarity()
+                self._clear_proximity()
                 self._active_policy_id = None
                 return
 
@@ -570,9 +586,13 @@ class SpheroInstanceTaskController(Node):
                 self._clear_similarity()
 
             if msg.enable_proximity:
-                self.get_logger().warning(
-                    'proximity cue not yet implemented (phase 2)',
-                    throttle_duration_sec=30.0)
+                # Deterministic member ordering (sort by safe callsign) so every
+                # unit's centroid / slot math is identical.
+                members = sorted(m.replace('-', '_') for m in msg.members)
+                self._apply_proximity(msg.proximity, members)
+            else:
+                self._clear_proximity()
+
             if msg.enable_common_fate:
                 self.get_logger().warning(
                     'common fate cue not yet implemented (phase 3)',
@@ -604,9 +624,10 @@ class SpheroInstanceTaskController(Node):
             want_spin = False
 
         # ----- Visual behavior (LED / matrix surface) -----
-        # Leaving blink -> stop the blink state machine so it stops ticking.
+        # Leaving blink -> stop the blink state machine so it stops ticking. Clear
+        # the SM on the surface lane the blink was running on (old surface).
         if self._policy_mode == 'blink' and visual_mode != 'blink':
-            self._clear_blink_sm()
+            self._clear_blink_sm(self._policy_surface or 'led')
         # Blank the previously-lit surface if the visual moved or went away.
         new_surface = surface if visual_mode is not None else None
         if self._policy_surface is not None and self._policy_surface != new_surface:
@@ -619,7 +640,7 @@ class SpheroInstanceTaskController(Node):
         elif visual_mode == 'blink':
             self._publish_blink_sm(
                 self._similarity_render_task(surface, red, green, blue, pattern, matrix),
-                self._similarity_blank_task(surface), cue.blink_hz)
+                self._similarity_blank_task(surface), cue.blink_hz, surface)
 
         self._policy_surface = new_surface
         self._policy_mode = visual_mode
@@ -653,10 +674,10 @@ class SpheroInstanceTaskController(Node):
         cannot re-light after the blank. (Clear latency is << the blink half-
         period, so no stray transition fires in the window.)
 
-        Pre-SM-lanes this clears the single SM slot (decision B); Phase-2 SM
-        lanes will scope it to the blink's own lane so a user SM survives.
+        With SM lanes, the clear is scoped to the blink's own surface lane
+        (led/matrix), so a user SM on another lane survives.
         """
-        self._clear_blink_sm()
+        self._clear_blink_sm(self._policy_surface or 'led')
         # Blank the tracked surface; fall back to LED if state was lost so a
         # desynced unit still goes dark.
         self._enqueue_policy_task(
@@ -701,16 +722,19 @@ class SpheroInstanceTaskController(Node):
         self.task_executor.add_task(task)
         self.publish_task_status(task)
 
-    def _publish_blink_sm(self, render, blank, blink_hz):
+    def _publish_blink_sm(self, render, blank, blink_hz, lane):
         """Hand a blink cue to the state machine controller as a timer loop.
 
         Two states, ``on`` (render) and ``off`` (blank), alternate every
         half-period. One full on+off cycle completes at blink_hz; the rate is
-        clamped to avoid divide-by-zero / absurd timer periods.
+        clamped to avoid divide-by-zero / absurd timer periods. The SM is tagged
+        with its surface ``lane`` (led/matrix) so it runs concurrently with a
+        Proximity SM on the DRIVE lane instead of clobbering a single slot.
         """
         half_period = 1.0 / (2.0 * max(float(blink_hz), 0.1))
         config = {
             'name': 'policy_similarity_blink',
+            'lane': lane,
             'initial_state': 'on',
             'states': [
                 {
@@ -735,10 +759,10 @@ class SpheroInstanceTaskController(Node):
         msg.data = json.dumps(config)
         self.sm_config_pub.publish(msg)
 
-    def _clear_blink_sm(self):
-        """Clear the blink state machine on the state machine controller."""
+    def _clear_blink_sm(self, lane):
+        """Clear the blink state machine on its surface ``lane`` (led/matrix)."""
         msg = String()
-        msg.data = json.dumps({'action': 'clear'})
+        msg.data = json.dumps({'action': 'clear', 'lane': lane})
         self.sm_control_pub.publish(msg)
 
     def _apply_spin(self, cue):
@@ -773,6 +797,138 @@ class SpheroInstanceTaskController(Node):
         if self._policy_spin_active:
             self._enqueue_policy_task({'task_type': 'stop', 'parameters': {}})
             self._policy_spin_active = False
+
+    # ===== Fleet Policy: Proximity cue (DRIVE lane) =====
+
+    def _apply_proximity(self, cue: ProximityCue, members):
+        """Route the Proximity cue into the state-machine / DRIVE stack.
+
+        Subscribes this unit to every member's localization stream (so the step
+        handler can read the live group snapshot) and hands the state machine
+        controller a two-state timer SM on the ``drive`` lane whose every entry
+        fires one ``proximity_step`` task. The per-unit computation (anchor,
+        repulsion, settle) lives in ``execute_proximity_step``; the SM only
+        provides the cadence.
+        """
+        self._subscribe_member_positions(members)
+
+        anchor = int(cue.anchor)
+        target_spacing = float(cue.target_spacing_cm) if cue.target_spacing_cm > 0 else 30.0
+        tick_hz = float(cue.tick_hz) if cue.tick_hz > 0 else 3.0
+        min_sep = float(cue.min_separation_cm) if cue.min_separation_cm > 0 else 15.0
+        max_speed = int(cue.max_speed) if cue.max_speed > 0 else 60
+
+        step_task = {
+            'task_id': 'policy_proximity_step',
+            'task_type': 'proximity_step',
+            'parameters': {
+                'me': self.name_safe,
+                'members': members,
+                'anchor': anchor,
+                'anchor_x': float(cue.anchor_x),
+                'anchor_y': float(cue.anchor_y),
+                'target_spacing_cm': target_spacing,
+                'min_separation_cm': min_sep,
+                'max_speed': max_speed,
+            },
+        }
+        self._publish_proximity_sm(step_task, tick_hz)
+        self._policy_proximity_active = True
+
+    def _clear_proximity(self):
+        """Tear down the Proximity cue: halt the DRIVE SM, stop, unsubscribe."""
+        if not self._policy_proximity_active and not self._member_position_subs:
+            return
+        self._clear_proximity_sm()
+        # Stop any in-flight proximity roll on the DRIVE lane.
+        self._enqueue_policy_task({'task_type': 'stop', 'parameters': {}})
+        self._unsubscribe_member_positions()
+        self._policy_proximity_active = False
+
+    def _publish_proximity_sm(self, step_task, tick_hz):
+        """Publish the two-state timer ping-pong SM (DRIVE lane) for proximity.
+
+        Each state fires ``step_task`` on entry, then waits ``1/tick_hz`` before
+        entering the other, so a step fires every ``1/tick_hz`` seconds.
+        """
+        period = 1.0 / max(float(tick_hz), 0.1)
+        config = {
+            'name': 'policy_proximity',
+            'lane': 'drive',
+            'initial_state': 'step_a',
+            'states': [
+                {
+                    'name': 'step_a',
+                    'tasks': [step_task],
+                    'exits': [{
+                        'condition': {'type': 'timer', 'duration': period},
+                        'destination': 'step_b',
+                    }],
+                },
+                {
+                    'name': 'step_b',
+                    'tasks': [step_task],
+                    'exits': [{
+                        'condition': {'type': 'timer', 'duration': period},
+                        'destination': 'step_a',
+                    }],
+                },
+            ],
+        }
+        msg = String()
+        msg.data = json.dumps(config)
+        self.sm_config_pub.publish(msg)
+
+    def _clear_proximity_sm(self):
+        """Clear the proximity state machine on the ``drive`` lane."""
+        msg = String()
+        msg.data = json.dumps({'action': 'clear', 'lane': 'drive'})
+        self.sm_control_pub.publish(msg)
+
+    def _subscribe_member_positions(self, members):
+        """(Re)subscribe to ``/localization/<m>/position`` for each member.
+
+        Drops subscriptions for members no longer in the set and adds new ones,
+        so a re-broadcast with a changed roster reconciles cleanly.
+        """
+        wanted = set(members)
+        for name_safe in list(self._member_position_subs):
+            if name_safe not in wanted:
+                self._destroy_member_sub(name_safe)
+
+        for name_safe in members:
+            if name_safe in self._member_position_subs:
+                continue
+            topic = f'/localization/{name_safe}/position'
+            sub = self.create_subscription(
+                PoseStamped, topic,
+                lambda msg, n=name_safe: self._member_position_callback(n, msg),
+                10,
+                callback_group=self.callback_group,
+            )
+            self._member_position_subs[name_safe] = sub
+            self.get_logger().info(f'Proximity: subscribed member position {topic}')
+
+    def _unsubscribe_member_positions(self):
+        """Drop every member localization subscription and clear the snapshot."""
+        for name_safe in list(self._member_position_subs):
+            self._destroy_member_sub(name_safe)
+        self._member_positions = {}
+
+    def _destroy_member_sub(self, name_safe):
+        """Destroy one member subscription and forget its cached fix."""
+        sub = self._member_position_subs.pop(name_safe, None)
+        if sub is not None:
+            self.destroy_subscription(sub)
+        self._member_positions.pop(name_safe, None)
+
+    def _member_position_callback(self, name_safe, msg: PoseStamped):
+        """Cache a member's latest localization fix for the proximity handler."""
+        self._member_positions[name_safe] = {
+            'x': msg.pose.position.x,
+            'y': msg.pose.position.y,
+            't': time.time(),
+        }
 
     def state_callback(self, msg: String):
         """Handle Sphero state updates."""

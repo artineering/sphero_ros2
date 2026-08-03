@@ -230,6 +230,6 @@ Because every unit computes independently, they must derive the SAME target:
   while active.
 
 ## Approval Status
-- [ ] Waiting for user approval (pending open questions 3 and 6)
-- [ ] Approved
+- [x] Waiting for user approval (pending open questions 3 and 6)
+- [x] Approved (2026-08-03; Q3 field-bounds/min-sep deferred to pre-live-trial, FIELD_POINT default for bring-up; Q6 migration check confirmed in plan)
 - [ ] Executed

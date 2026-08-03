@@ -24,7 +24,8 @@ class TopicTaskExecutor(SpheroTaskExecutorBase):
     def __init__(self,
                  command_publisher: Callable[[str, Dict[str, Any]], None],
                  position_callback: Optional[Callable[[], Dict[str, float]]] = None,
-                 heading_callback: Optional[Callable[[], int]] = None):
+                 heading_callback: Optional[Callable[[], int]] = None,
+                 member_positions_callback: Optional[Callable[[], Dict[str, Dict[str, float]]]] = None):
         """
         Initialize topic-based task executor.
 
@@ -32,8 +33,11 @@ class TopicTaskExecutor(SpheroTaskExecutorBase):
             command_publisher: Callback to publish commands (topic_name, params)
             position_callback: Optional callback to get current position
             heading_callback: Optional callback to get current heading
+            member_positions_callback: Optional callback returning the group
+                localization snapshot {name_safe: {'x','y','t'}} for the
+                Proximity cue.
         """
-        super().__init__(position_callback, heading_callback)
+        super().__init__(position_callback, heading_callback, member_positions_callback)
         self.command_publisher = command_publisher
 
     def _send_raw_motor_command(self, left_mode: str, left_speed: int, right_mode: str, right_speed: int):

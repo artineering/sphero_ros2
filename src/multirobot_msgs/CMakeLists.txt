@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/FleetRobot.msg"
   "msg/FleetState.msg"
   "msg/SimilarityCue.msg"
+  "msg/ProximityCue.msg"
   "msg/FleetPolicy.msg"
   "srv/Register.srv"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs

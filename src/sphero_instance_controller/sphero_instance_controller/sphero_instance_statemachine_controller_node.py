@@ -11,8 +11,10 @@ instances to run simultaneously without cross-talk.
 """
 
 import json
+import time
 import importlib
 import signal
+from typing import Dict
 
 import rclpy
 from rclpy.node import Node
@@ -23,6 +25,18 @@ from std_msgs.msg import String
 from sphero_instance_controller.msg import SpheroSensor
 
 from sphero_instance_controller.core.sphero import StateMachine
+
+
+# SM lanes MIRROR the task-executor actuator lanes (drive/led/matrix/config): an
+# SM's ultimate effect is the executor lane its fired tasks land on, so two
+# concurrent SMs must occupy different executor domains to run without fighting
+# downstream. `default` is a reserved lane for configs that omit `lane`, so the
+# pre-lane single-SM publishers (e.g. the websocket server / webapp) keep working
+# unchanged. Each lane holds its own StateMachine instance and is ticked
+# independently.
+SM_ACTUATOR_LANES = ('drive', 'led', 'matrix', 'config')
+DEFAULT_SM_LANE = 'default'
+ALL_SM_LANES = SM_ACTUATOR_LANES + (DEFAULT_SM_LANE,)
 
 
 class SpheroInstanceStateMachineController(Node):
@@ -51,20 +65,31 @@ class SpheroInstanceStateMachineController(Node):
         topic_name_safe = name_safe
         self.topic_prefix = f'sphero/{topic_name_safe}'
 
-        # Initialize state machine core class
-        self.state_machine = StateMachine(
-            logger=self._log_info,
-            topic_subscribe_callback=self.subscribe_to_topic,
-            topic_unsubscribe_callback=self.unsubscribe_from_topic
-        )
+        # One StateMachine per lane, ticked independently. A Similarity-BLINK SM
+        # (led/matrix lane) and a Proximity-cadence SM (drive lane) coexist on
+        # one unit without contending for a single slot. Every lane shares the
+        # node's dynamic subscribe/unsubscribe callbacks; topic values are
+        # broadcast to every lane's SM (values are keyed by topic name, and each
+        # SM only reads the topics its own states reference).
+        self.state_machines: Dict[str, StateMachine] = {
+            lane: StateMachine(
+                logger=self._log_info,
+                topic_subscribe_callback=self.subscribe_to_topic,
+                topic_unsubscribe_callback=self.unsubscribe_from_topic,
+            )
+            for lane in ALL_SM_LANES
+        }
 
-        # Cache of the previously-active path so we can compute the entered
-        # branch (newly-active levels) on each state_transition event.
-        self._previous_path = []
+        # Per-lane cache of the previously-active path so we can compute the
+        # entered branch (newly-active levels) on each state_transition event.
+        self._previous_paths: Dict[str, list] = {lane: [] for lane in ALL_SM_LANES}
 
-        # Dynamic topic subscriptions for state machine conditions
+        # Dynamic topic subscriptions for state machine conditions. Refcounted at
+        # the node level so two lanes referencing the same topic share one ROS
+        # subscription and one lane unsubscribing does not drop it for the other.
         self.topic_subscriptions = {}
         self.topic_message_types = {}
+        self.topic_refcounts: Dict[str, int] = {}
 
         # Callback group for reentrant callbacks
         self.callback_group = ReentrantCallbackGroup()
@@ -213,20 +238,25 @@ class SpheroInstanceStateMachineController(Node):
         """
         try:
             config = json.loads(msg.data)
-            self.get_logger().info(f'Received state machine configuration: {config.get("name", "unnamed")}')
+            lane = self._resolve_lane(config.get('lane'))
+            sm = self.state_machines[lane]
+            self.get_logger().info(
+                f'Received state machine configuration: '
+                f'{config.get("name", "unnamed")} (lane: {lane})')
 
-            # Configure the state machine
-            if self.state_machine.configure(config):
+            # Configure the state machine on this lane (replaces any prior SM).
+            if sm.configure(config):
                 # Publish configuration success event
                 self.publish_event('configuration_loaded', {
+                    'lane': lane,
                     'name': config.get('name', 'unnamed'),
-                    'num_states': len(self.state_machine.states),
+                    'num_states': len(sm.states),
                 })
 
-                # Execute initial state tasks
-                self.execute_current_state_tasks()
+                # Execute initial state tasks for this lane.
+                self.execute_current_state_tasks(lane)
             else:
-                self.get_logger().error('Failed to configure state machine')
+                self.get_logger().error(f'Failed to configure state machine (lane: {lane})')
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Failed to parse configuration JSON: {e}')
@@ -234,6 +264,21 @@ class SpheroInstanceStateMachineController(Node):
             self.get_logger().error(f'Error processing configuration: {e}')
             import traceback
             self.get_logger().error(traceback.format_exc())
+
+    def _resolve_lane(self, lane) -> str:
+        """Map a config/control ``lane`` id to a known lane.
+
+        An absent / null / unknown lane maps to the reserved ``default`` lane, so
+        pre-lane single-SM publishers (which omit ``lane``) keep working.
+        """
+        if lane is None:
+            return DEFAULT_SM_LANE
+        lane = str(lane).lower()
+        if lane not in self.state_machines:
+            self.get_logger().warning(
+                f'Unknown SM lane "{lane}"; using "{DEFAULT_SM_LANE}"')
+            return DEFAULT_SM_LANE
+        return lane
 
     def sensor_callback(self, msg: SpheroSensor):
         """
@@ -260,8 +305,11 @@ class SpheroInstanceStateMachineController(Node):
                 'velocity_y': msg.velocity_y,
                 'battery_percentage': msg.battery_percentage,
             }
+            # Broadcast each sensor field to every lane's SM (values are keyed by
+            # field name; each SM only reads the fields its states reference).
             for field_name, value in sensor_fields.items():
-                self.state_machine.update_topic_value(field_name, value)
+                for sm in self.state_machines.values():
+                    sm.update_topic_value(field_name, value)
 
         except Exception as e:
             self.get_logger().error(f'Failed to process sensor data: {e}')
@@ -270,7 +318,9 @@ class SpheroInstanceStateMachineController(Node):
         """
         Handle runtime control messages.
 
-        Expected JSON: ``{"action": "pause" | "resume" | "clear"}``.
+        Expected JSON: ``{"action": "pause" | "resume" | "clear", "lane": "..."}``.
+        A ``lane`` targets one lane (absent -> ``default``); ``"scope": "all"``
+        applies the action to every lane.
         """
         try:
             data = json.loads(msg.data)
@@ -279,18 +329,26 @@ class SpheroInstanceStateMachineController(Node):
             self.get_logger().error(f'Invalid JSON in control command: {e}')
             return
 
-        if action == 'pause':
-            ok = self.state_machine.pause()
-            self.publish_event('sm_paused', {'success': ok})
-        elif action == 'resume':
-            ok = self.state_machine.resume()
-            self.publish_event('sm_resumed', {'success': ok})
-        elif action == 'clear':
-            self.state_machine.clear()
-            self._previous_path = []
-            self.publish_event('sm_cleared', {})
+        if str(data.get('scope', '')).lower() == 'all':
+            target_lanes = list(self.state_machines.keys())
         else:
-            self.get_logger().warning(f'Unknown control action: "{action}"')
+            target_lanes = [self._resolve_lane(data.get('lane'))]
+
+        for lane in target_lanes:
+            sm = self.state_machines[lane]
+            if action == 'pause':
+                ok = sm.pause()
+                self.publish_event('sm_paused', {'lane': lane, 'success': ok})
+            elif action == 'resume':
+                ok = sm.resume()
+                self.publish_event('sm_resumed', {'lane': lane, 'success': ok})
+            elif action == 'clear':
+                sm.clear()
+                self._previous_paths[lane] = []
+                self.publish_event('sm_cleared', {'lane': lane})
+            else:
+                self.get_logger().warning(f'Unknown control action: "{action}"')
+                return
 
     # ===== Dynamic Topic Subscriptions =====
 
@@ -306,8 +364,14 @@ class SpheroInstanceStateMachineController(Node):
         # Namespace the topic
         namespaced_topic = f'{self.topic_prefix}/{topic_name.lstrip("/")}'
 
+        # Node-level refcount: a second lane referencing the same topic shares the
+        # single ROS subscription rather than creating a duplicate.
         if namespaced_topic in self.topic_subscriptions:
-            self.get_logger().info(f'Already subscribed to topic: {namespaced_topic}')
+            self.topic_refcounts[namespaced_topic] = \
+                self.topic_refcounts.get(namespaced_topic, 1) + 1
+            self.get_logger().info(
+                f'Already subscribed to topic: {namespaced_topic} '
+                f'(refcount={self.topic_refcounts[namespaced_topic]})')
             return
 
         try:
@@ -339,17 +403,21 @@ class SpheroInstanceStateMachineController(Node):
             # ``condition['topic']`` match. The actual ROS subscription still uses
             # the namespaced topic; only the SM-side key needs to match the config.
             def topic_callback(msg):
+                # Broadcast the received value to every lane's SM (each SM only
+                # reads the topics its own states reference).
                 if field_path:
                     try:
                         value = msg
                         for field in field_path.split('.'):
                             value = getattr(value, field)
-                        self.state_machine.update_topic_value(topic_name, value)
                     except AttributeError as e:
                         self.get_logger().error(f'Failed to extract field {field_path} from {namespaced_topic}: {e}')
-                        self.state_machine.update_topic_value(topic_name, msg)
+                        value = msg
                 else:
-                    self.state_machine.update_topic_value(topic_name, msg)
+                    value = msg
+
+                for sm in self.state_machines.values():
+                    sm.update_topic_value(topic_name, value)
 
                 self.get_logger().debug(f'Received message on {namespaced_topic} (key: {topic_name})')
 
@@ -369,6 +437,7 @@ class SpheroInstanceStateMachineController(Node):
             )
 
             self.topic_subscriptions[namespaced_topic] = subscription
+            self.topic_refcounts[namespaced_topic] = 1
             self.get_logger().info(f'Subscribed to topic: {namespaced_topic} (type: {msg_type})')
 
         except Exception as e:
@@ -386,65 +455,77 @@ class SpheroInstanceStateMachineController(Node):
         # Namespace the topic
         namespaced_topic = f'{self.topic_prefix}/{topic_name.lstrip("/")}'
 
-        if namespaced_topic in self.topic_subscriptions:
-            self.destroy_subscription(self.topic_subscriptions[namespaced_topic])
-            del self.topic_subscriptions[namespaced_topic]
-            if namespaced_topic in self.topic_message_types:
-                del self.topic_message_types[namespaced_topic]
-            self.get_logger().info(f'Unsubscribed from topic: {namespaced_topic}')
+        if namespaced_topic not in self.topic_subscriptions:
+            return
+
+        # Refcounted: only tear down the ROS subscription when the last lane
+        # referencing this topic releases it.
+        count = self.topic_refcounts.get(namespaced_topic, 1) - 1
+        if count > 0:
+            self.topic_refcounts[namespaced_topic] = count
+            self.get_logger().info(
+                f'Released topic ref: {namespaced_topic} (refcount={count})')
+            return
+
+        self.destroy_subscription(self.topic_subscriptions[namespaced_topic])
+        del self.topic_subscriptions[namespaced_topic]
+        self.topic_refcounts.pop(namespaced_topic, None)
+        if namespaced_topic in self.topic_message_types:
+            del self.topic_message_types[namespaced_topic]
+        self.get_logger().info(f'Unsubscribed from topic: {namespaced_topic}')
 
     # ===== State Machine Processing =====
 
     def update_callback(self):
-        """Periodic state machine update callback."""
-        result = self.state_machine.process()
+        """Periodic update: tick EVERY lane's SM; each fires its own tasks."""
+        for lane, sm in self.state_machines.items():
+            result = sm.process()
+            if result is None:
+                continue
 
-        if result is None:
-            return
+            # Handle events for this lane.
+            for event in result.get('events', []):
+                event_type = event.get('type')
 
-        # Handle events
-        for event in result.get('events', []):
-            event_type = event.get('type')
+                if event_type == 'state_timeout':
+                    path_str = '·'.join(event.get('path') or [event.get('state', '?')])
+                    self.get_logger().warning(
+                        f'[{lane}] State {path_str} timed out after {event["elapsed"]:.1f}s'
+                    )
+                    self.publish_event('state_timeout', {'lane': lane, **event})
 
-            if event_type == 'state_timeout':
-                path_str = '·'.join(event.get('path') or [event.get('state', '?')])
-                self.get_logger().warning(
-                    f'State {path_str} timed out after {event["elapsed"]:.1f}s'
-                )
-                self.publish_event('state_timeout', event)
+                elif event_type == 'state_transition':
+                    path_str = '·'.join(event.get('path') or [event.get('to', '?')])
+                    self.get_logger().info(
+                        f'[{lane}] Transitioned to {path_str} (from {event.get("from", "?")})'
+                    )
+                    self.publish_event('state_transition', {'lane': lane, **event})
 
-            elif event_type == 'state_transition':
-                path_str = '·'.join(event.get('path') or [event.get('to', '?')])
-                self.get_logger().info(
-                    f'Transitioned to {path_str} (from {event.get("from", "?")})'
-                )
-                self.publish_event('state_transition', event)
+                    # Execute tasks for every newly-entered state on the new path.
+                    self.execute_tasks_for_entered_branch(lane, event.get('path') or [])
 
-                # Execute tasks for every newly-entered state on the new path.
-                self.execute_tasks_for_entered_branch(event.get('path') or [])
+    def execute_tasks_for_entered_branch(self, lane, new_path):
+        """Run on-entry tasks for each state newly active on ``lane``'s path.
 
-    def execute_tasks_for_entered_branch(self, new_path):
-        """Run on-entry tasks for each state newly active on the path.
-
-        Compares ``new_path`` against the cached previous path; any level whose
-        state name has changed (or is new) is considered entered, and its tasks
-        are dispatched in root-to-leaf order. Levels that are unchanged are
+        Compares ``new_path`` against the lane's cached previous path; any level
+        whose state name has changed (or is new) is considered entered, and its
+        tasks are dispatched in root-to-leaf order. Levels that are unchanged are
         skipped — their tasks already fired when they were first entered.
         """
-        old_path = self._previous_path
+        old_path = self._previous_paths[lane]
         for depth, state_name in enumerate(new_path):
             unchanged = depth < len(old_path) and old_path[depth] == state_name
             if unchanged:
                 continue
-            self._dispatch_tasks_for_state(new_path, depth, state_name)
+            self._dispatch_tasks_for_state(lane, new_path, depth, state_name)
 
-        self._previous_path = list(new_path)
-        self.state_machine.mark_tasks_completed()
+        self._previous_paths[lane] = list(new_path)
+        self.state_machines[lane].mark_tasks_completed()
 
-    def _dispatch_tasks_for_state(self, path, depth, state_name):
-        """Resolve the state at ``path[:depth+1]`` in the SM tree and publish its tasks."""
+    def _dispatch_tasks_for_state(self, lane, path, depth, state_name):
+        """Resolve the state at ``path[:depth+1]`` in ``lane``'s SM tree and publish its tasks."""
         path_to_here = path[:depth + 1]
-        bundles = self.state_machine.get_tasks_for_path(path_to_here)
+        bundles = self.state_machines[lane].get_tasks_for_path(path_to_here)
         if not bundles:
             return
         bundle = bundles[-1]  # tasks for state at this depth
@@ -453,7 +534,7 @@ class SpheroInstanceStateMachineController(Node):
             return
 
         path_str = '·'.join(path_to_here)
-        self.get_logger().info(f'Executing {len(tasks)} task(s) for {path_str}')
+        self.get_logger().info(f'[{lane}] Executing {len(tasks)} task(s) for {path_str}')
 
         for idx, task in enumerate(tasks):
             task_type = task.get('task_type') or task.get('type', 'none')
@@ -462,7 +543,7 @@ class SpheroInstanceStateMachineController(Node):
             self.get_logger().info(f'  Task {idx + 1}/{len(tasks)}: {task_type}')
 
             task_command = {
-                'task_id': f'sm_{state_name}_{idx}',
+                'task_id': f'sm_{lane}_{state_name}_{idx}',
                 'task_type': task_type,
                 'parameters': task_params,
             }
@@ -471,6 +552,7 @@ class SpheroInstanceStateMachineController(Node):
             self.task_pub.publish(msg)
 
             self.publish_event('task_executed', {
+                'lane': lane,
                 'state': state_name,
                 'path': path_to_here,
                 'task_type': task_type,
@@ -479,20 +561,30 @@ class SpheroInstanceStateMachineController(Node):
                 'total_tasks': len(tasks),
             })
 
-    def execute_current_state_tasks(self):
-        """Run on-entry tasks for every state on the current active path (used after configure())."""
-        path = self.state_machine.get_active_path()
+    def execute_current_state_tasks(self, lane):
+        """Run on-entry tasks for every state on ``lane``'s active path (used after configure())."""
+        sm = self.state_machines[lane]
+        path = sm.get_active_path()
         if not path:
-            self.get_logger().info('No tasks to execute (state machine has no active path)')
-            self.state_machine.mark_tasks_completed()
+            self.get_logger().info(
+                f'[{lane}] No tasks to execute (state machine has no active path)')
+            sm.mark_tasks_completed()
             return
         # Treat the whole path as freshly entered.
-        self._previous_path = []
-        self.execute_tasks_for_entered_branch(path)
+        self._previous_paths[lane] = []
+        self.execute_tasks_for_entered_branch(lane, path)
 
     def publish_status(self):
-        """Publish current state machine status."""
-        status = self.state_machine.get_status()
+        """Publish per-lane state machine status.
+
+        Back-compat: the ``default`` lane's status stays at the top level (its
+        shape is unchanged), so pre-lane consumers keep working. A ``lanes`` map
+        adds every lane's status for the multi-lane view.
+        """
+        status = self.state_machines[DEFAULT_SM_LANE].get_status()
+        status['lanes'] = {
+            lane: sm.get_status() for lane, sm in self.state_machines.items()
+        }
 
         msg = String()
         msg.data = json.dumps(status)
@@ -509,7 +601,7 @@ class SpheroInstanceStateMachineController(Node):
         event = {
             'event_type': event_type,
             'data': data,
-            'timestamp': self.state_machine.get_status()['timestamp']
+            'timestamp': time.time(),
         }
 
         msg = String()

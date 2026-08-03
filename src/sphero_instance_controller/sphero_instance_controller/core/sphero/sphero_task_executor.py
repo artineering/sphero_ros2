@@ -50,6 +50,7 @@ TASK_LANES = {
     'circle': frozenset({LANE_DRIVE}),
     'spin': frozenset({LANE_DRIVE}),
     'roll': frozenset({LANE_DRIVE}),
+    'proximity_step': frozenset({LANE_DRIVE}),
     'reflect': frozenset({LANE_DRIVE}),
     'calibrate_compass': frozenset({LANE_DRIVE}),
     'stop': frozenset({LANE_DRIVE}),
@@ -111,9 +112,13 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
 
     def __init__(self,
                  position_callback: Optional[Callable[[], Dict[str, float]]] = None,
-                 heading_callback: Optional[Callable[[], int]] = None):
+                 heading_callback: Optional[Callable[[], int]] = None,
+                 member_positions_callback: Optional[Callable[[], Dict[str, Dict[str, float]]]] = None):
         self.position_callback = position_callback
         self.heading_callback = heading_callback
+        # Snapshot provider for group localization (fleet-policy Proximity cue):
+        # returns {member_name_safe: {'x','y','t'}} of the latest member fixes.
+        self.member_positions_callback = member_positions_callback
 
         self.default_speed = 100
         self.position_tolerance = 10.0  # cm
@@ -131,6 +136,7 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
         self.register_handler('led_sequence', h.execute_led_sequence)
         self.register_handler('matrix_sequence', h.execute_matrix_sequence)
         self.register_handler('spin', h.execute_spin)
+        self.register_handler('proximity_step', h.execute_proximity_step)
         self.register_handler('stop', h.execute_stop)
         self.register_handler('custom', h.execute_custom)
         self.register_handler('set_led', h.execute_set_led)
@@ -197,6 +203,15 @@ class SpheroTaskExecutorBase(TaskExecutorBase):
         if self.heading_callback:
             return self.heading_callback()
         return 0
+
+    def get_member_positions(self) -> Dict[str, Dict[str, float]]:
+        """Latest group localization snapshot {name_safe: {'x','y','t'}}.
+
+        Empty when no provider is injected (e.g. no active Proximity policy).
+        """
+        if self.member_positions_callback:
+            return self.member_positions_callback()
+        return {}
 
     # ----- Abstract command-emission interface (subclass implements) -----
 
