@@ -84,6 +84,14 @@ class SpheroInstanceStateMachineController(Node):
         # entered branch (newly-active levels) on each state_transition event.
         self._previous_paths: Dict[str, list] = {lane: [] for lane in ALL_SM_LANES}
 
+        # Per-lane PENDING (synchronized-start) buffer: a config carrying a
+        # future ``start_at`` is withheld here as (config, start_at) until the
+        # shared epoch, then flushed in update_callback so its ``entry_time`` is
+        # stamped at ~epoch on every unit (mechanism a). At most one pending
+        # config per lane; a fresh config or a clear on that lane replaces/drops
+        # it. Absent -> the lane has nothing scheduled.
+        self._pending_configs: Dict[str, tuple] = {}
+
         # Dynamic topic subscriptions for state machine conditions. Refcounted at
         # the node level so two lanes referencing the same topic share one ROS
         # subscription and one lane unsubscribing does not drop it for the other.
@@ -239,24 +247,28 @@ class SpheroInstanceStateMachineController(Node):
         try:
             config = json.loads(msg.data)
             lane = self._resolve_lane(config.get('lane'))
-            sm = self.state_machines[lane]
             self.get_logger().info(
                 f'Received state machine configuration: '
                 f'{config.get("name", "unnamed")} (lane: {lane})')
 
-            # Configure the state machine on this lane (replaces any prior SM).
-            if sm.configure(config):
-                # Publish configuration success event
-                self.publish_event('configuration_loaded', {
-                    'lane': lane,
-                    'name': config.get('name', 'unnamed'),
-                    'num_states': len(sm.states),
-                })
+            # A fresh config for a lane always supersedes any config still
+            # pending on it (only one cue owns a lane at a time).
+            self._pending_configs.pop(lane, None)
 
-                # Execute initial state tasks for this lane.
-                self.execute_current_state_tasks(lane)
-            else:
-                self.get_logger().error(f'Failed to configure state machine (lane: {lane})')
+            # Synchronized start (mechanism a): a config carrying a FUTURE
+            # ``start_at`` is withheld until the shared epoch so its entry_time
+            # (hence first fire AND timer phase) aligns across the fleet. Absent
+            # or already-past start_at -> configure immediately (back-compat with
+            # the websocket / webapp publishers, which omit the field).
+            start_at = config.get('start_at')
+            if start_at is not None and start_at > time.time():
+                self._pending_configs[lane] = (config, start_at)
+                self.get_logger().info(
+                    f'[{lane}] config scheduled in '
+                    f'{start_at - time.time():.2f}s (synchronized start)')
+                return
+
+            self._activate_config(lane, config)
 
         except json.JSONDecodeError as e:
             self.get_logger().error(f'Failed to parse configuration JSON: {e}')
@@ -264,6 +276,29 @@ class SpheroInstanceStateMachineController(Node):
             self.get_logger().error(f'Error processing configuration: {e}')
             import traceback
             self.get_logger().error(traceback.format_exc())
+
+    def _activate_config(self, lane, config):
+        """Configure ``lane``'s SM and fire its initial-state tasks now.
+
+        The two-call activation (``configure`` + ``execute_current_state_tasks``)
+        shared by the immediate config path and the synchronized-start flush.
+        Stamps ``entry_time`` at call time, so calling it from the pending-buffer
+        flush aligns the fleet's first fire and timer phase to the epoch.
+        """
+        sm = self.state_machines[lane]
+        # Configure the state machine on this lane (replaces any prior SM).
+        if sm.configure(config):
+            # Publish configuration success event
+            self.publish_event('configuration_loaded', {
+                'lane': lane,
+                'name': config.get('name', 'unnamed'),
+                'num_states': len(sm.states),
+            })
+
+            # Execute initial state tasks for this lane.
+            self.execute_current_state_tasks(lane)
+        else:
+            self.get_logger().error(f'Failed to configure state machine (lane: {lane})')
 
     def _resolve_lane(self, lane) -> str:
         """Map a config/control ``lane`` id to a known lane.
@@ -345,6 +380,9 @@ class SpheroInstanceStateMachineController(Node):
             elif action == 'clear':
                 sm.clear()
                 self._previous_paths[lane] = []
+                # Drop any not-yet-started (pending) config on this lane so a
+                # revoke mid-wait cancels a scheduled cue before it ever fires.
+                self._pending_configs.pop(lane, None)
                 self.publish_event('sm_cleared', {'lane': lane})
             else:
                 self.get_logger().warning(f'Unknown control action: "{action}"')
@@ -477,7 +515,14 @@ class SpheroInstanceStateMachineController(Node):
     # ===== State Machine Processing =====
 
     def update_callback(self):
-        """Periodic update: tick EVERY lane's SM; each fires its own tasks."""
+        """Periodic update: flush due synchronized-start configs, then tick.
+
+        Any pending lane whose ``start_at`` has arrived is activated first (its
+        entry_time lands within one 10 Hz tick of the epoch, so lanes sharing a
+        start_at flush together -> fleet-aligned), then every lane's SM ticks.
+        """
+        self._flush_pending_configs()
+
         for lane, sm in self.state_machines.items():
             result = sm.process()
             if result is None:
@@ -503,6 +548,19 @@ class SpheroInstanceStateMachineController(Node):
 
                     # Execute tasks for every newly-entered state on the new path.
                     self.execute_tasks_for_entered_branch(lane, event.get('path') or [])
+
+    def _flush_pending_configs(self):
+        """Activate any synchronized-start config whose epoch has arrived.
+
+        Popped and configured on the first tick at/after its ``start_at`` so
+        entry_time is stamped at ~epoch. Iterates a snapshot so activation does
+        not mutate the dict mid-loop.
+        """
+        now = time.time()
+        for lane, (config, start_at) in list(self._pending_configs.items()):
+            if now >= start_at:
+                del self._pending_configs[lane]
+                self._activate_config(lane, config)
 
     def execute_tasks_for_entered_branch(self, lane, new_path):
         """Run on-entry tasks for each state newly active on ``lane``'s path.

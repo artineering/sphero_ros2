@@ -29,6 +29,14 @@ from sphero_instance_controller.core.sphero.topic_task_executor import TopicTask
 # Note: Task controller does NOT import scanner, SpheroEduAPI, or Sphero
 # It only communicates through ROS topics
 
+# Minimum lead for a NONZERO policy start_offset (OQ4). Clock skew across the
+# BLE worker Pis plus the 10 Hz SM flush granularity mean a very small offset
+# could resolve into the past for the last-arriving unit. Flooring the SHARED
+# offset (anchored to the coordinator's `now`) keeps the target comfortably in
+# the future while every unit still computes the identical absolute instant, so
+# synchronization is preserved. A start_offset of 0 stays immediate (no floor).
+MIN_POLICY_START_OFFSET_S = 0.5
+
 
 class SpheroInstanceTaskController(Node):
     """
@@ -580,8 +588,22 @@ class SpheroInstanceTaskController(Node):
 
             self._active_policy_id = msg.policy_id
 
+            # Resolve the shared synchronized-start instant ONCE for this
+            # broadcast, then thread the same absolute epoch into every cue so
+            # all lanes (and every member) anchor to the identical instant. The
+            # msg floats default to 0.0 (never None), so the immediate-start
+            # sentinel is `> 0.0`, not `is not None` (Decision D4).
+            now = msg.now if msg.now > 0.0 else None
+            start_offset = msg.start_offset if msg.start_offset > 0.0 else None
+            # ~0.5 s floor on a NONZERO offset (OQ4). Applied at the policy
+            # call-site only, so the direct task path (task_callback /
+            # _handle_bundle) that shares `_compute_start_at` is unaffected.
+            if start_offset is not None and start_offset < MIN_POLICY_START_OFFSET_S:
+                start_offset = MIN_POLICY_START_OFFSET_S
+            start_at = self._compute_start_at(now, start_offset)
+
             if msg.enable_similarity:
-                self._apply_similarity(msg.similarity)
+                self._apply_similarity(msg.similarity, start_at)
             else:
                 self._clear_similarity()
 
@@ -589,7 +611,7 @@ class SpheroInstanceTaskController(Node):
                 # Deterministic member ordering (sort by safe callsign) so every
                 # unit's centroid / slot math is identical.
                 members = sorted(m.replace('-', '_') for m in msg.members)
-                self._apply_proximity(msg.proximity, members)
+                self._apply_proximity(msg.proximity, members, start_at)
             else:
                 self._clear_proximity()
 
@@ -601,7 +623,7 @@ class SpheroInstanceTaskController(Node):
         except Exception as e:
             self.get_logger().error(f'Error in policy callback: {str(e)}')
 
-    def _apply_similarity(self, cue):
+    def _apply_similarity(self, cue, start_at=None):
         """Route the Similarity cue into the task / state-machine stack.
 
         IDENTITY: steady visual render (surface chosen by content: RGB-only ->
@@ -610,6 +632,11 @@ class SpheroInstanceTaskController(Node):
         state machine on the visual surface, and `behavior_spin` enqueues a
         finite spin task on the DRIVE lane. Both may run at once (LED/matrix and
         DRIVE are disjoint lanes).
+
+        ``start_at`` is the shared synchronized-start epoch (None => immediate).
+        The NEW steady render / blink SM / spin carry it so every member fires
+        together; the surface-BLANK on a cue change stays immediate (start_at
+        omitted) so the old visual clears now while the new cue waits (OQ3).
         """
         red, green, blue = int(cue.red), int(cue.green), int(cue.blue)
         pattern = cue.pattern or None
@@ -636,18 +663,19 @@ class SpheroInstanceTaskController(Node):
 
         if visual_mode == 'steady':
             self._enqueue_policy_task(
-                self._similarity_render_task(surface, red, green, blue, pattern, matrix))
+                self._similarity_render_task(surface, red, green, blue, pattern, matrix),
+                start_at)
         elif visual_mode == 'blink':
             self._publish_blink_sm(
                 self._similarity_render_task(surface, red, green, blue, pattern, matrix),
-                self._similarity_blank_task(surface), cue.blink_hz, surface)
+                self._similarity_blank_task(surface), cue.blink_hz, surface, start_at)
 
         self._policy_surface = new_surface
         self._policy_mode = visual_mode
 
         # ----- Spin behavior (DRIVE lane) -----
         if want_spin:
-            self._apply_spin(cue)
+            self._apply_spin(cue, start_at)
         else:
             self._clear_spin()
 
@@ -716,13 +744,19 @@ class SpheroInstanceTaskController(Node):
         # Empty pattern + no custom matrix is the device's blank convention.
         return {'task_type': 'matrix', 'parameters': {'pattern': ''}}
 
-    def _enqueue_policy_task(self, item):
-        """Enqueue a policy-generated task onto our own executor."""
-        task = self._build_task(item, None)
+    def _enqueue_policy_task(self, item, start_at=None):
+        """Enqueue a policy-generated task onto our own executor.
+
+        ``start_at`` (absolute epoch, None => immediate) is stamped on the
+        TaskDescriptor so the executor's per-lane gate withholds promotion until
+        the shared instant (mechanism b). Every current caller that omits it
+        keeps firing immediately.
+        """
+        task = self._build_task(item, start_at)
         self.task_executor.add_task(task)
         self.publish_task_status(task)
 
-    def _publish_blink_sm(self, render, blank, blink_hz, lane):
+    def _publish_blink_sm(self, render, blank, blink_hz, lane, start_at=None):
         """Hand a blink cue to the state machine controller as a timer loop.
 
         Two states, ``on`` (render) and ``off`` (blank), alternate every
@@ -736,6 +770,10 @@ class SpheroInstanceTaskController(Node):
             'name': 'policy_similarity_blink',
             'lane': lane,
             'initial_state': 'on',
+            # Ship the pre-resolved absolute epoch (Decision D3) so the SM
+            # controller withholds activation until the shared instant without
+            # re-running offset math. Omit when immediate.
+            **({'start_at': start_at} if start_at is not None else {}),
             'states': [
                 {
                     'name': 'on',
@@ -765,13 +803,16 @@ class SpheroInstanceTaskController(Node):
         msg.data = json.dumps({'action': 'clear', 'lane': lane})
         self.sm_control_pub.publish(msg)
 
-    def _apply_spin(self, cue):
+    def _apply_spin(self, cue, start_at=None):
         """Apply the spin Behavioral Similarity sub-behavior as a finite DRIVE task.
 
         Path A: `spin` is a FINITE task (spin_duration_s takes precedence, else
         spin_rotations, else a long default). It owns the DRIVE lane, so it
         composes with the blink SM (LED/matrix lane). A persistent spin that
         lasts as long as the cue is active awaits the Phase-2 SM-lanes work.
+
+        ``start_at`` (None => immediate) gates promotion via the executor so the
+        finite spin releases at the shared instant on every unit (mechanism b).
         """
         speed = int(cue.spin_speed) if cue.spin_speed > 0 else 100
         duration = float(cue.spin_duration_s)
@@ -789,7 +830,7 @@ class SpheroInstanceTaskController(Node):
             'task_id': 'policy_spin',
             'task_type': 'spin',
             'parameters': params,
-        })
+        }, start_at)
         self._policy_spin_active = True
 
     def _clear_spin(self):
@@ -800,7 +841,7 @@ class SpheroInstanceTaskController(Node):
 
     # ===== Fleet Policy: Proximity cue (DRIVE lane) =====
 
-    def _apply_proximity(self, cue: ProximityCue, members):
+    def _apply_proximity(self, cue: ProximityCue, members, start_at=None):
         """Route the Proximity cue into the state-machine / DRIVE stack.
 
         Subscribes this unit to every member's localization stream (so the step
@@ -832,7 +873,7 @@ class SpheroInstanceTaskController(Node):
                 'max_speed': max_speed,
             },
         }
-        self._publish_proximity_sm(step_task, tick_hz)
+        self._publish_proximity_sm(step_task, tick_hz, start_at)
         self._policy_proximity_active = True
 
     def _clear_proximity(self):
@@ -845,17 +886,23 @@ class SpheroInstanceTaskController(Node):
         self._unsubscribe_member_positions()
         self._policy_proximity_active = False
 
-    def _publish_proximity_sm(self, step_task, tick_hz):
+    def _publish_proximity_sm(self, step_task, tick_hz, start_at=None):
         """Publish the two-state timer ping-pong SM (DRIVE lane) for proximity.
 
         Each state fires ``step_task`` on entry, then waits ``1/tick_hz`` before
         entering the other, so a step fires every ``1/tick_hz`` seconds.
+
+        ``start_at`` (absolute epoch, None => immediate) is shipped on the config
+        so the SM controller withholds the DRIVE machine's first activation until
+        the shared instant (mechanism a).
         """
         period = 1.0 / max(float(tick_hz), 0.1)
         config = {
             'name': 'policy_proximity',
             'lane': 'drive',
             'initial_state': 'step_a',
+            # Pre-resolved absolute epoch (Decision D3); omitted when immediate.
+            **({'start_at': start_at} if start_at is not None else {}),
             'states': [
                 {
                     'name': 'step_a',
