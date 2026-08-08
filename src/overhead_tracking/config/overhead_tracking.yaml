@@ -1,0 +1,168 @@
+# overhead_tracking -- USB3 global-shutter overhead Sphero tracker
+#
+# Operator workflow (each stage waits for its command):
+#   ros2 service call /overhead_tracker_node/detect_arena   std_srvs/srv/Trigger
+#   ros2 service call /overhead_tracker_node/detect_spheros std_srvs/srv/Trigger
+#   ros2 service call /overhead_tracker_node/link_spheros \
+#       multirobot_msgs/srv/Register "{callsigns: [], skip_compass: true}"
+
+overhead_tracker_node:
+  ros__parameters:
+
+    # ---------------------------------------------------------------- camera
+    source: v4l2                        # v4l2 | sim
+    camera_device: /dev/video0
+    # 1920x1200 is the sensor's FULL field of view. 1280x720 is NOT a downscale
+    # of it -- measured 2026-08-08, it is a 1:1 CENTRE CROP (matched at scale 1.00,
+    # NCC 0.97, offset 316,236), so 720p throws away 33% of the horizontal and
+    # 40% of the vertical field for no gain in robot detail. Magnification is
+    # identical between the two modes, which is why every template constant below
+    # stayed valid across the switch.
+    frame_width: 1920
+    frame_height: 1200
+    camera_fps: 120.0                   # 1200p ceiling; also an 8.3 ms exposure clamp
+    fourcc: MJPG                        # native; anything else collapses the fps
+
+    # Measured 2026-08-08 against the matte-black arena. auto_exposure=1 is
+    # manual mode; AWB off or the camera recolours the LEDs frame to frame.
+    v4l2_auto_exposure: 1
+    v4l2_gain: 100
+    v4l2_white_balance_automatic: 0
+    # 0 = do not set. Exposure is clamped to the frame period, so at 200 fps the
+    # ceiling is 5 ms and every requested value above it is silently ignored --
+    # which is why 5000/2000/1000/500 all produced identical frames on the bench.
+    # Set a real value ONLY when overriding deliberately at a lower framerate.
+    v4l2_exposure_time_absolute: 0
+    v4l2_controls_extra: ''             # 'k=v,k=v' appended verbatim
+
+    # UVC discards manual exposure when a stream starts, so controls have to be
+    # applied after streaming is already running -- and again on every reopen.
+    control_reapply_delay_sec: 1.5
+    fps_warn_tolerance: 0.15            # fps sets the exposure clamp; drift matters
+    camera_stale_warn_sec: 1.0
+    camera_restart_sec: 5.0             # 0 disables auto-reopen
+    opencv_num_threads: 1               # do not fight the match pool for cores
+
+    # ------------------------------------------------------ template geometry
+    # Measured on the real robots at 1280x720: ball 33-35 px, matrix 26-32 px,
+    # point-LED separation 25.8-25.9 px.
+    ball_diameter_px: 34
+    matrix_square_px: 28
+    point_sep_px: 26
+    point_radius_px: 3
+    bank_step_deg: 15                   # 0-180; the two point LEDs are symmetric
+    match_thresh: 0.45
+    # Load-bearing, not an optimisation: normalised correlation is contrast
+    # invariant, so without this gate arena noise scores up to 0.634 against a
+    # true-robot 0.668 and produces ~74 false positives per frame.
+    min_bright: 60
+    min_blob_area: 30
+    candidate_pad_px: 8                 # -> 64x64 window, sized for detect_scale=2.
+                                        # Do NOT raise further: at pad 12 the larger
+                                        # response map admitted false positives
+                                        # (7 hits where 5 were real).
+    # The candidate mask, not the matching, is the bottleneck: a 20x20 dilation
+    # over 2.3 MP costs 31.6 ms versus 0.93 ms to match one candidate. Running it
+    # at half resolution costs 5.2 ms and returned byte-identical detections on a
+    # real frame. Net: 1920x1200 runs in 17.1 ms -- the same as 1280x720 full-res
+    # (16.9 ms) for 2.5x the coverage.
+    detect_scale: 2                     # 1 = full-res candidate mask
+    max_robots: 16
+    min_separation_px: 34.0
+
+    # ------------------------------------------------------- rates/annotation
+    track_rate_hz: 30.0                 # ~5 ms mask + ~1 ms/robot over 4 cores
+    publish_rate_hz: 10.0               # HARD CONTRACT with the control stack
+    annotate_rate_hz: 15.0
+    jpeg_quality: 70
+    annotate_min_quality: 40            # degrade to here before dropping a frame
+    annotate_scale: 1.0
+    annotate_queue_max: 5               # ~4.5 MB of pinned frames = memory bound
+    marker_republish_hz: 1.0            # Foxglove subscribes volatile by default
+
+    # ------------------------------------------------------------ roi/gating
+    roi_mode: shared_mask               # shared_mask | per_roi
+    roi_scale: 3.0                      # ROI edge = 3 x ball diameter
+    roi_growth_on_miss: 1.5
+    roi_min_half_px: 30
+    roi_max_half_px: 160
+    max_consecutive_misses: 10          # ~0.33 s at 30 Hz -> LOST
+    lost_timeout_sec: 2.0               # LOST beyond this -> UNRESOLVED
+    reacquire_gate_cm: 25.0
+    innovation_gate_cm: 15.0            # second line of defence against ID swaps
+    swap_suspect_n: 20
+    extrapolate_to_now: true
+
+    # ------------------------------------------------------------- threading
+    match_workers: 0                    # 0 -> min(4, cpu_count). Sized to CORES:
+                                        # 16 threads on 4 cores is the same work
+                                        # with more context switching.
+    match_timeout_sec: 0.05
+
+    # ----------------------------------------------------------------- arena
+    arena_yaml_path: ''                 # '' -> ~/overhead_field/overhead_arena.yaml
+    auto_load_arena: true
+    # manual is the default and the one that works: at the calibrated exposure
+    # the arena reads p50 2-4 and there is simply no edge for Canny to find.
+    arena_source: manual
+    # Blue tape rectangle, located 2026-08-08 from a blue-channel mask
+    # (B - mean(G,R)). Thresholds 16..40 all agreed within +/-3 px; that
+    # stability is the real signal. Do NOT tune corners by matching the pixel
+    # aspect to the true 1.333 -- a threshold of 10 scored "best" on aspect
+    # while actually bleeding onto the wall.
+    # Validation: the centre registration cross maps to (121.1, 90.6) cm against
+    # a true centre of (121.9, 91.4) -- 0.8 cm. That is the real check; the
+    # 4-point homography residual is always ~0 and proves nothing.
+    manual_corners_px: [401.0, 60.0, 1712.0, 70.0, 1709.0, 1134.0, 331.0, 1042.0]
+    arena_long_edge_cm: 243.84          # 96 in
+    arena_short_edge_cm: 182.88         # 72 in
+    arena_swap_axes: false              # if perspective picked the wrong long edge
+    arena_margin_cm: 5.0
+    arena_detect_frames: 5
+    homography_residual_tol_cm: 0.5
+    canny_sigma: 0.33
+    morph_close_iters: 3
+    border_margin_px: 6
+    min_quad_area_frac: 0.05
+    max_quad_area_frac: 0.95            # rejects the whole-frame noise artefact
+    approx_eps_frac: 0.02
+
+    # --------------------------------------------------------------- linking
+    probe_red: 255
+    probe_green: 255
+    probe_blue: 255
+    lit_delta_thresh: 40.0
+    lit_min_area_px: 20
+    link_tol_px: 25.0
+    render_timeout_seconds: 6.0
+    off_timeout_seconds: 4.0
+    probe_poll_seconds: 0.2             # LED re-asserted every poll: other nodes
+                                        # write LEDs too and will stomp the probe
+    reset_settle_seconds: 0.5
+    heartbeat_fresh_sec: 15.0
+    skip_compass_default: true
+    compass_timeout_seconds: 25.0
+
+    # ---------------------------------------------------------------- fusion
+    body_to_field_yaw_offset: 0.0
+    r_cam: 1.0
+    r_vel: 4.0
+    r_ori: 2.0
+    r_acc: 50.0
+    r_gyro: 4.0
+    q_pos: 0.04
+    q_vel: 1.0
+    q_yaw: 1.0
+    q_angle: 1.0
+    q_acc: 100.0
+    q_gyro: 25.0
+    sensor_fresh_sec: 1.0
+    sphere_radius_mm: 36.5
+    # Template heading oscillates 60-120 deg when the matrix is off, and the
+    # 15 deg bank quantises it regardless. Yaw comes from telemetry; the template
+    # angle is reported for display only.
+    use_template_heading: false
+
+    # ------------------------------------------------------------------- sim
+    sim_spheros: 5
+    seed: 0

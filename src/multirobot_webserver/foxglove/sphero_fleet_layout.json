@@ -1,52 +1,88 @@
 {
   "configById": {
+    "Image!annotated": {
+      "imageMode": {
+        "imageTopic": "/overhead_tracker_node/annotated/compressed"
+      },
+      "foxglovePanelTitle": "Overhead (annotated)"
+    },
     "3D!arena": {
       "cameraState": {
         "perspective": false,
-        "distance": 5,
+        "distance": 3.2,
         "phi": 0,
         "thetaOffset": 0,
-        "target": [0, 0, 0],
+        "target": [1.22, 0.91, 0],
         "targetOffset": [0, 0, 0],
         "targetOrientation": [0, 0, 0, 1],
         "fovy": 45,
-        "near": 0.5,
+        "near": 0.01,
         "far": 5000
       },
-      "followMode": "follow-pose",
+      "followMode": "follow-none",
+      "followTf": "field",
       "scene": {},
       "transforms": {},
       "topics": {
-        "/localization/.*/position": { "visible": true }
+        "/overhead_tracker_node/arena_corners": {
+          "visible": true
+        },
+        "/overhead_tracker_node/track_markers": {
+          "visible": true
+        },
+        "/localization/SB_33E3/position": {
+          "visible": true
+        }
       },
       "layers": {},
-      "publish": { "type": "point", "poseTopic": "/move_base_simple/goal", "pointTopic": "/clicked_point", "poseEstimateTopic": "/initialpose", "poseEstimateXDeviation": 0.5, "poseEstimateYDeviation": 0.5, "poseEstimateThetaDeviation": 0.2618 },
-      "imageMode": {}
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.2618
+      },
+      "imageMode": {},
+      "foxglovePanelTitle": "Field (metres)"
     },
-    "Plot!battery": {
-      "paths": [
-        { "value": "/sphero/.*/battery.percentage", "enabled": true, "timestampMethod": "receiveTime" }
-      ],
-      "minYValue": 0,
-      "maxYValue": 1,
-      "showXAxisLabels": true,
-      "showYAxisLabels": true,
-      "showLegend": true,
-      "legendDisplay": "floating",
-      "showPlotValuesInLegend": true,
-      "isSynced": true,
-      "xAxisVal": "timestamp",
-      "sidebarDimension": 240,
-      "followingViewWidth": 300,
-      "foxglovePanelTitle": "Battery"
+    "RawMessages!state": {
+      "topicPath": "/overhead_tracker_node/state.data",
+      "foxglovePanelTitle": "Tracker state"
     },
     "Plot!sensors": {
       "paths": [
-        { "value": "/sphero/.*/sensors.velocity_x", "enabled": true, "timestampMethod": "receiveTime" },
-        { "value": "/sphero/.*/sensors.velocity_y", "enabled": true, "timestampMethod": "receiveTime" },
-        { "value": "/sphero/.*/sensors.gyro_z", "enabled": false, "timestampMethod": "receiveTime" },
-        { "value": "/sphero/.*/sensors.accel_x", "enabled": false, "timestampMethod": "receiveTime" },
-        { "value": "/sphero/.*/sensors.accel_y", "enabled": false, "timestampMethod": "receiveTime" }
+        {
+          "value": "/sphero/SB_33E3/sensors.velocity_x",
+          "enabled": true,
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/sphero/SB_33E3/sensors.velocity_y",
+          "enabled": true,
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/sphero/SB_33E3/sensors.yaw",
+          "enabled": true,
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/sphero/SB_33E3/sensors.gyro_z",
+          "enabled": false,
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/sphero/SB_33E3/sensors.accel_x",
+          "enabled": false,
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/sphero/SB_33E3/sensors.accel_y",
+          "enabled": false,
+          "timestampMethod": "receiveTime"
+        }
       ],
       "showXAxisLabels": true,
       "showYAxisLabels": true,
@@ -58,6 +94,30 @@
       "sidebarDimension": 240,
       "followingViewWidth": 300,
       "foxglovePanelTitle": "Sensors"
+    },
+    "Plot!position": {
+      "paths": [
+        {
+          "value": "/localization/SB_33E3/position.pose.position.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/localization/SB_33E3/position.pose.position.y",
+          "enabled": true,
+          "timestampMethod": "receiveTime"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 300,
+      "foxglovePanelTitle": "Tracked position (cm)"
     },
     "Log!rosout": {
       "searchTerms": [],
@@ -72,19 +132,29 @@
     "speed": 1
   },
   "layout": {
-    "first": "3D!arena",
+    "first": {
+      "first": "Image!annotated",
+      "second": "3D!arena",
+      "direction": "column",
+      "splitPercentage": 58
+    },
     "second": {
-      "first": "Plot!battery",
+      "first": "Plot!position",
       "second": {
         "first": "Plot!sensors",
-        "second": "Log!rosout",
+        "second": {
+          "first": "RawMessages!state",
+          "second": "Log!rosout",
+          "direction": "column",
+          "splitPercentage": 45
+        },
         "direction": "column",
-        "splitPercentage": 50
+        "splitPercentage": 40
       },
       "direction": "column",
-      "splitPercentage": 33.3
+      "splitPercentage": 30
     },
     "direction": "row",
-    "splitPercentage": 50
+    "splitPercentage": 58
   }
 }
