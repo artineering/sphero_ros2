@@ -18,12 +18,21 @@ def clamp(v, lo, hi):
     return lo if v < lo else (hi if v > hi else v)
 
 
+# miss_count is unbounded -- a robot that stays invisible keeps accumulating
+# misses for as long as the node runs. The growth term saturates at `hi` after a
+# handful of them, so cap the exponent: without this, growth ** miss_count
+# raises OverflowError once miss_count passes ~1755 (1.5 ** 1755 > float max),
+# which at 30 Hz is only ~59 s of a robot being out of view.
+_MAX_GROWTH_EXP = 64
+
+
 def roi_half(ball_d_px, scale, vel_px_per_s, dt, miss_count,
              growth=1.5, lo=30, hi=160):
     """Half-edge of the claim region, in pixels."""
     base = 0.5 * float(scale) * float(ball_d_px)
     travel = math.ceil(abs(float(vel_px_per_s)) * max(float(dt), 0.0))
-    grown = (base + travel) * (float(growth) ** max(int(miss_count), 0))
+    exp = min(max(int(miss_count), 0), _MAX_GROWTH_EXP)
+    grown = (base + travel) * (float(growth) ** exp)
     return int(clamp(grown, lo, hi))
 
 

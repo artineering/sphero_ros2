@@ -25,6 +25,14 @@ def test_misses_grow_the_window_geometrically_then_saturate():
     assert all(b >= a for a, b in zip(halves, halves[1:]))    # monotonic
 
 
+def test_long_absence_does_not_overflow():
+    """A robot invisible for minutes crashed the tracker: miss_count keeps
+    climbing and growth ** miss_count overflowed past ~1755 (~59 s at 30 Hz)."""
+    for m in (1755, 10_000, 10**6):
+        assert R.roi_half(BALL_D, SCALE, 0.0, 0.0, m, growth=1.5,
+                          lo=30, hi=160) == 160
+
+
 def test_lower_bound_holds():
     assert R.roi_half(4, 0.5, 0.0, 0.0, 0, lo=30, hi=160) == 30
 
