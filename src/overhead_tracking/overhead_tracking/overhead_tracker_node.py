@@ -167,6 +167,7 @@ class OverheadTrackerNode(Node):
         self._reset_settle = float(gp('reset_settle_seconds').value)
         self._heartbeat_fresh = float(gp('heartbeat_fresh_sec').value)
         self._sensor_fresh = float(gp('sensor_fresh_sec').value)
+        self._fuse_telemetry = bool(gp('fuse_telemetry').value)
         self._sphere_radius_mm = float(gp('sphere_radius_mm').value)
         self._use_tmpl_heading = bool(gp('use_template_heading').value)
 
@@ -432,6 +433,7 @@ class OverheadTrackerNode(Node):
         d('q_acc', 100.0)
         d('q_gyro', 25.0)
         d('sensor_fresh_sec', 1.0)
+        d('fuse_telemetry', False)
         d('sphere_radius_mm', 36.5)
         d('use_template_heading', False)
         # sim
@@ -820,10 +822,21 @@ class OverheadTrackerNode(Node):
                 links[name] = blob_idx
                 used.add(blob_idx)
                 registered.append(name)
-                self._set_led(name, 0, 60, 0)      # green = linked
             else:
                 failed.append(name)
-                self._set_led(name, 60, 0, 0)      # red = failed
+
+        # Status colours go on only once EVERY probe is done. Painting a robot
+        # green the moment it links leaves it lit while the next robot is being
+        # probed, which breaks the invariant the pre-frame above is built on
+        # ("all dark, so the first pre-frame is a true reference"). It is also a
+        # race: _set_led is fire-and-forget over BLE, so the green can land
+        # between the next robot's pre and post frames and show up in the diff
+        # as a freshly-lit blob. Exactly one robot is lit at a time during
+        # probing; the operator sees the outcome colours afterwards.
+        for name in registered:
+            self._set_led(name, 0, 60, 0)          # green = linked
+        for name in failed:
+            self._set_led(name, 60, 0, 0)          # red = failed
 
         links['_targets'] = targets
         msg = (f'linked {len(registered)}/{len(targets)}: '
@@ -840,6 +853,7 @@ class OverheadTrackerNode(Node):
         r, g, b = self._probe_rgb
         deadline = time.time() + self._render_timeout
         result = None
+        last, n_lit = None, 0
         while time.time() < deadline:
             # re-assert every poll: other nodes write LEDs too and will stomp this
             self._set_led(name, r, g, b)
@@ -850,12 +864,23 @@ class OverheadTrackerNode(Node):
             lit, _mask = ident.lit_blobs_gray(post, pre, self._lit_delta,
                                               self._lit_min_area)
             m = ident.match_lit_blob(centres, lit, self._link_tol_px, used)
+            last, n_lit = m, max(n_lit, len(lit))
             if m['matched']:
                 result = m['blob_index']
                 break
         self._set_led(name, 0, 0, 0)
         if result is None:
-            self.get_logger().warning(f'link {name}: no lit blob matched')
+            # The reason matters and used to be thrown away. 'no_lit' means the
+            # robot never visibly brightened -- an LED/BLE problem, not a vision
+            # one. 'too_far' means it DID light but nowhere near a stored blob
+            # centre: the detect_spheros list is stale or that blob was never
+            # this robot. 'no_blobs' means every candidate is already claimed.
+            reason = (last or {}).get('reason', 'no_frame')
+            dist = (last or {}).get('distance', float('inf'))
+            self.get_logger().warning(
+                f'link {name}: no lit blob matched (reason={reason}, '
+                f'lit_blobs_seen={n_lit}, nearest={dist:.1f}px, '
+                f'tol={self._link_tol_px:.0f}px)')
             return False, -1
         # wait for it to go dark again so the next probe's pre-frame is clean
         off_deadline = time.time() + self._off_timeout
@@ -1143,6 +1168,8 @@ class OverheadTrackerNode(Node):
             self.get_logger().info(f're-acquired {t.name}')
 
     def _apply_telemetry(self, t, now):
+        if not self._fuse_telemetry:
+            return
         entry = self._latest_sensor.get(t.name)
         if not entry:
             return

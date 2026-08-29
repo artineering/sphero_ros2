@@ -26,14 +26,24 @@ overhead_tracker_node:
     # Measured 2026-08-08 against the matte-black arena. auto_exposure=1 is
     # manual mode; AWB off or the camera recolours the LEDs frame to frame.
     v4l2_auto_exposure: 1
-    v4l2_gain: 100
+    v4l2_gain: 120
     v4l2_white_balance_automatic: 0
     # 0 = do not set. Exposure is clamped to the frame period, so at 200 fps the
     # ceiling is 5 ms and every requested value above it is silently ignored --
     # which is why 5000/2000/1000/500 all produced identical frames on the bench.
     # Set a real value ONLY when overriding deliberately at a lower framerate.
     v4l2_exposure_time_absolute: 0
-    v4l2_controls_extra: ''             # 'k=v,k=v' appended verbatim
+    # Measured 2026-08-29: the driver default is 0, but this camera comes up at
+    # 1, which lets it LENGTHEN EXPOSURE BY DROPPING THE FRAME RATE. On the dark
+    # arena that silently cost more than half the frames -- a raw --stream-mmap
+    # pull (no decode, no OpenCV) sat at 63 fps, and the node saw 48.9, while
+    # the sensor was configured for 120. Forcing it to 0 restores a true 120 fps
+    # even with a long exposure requested: the exposure clamps to the 8.3 ms
+    # frame period instead, which is the behaviour the comment above assumes.
+    # Neither USB bandwidth nor CPU was involved -- frames are only 49 KB on the
+    # black arena (6.0 MB/s at 120 fps), well inside even this camera's
+    # USB2-negotiated link.
+    v4l2_controls_extra: 'exposure_dynamic_framerate=0'   # 'k=v,k=v' verbatim
 
     # UVC discards manual exposure when a stream starts, so controls have to be
     # applied after streaming is already running -- and again on every reopen.
@@ -72,11 +82,14 @@ overhead_tracker_node:
 
     # ------------------------------------------------------- rates/annotation
     track_rate_hz: 30.0                 # ~5 ms mask + ~1 ms/robot over 4 cores
-    publish_rate_hz: 10.0               # HARD CONTRACT with the control stack
+    publish_rate_hz: 15.0               # HARD CONTRACT with the control stack
     annotate_rate_hz: 15.0
     jpeg_quality: 70
     annotate_min_quality: 40            # degrade to here before dropping a frame
-    annotate_scale: 1.0
+    annotate_scale: 0.5                 # half-res JPEG: quarter the encode work,
+                                        # and the annotated stream is for the
+                                        # operator only -- detection and tracking
+                                        # run on the full-res gray frame.
     annotate_queue_max: 5               # ~4.5 MB of pinned frames = memory bound
     marker_republish_hz: 1.0            # Foxglove subscribes volatile by default
 
@@ -105,15 +118,21 @@ overhead_tracker_node:
     # manual is the default and the one that works: at the calibrated exposure
     # the arena reads p50 2-4 and there is simply no edge for Canny to find.
     arena_source: manual
-    # Blue tape rectangle, located 2026-08-08 from a blue-channel mask
-    # (B - mean(G,R)). Thresholds 16..40 all agreed within +/-3 px; that
-    # stability is the real signal. Do NOT tune corners by matching the pixel
-    # aspect to the true 1.333 -- a threshold of 10 scored "best" on aspect
-    # while actually bleeding onto the wall.
-    # Validation: the centre registration cross maps to (121.1, 90.6) cm against
-    # a true centre of (121.9, 91.4) -- 0.8 cm. That is the real check; the
-    # 4-point homography residual is always ~0 and proves nothing.
-    manual_corners_px: [401.0, 60.0, 1712.0, 70.0, 1709.0, 1134.0, 331.0, 1042.0]
+    # Blue tape rectangle, re-located 2026-08-29 after the camera was re-aimed,
+    # from a blue-channel mask (B - mean(G,R)). Corners come from fitting a line
+    # to each of the four tape edges and intersecting them, NOT from a convex
+    # hull + approxPolyDP: when an edge runs near the frame border the hull
+    # method pins that corner to the image boundary instead of the tape.
+    # Thresholds 4..11 agreed within 14 px; that stability is the real signal.
+    # The usable band is far below the 16..40 of the 2026-08-08 calibration
+    # because the room is dimmer now -- blue peaks at 48 (p99 27), so re-check
+    # the band rather than assuming a threshold. Do NOT tune corners by matching
+    # the pixel aspect to the true 1.333 -- a threshold of 10 scored "best" on
+    # aspect while actually bleeding onto the wall.
+    # Validation: the centre registration cross maps to (122.75, 91.52) cm
+    # against a true centre of (121.9, 91.4) -- 0.84 cm. That is the real check;
+    # the 4-point homography residual is always ~0 and proves nothing.
+    manual_corners_px: [259.8, 58.5, 1681.5, 53.4, 1680.8, 1109.3, 269.6, 1120.2]
     arena_long_edge_cm: 243.84          # 96 in
     arena_short_edge_cm: 182.88         # 72 in
     arena_swap_axes: false              # if perspective picked the wrong long edge
@@ -157,6 +176,15 @@ overhead_tracker_node:
     q_acc: 100.0
     q_gyro: 25.0
     sensor_fresh_sec: 1.0
+    # false = camera-only tracking: the KF sees position fixes and nothing else,
+    # so velocity is inferred from successive camera updates rather than from
+    # the robot's own IMU/odometry. Turned off 2026-08-29 while diagnosing a
+    # track that was dropped as soon as the robot started moving -- with
+    # telemetry fused in, a bad body-frame velocity or yaw drags the prediction
+    # (and with it the ROI) away from where the robot actually is, and that
+    # failure is indistinguishable from a detection failure. Re-enable only
+    # once camera-only tracking is known good, so the two can be told apart.
+    fuse_telemetry: false
     sphere_radius_mm: 36.5
     # Template heading oscillates 60-120 deg when the matrix is off, and the
     # 15 deg bank quantises it regardless. Yaw comes from telemetry; the template
