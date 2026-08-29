@@ -145,18 +145,26 @@ def match_bank_at(gray, tbank, cx, cy, pad_extra=4):
 
 
 def detect_roi(gray, tbank, thresh=0.45, min_bright=60, min_area=30,
-               pad_extra=4, scale=1):
+               pad_extra=4, scale=1, dilate_half=None):
     """Candidate-limited detection: mask -> components -> bank per component.
 
     Measured on real frames: 16.9 ms at 1280x720 full-res, and 17.1 ms at
     1920x1200 with scale=2 + pad_extra=8 -- i.e. 2.5x the field of view for the
     same cost. `scale=1` is the exact composition of `bright_components` and
     `match_bank_at`, which `test_template.py` asserts.
+
+    `dilate_half` sets how far apart two bright lobes can be and still be merged
+    into ONE candidate. It has to be big enough to join a single robot's separate
+    LED features, and small enough to keep two adjacent robots apart -- default
+    ts // 2 (half the TEMPLATE, which is wider than the ball) merges robots that
+    are ~40 px apart and silently loses them. Pass ball_d // 2.
     """
     ts = tbank[0][1].shape[0]
+    if dilate_half is None:
+        dilate_half = ts // 2
     hits = []
     for cx, cy, _area, _bbox in bright_components_scaled(
-            gray, min_bright, min_area, ts // 2, scale):
+            gray, min_bright, min_area, dilate_half, scale):
         m = match_bank_at(gray, tbank, cx, cy, pad_extra)
         if m is not None and m[2] >= thresh:
             hits.append(m)

@@ -119,6 +119,8 @@ class OverheadTrackerNode(Node):
         self._min_bright = int(gp('min_bright').value)
         self._min_blob_area = int(gp('min_blob_area').value)
         self._pad_extra = int(gp('candidate_pad_px').value)
+        self._dilate_half = int(gp('candidate_dilate_half_px').value) \
+            or self._ball_d // 2
         self._detect_scale = int(gp('detect_scale').value)
         self._max_robots = int(gp('max_robots').value)
         self._min_sep_px = float(gp('min_separation_px').value)
@@ -276,6 +278,9 @@ class OverheadTrackerNode(Node):
                                                 latched_qos())
         self._track_pub = self.create_publisher(MarkerArray, '~/track_markers', 10)
         self._state_pub = self.create_publisher(String, '~/state', latched_qos())
+        # Everything needed to reconstruct an annotated frame offline from a bag:
+        # pixel position, field position, heading and match score per robot.
+        self._det_pub = self.create_publisher(String, '~/detections', 10)
         self._link_pub = self.create_publisher(String, '~/link_status',
                                                latched_qos())
 
@@ -361,6 +366,7 @@ class OverheadTrackerNode(Node):
         d('min_bright', 60)
         d('min_blob_area', 30)
         d('candidate_pad_px', 8)
+        d('candidate_dilate_half_px', 0)
         d('detect_scale', 2)
         d('max_robots', 16)
         d('min_separation_px', 34.0)
@@ -696,7 +702,8 @@ class OverheadTrackerNode(Node):
         _cal, H, _Hi, poly = self._arena_snapshot()
         hits = tmpl.detect_roi(gray, self._bank, self._match_thresh,
                                self._min_bright, self._min_blob_area,
-                               self._pad_extra, self._detect_scale)
+                               self._pad_extra, self._detect_scale,
+                               self._dilate_half)
         blobs = []
         for x, y, score, angle in sorted(hits, key=lambda h: -h[2]):
             x_cm, y_cm = hg.apply_homography(x, y, H)
@@ -975,8 +982,15 @@ class OverheadTrackerNode(Node):
         for t in tracks:
             self._apply_telemetry(t, now)
 
-        # T12 -- publish decimated to the 10 Hz contract
-        if now - self._last_pub >= 1.0 / self._publish_rate:
+        # T12 -- publish. publish_rate_hz <= 0 means "every tick, as soon as the
+        # pose exists": no decimation, so consumers see each estimate at the
+        # track rate instead of waiting up to a publish period for it. The gate
+        # could only ever fire on a tick boundary anyway, so a configured rate
+        # that is not a divisor of track_rate_hz quantises badly -- 15 Hz asked
+        # of a 30 Hz tick measured 11.5 Hz, because a tick running long pushes
+        # the next eligible publish out a whole tick.
+        if self._publish_rate <= 0 or \
+                now - self._last_pub >= 1.0 / self._publish_rate:
             self._publish_tracks(tracks, age)
             self._last_pub = now
 
@@ -994,7 +1008,7 @@ class OverheadTrackerNode(Node):
         # T4 -- ONE mask + connected-components pass for the whole frame
         comps = tmpl.bright_components_scaled(gray, self._min_bright,
                                               self._min_blob_area,
-                                              self._tmpl_size // 2,
+                                              self._dilate_half,
                                               self._detect_scale)
         comps = [c for c in comps if arena_mod.contains_px(
             cal.corners_px_np, c[0], c[1], self._ball_d)]
@@ -1185,7 +1199,7 @@ class OverheadTrackerNode(Node):
 
     def _publish_tracks(self, tracks, age):
         stamp = self.get_clock().now().to_msg()
-        positions, statuses = {}, {}
+        positions, statuses, dets = {}, {}, []
         for t in tracks:
             x, y = t.kf.pos_cm
             if self._extrapolate and age > 0:
@@ -1196,10 +1210,27 @@ class OverheadTrackerNode(Node):
             self._publish_pose(t.name, x, y, stamp)
             positions[t.name] = (x, y)
             statuses[t.name] = t.status
+            dets.append({
+                'name': t.name,
+                'u': round(float(t.last_px[0]), 1),   # pixel, last accepted match
+                'v': round(float(t.last_px[1]), 1),
+                'x_cm': round(float(x), 2),           # field, as published above
+                'y_cm': round(float(y), 2),
+                'angle': round(float(t.last_angle), 1),
+                'score': round(float(t.last_score), 3),
+                'status': t.status,
+                'miss': t.miss_count,
+            })
         if positions:
             self._track_pub.publish(build_track_markers(
                 positions, self._sphere_radius_mm, stamp, self._marker_ids,
                 statuses))
+        if dets:
+            self._det_pub.publish(String(data=json.dumps({
+                'stamp': stamp.sec + stamp.nanosec * 1e-9,
+                'frame_age_s': round(float(age), 4),
+                'robots': dets,
+            })))
 
     def _publish_pose(self, name, x_cm, y_cm, stamp):
         pub = self._pose_pubs.get(name)
@@ -1251,9 +1282,15 @@ class OverheadTrackerNode(Node):
     def _push_annotate(self, gray, stamp, state, tracks):
         if gray is None:
             return
+        # <= 0 means OFF, not "unlimited". The rate gate below only fires when
+        # the rate is positive, so without this an annotate_rate_hz of 0 would
+        # push every single frame -- the opposite of what setting it to 0 means.
+        # ~/detections carries what the overlay was drawn from, so a bag of that
+        # topic can rebuild the annotated frames offline.
+        if self._annotate_rate <= 0:
+            return
         now = time.time()
-        if self._annotate_rate > 0 and \
-                now - self._last_annot_push < 1.0 / self._annotate_rate:
+        if now - self._last_annot_push < 1.0 / self._annotate_rate:
             return
         self._last_annot_push = now
         with self._blobs_lock:

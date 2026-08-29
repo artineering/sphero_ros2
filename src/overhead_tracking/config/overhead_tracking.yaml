@@ -20,13 +20,17 @@ overhead_tracker_node:
     # stayed valid across the switch.
     frame_width: 1920
     frame_height: 1200
-    camera_fps: 120.0                   # 1200p ceiling; also an 8.3 ms exposure clamp
+    # 60, not the 120 the sensor can do: frame period IS the exposure ceiling,
+    # so halving fps doubles the light to 16.6 ms. 120 fps bought nothing the
+    # tracker uses (the tick is 30 Hz) while costing half the exposure, which
+    # is what an unlit/reflective-only ball needs. Still 2x the tick rate.
+    camera_fps: 60.0                    # -> 16.6 ms exposure clamp
     fourcc: MJPG                        # native; anything else collapses the fps
 
     # Measured 2026-08-08 against the matte-black arena. auto_exposure=1 is
     # manual mode; AWB off or the camera recolours the LEDs frame to frame.
     v4l2_auto_exposure: 1
-    v4l2_gain: 120
+    v4l2_gain: 140
     v4l2_white_balance_automatic: 0
     # 0 = do not set. Exposure is clamped to the frame period, so at 200 fps the
     # ceiling is 5 ms and every requested value above it is silently ignored --
@@ -57,7 +61,16 @@ overhead_tracker_node:
     # Measured on the real robots at 1280x720: ball 33-35 px, matrix 26-32 px,
     # point-LED separation 25.8-25.9 px.
     ball_diameter_px: 34
-    matrix_square_px: 28
+    # Sized geometrically: the square fits exactly BETWEEN the two point LEDs
+    # without overlapping them. They sit at +/- pt_sep/2 = 13 with radius
+    # pt_r = 3, so their inner edges are at +/- 10 -> square = pt_sep - 2*pt_r
+    # = 20. Keep this consistent if point_sep_px or point_radius_px change.
+    # The old 28 overlapped both LEDs and was WORSE THAN NOISE on real
+    # robots (2026-08-29 sweep): worst robot 0.549 against a loudest arena
+    # spot of 0.619, margin -0.069. At 20 the worst robot is 0.648, margin
+    # +0.006. A free sweep peaked at 14 (0.673, +0.025) if the geometric
+    # constraint is ever relaxed.
+    matrix_square_px: 20
     point_sep_px: 26
     point_radius_px: 3
     bank_step_deg: 15                   # 0-180; the two point LEDs are symmetric
@@ -67,6 +80,15 @@ overhead_tracker_node:
     # true-robot 0.668 and produces ~74 false positives per frame.
     min_bright: 60
     min_blob_area: 30
+    # How far apart two bright lobes can be and still merge into ONE candidate.
+    # It must be large enough to join a single robot's separate LED features and
+    # small enough to keep two ADJACENT robots apart. detect_roi's old internal
+    # default was ts // 2 = 20 (half the TEMPLATE, which is wider than the ball):
+    # measured 2026-08-29 on 12 robots, that merged a tight cluster and silently
+    # lost two of them -- (1224,770) score 0.766 and (1200,822) score 0.762 were
+    # never offered as candidates at all. 17 (= ball_d // 2) finds all 12 with no
+    # robot split in two. 0 means "derive as ball_diameter_px // 2".
+    candidate_dilate_half_px: 0
     candidate_pad_px: 8                 # -> 64x64 window, sized for detect_scale=2.
                                         # Do NOT raise further: at pad 12 the larger
                                         # response map admitted false positives
@@ -82,8 +104,20 @@ overhead_tracker_node:
 
     # ------------------------------------------------------- rates/annotation
     track_rate_hz: 30.0                 # ~5 ms mask + ~1 ms/robot over 4 cores
-    publish_rate_hz: 15.0               # HARD CONTRACT with the control stack
-    annotate_rate_hz: 15.0
+    # 0 = publish every tick, undecimated: the pose goes out as soon as it is
+    # calculated, at track_rate_hz. Decimating only added latency -- a pose
+    # could sit up to a publish period before anyone saw it -- and the gate
+    # can only fire on a tick boundary, so a rate that does not divide
+    # track_rate_hz quantises badly (15 Hz of a 30 Hz tick measured 11.5 Hz).
+    # Set a positive value only to deliberately rate-limit consumers.
+    publish_rate_hz: 0.0                # 0 -> every tick (30 Hz)
+    # 0 = OFF. The annotated JPEG stream was pure operator convenience and
+    # it cost a full-frame draw + encode in a thread competing with the
+    # match pool. ~/detections now carries everything the overlay was drawn
+    # from -- pixel u/v, field x/y, heading, score, status -- so an offline
+    # tool can rebuild the annotated frames from a bag of that topic.
+    # Set back to 15.0 when you actually want to watch the video live.
+    annotate_rate_hz: 0.0
     jpeg_quality: 70
     annotate_min_quality: 40            # degrade to here before dropping a frame
     annotate_scale: 0.5                 # half-res JPEG: quarter the encode work,
@@ -136,7 +170,14 @@ overhead_tracker_node:
     arena_long_edge_cm: 243.84          # 96 in
     arena_short_edge_cm: 182.88         # 72 in
     arena_swap_axes: false              # if perspective picked the wrong long edge
-    arena_margin_cm: 5.0
+    # 0, not 5: this margin DILATES the arena polygon (contains_cm returns
+    # d >= -margin), so 5 cm admitted detections up to 5 cm OUTSIDE the tape.
+    # The right-hand wooden frame rail throws specular highlights that score
+    # like robots -- normalised correlation is contrast invariant -- and one
+    # landed at x=246.8 cm against a 243.84 cm field on 2026-08-29. A real
+    # robot on the field has its centre >= one ball radius (3.65 cm) inside
+    # the tape, so 0 rejects the rail without costing a single true robot.
+    arena_margin_cm: 0.0
     arena_detect_frames: 5
     homography_residual_tol_cm: 0.5
     canny_sigma: 0.33
