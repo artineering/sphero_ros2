@@ -50,6 +50,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from . import annotate as ann
 from . import arena as arena_mod
+from . import heading as hdg
 from . import homography as hg
 from . import identify as ident
 from . import roi as roi_mod
@@ -97,6 +98,7 @@ class TrackState:
     disagreements: int = 0
     last_px: tuple = (0.0, 0.0)
     last_angle: float = 0.0
+    last_heading: float = None      # 0-360 field deg, None until the back LED is seen
     last_score: float = 0.0
     roi: tuple = field(default_factory=tuple)
 
@@ -121,6 +123,10 @@ class OverheadTrackerNode(Node):
         self._pad_extra = int(gp('candidate_pad_px').value)
         self._dilate_half = int(gp('candidate_dilate_half_px').value) \
             or self._ball_d // 2
+        self._pt_sep = int(gp('point_sep_px').value)
+        self._led_search = int(gp('led_search_px').value)
+        self._led_sat_min = int(gp('led_sat_min').value)
+        self._led_val_min = int(gp('led_val_min').value)
         self._detect_scale = int(gp('detect_scale').value)
         self._max_robots = int(gp('max_robots').value)
         self._min_sep_px = float(gp('min_separation_px').value)
@@ -168,6 +174,8 @@ class OverheadTrackerNode(Node):
         self._probe_poll = float(gp('probe_poll_seconds').value)
         self._reset_settle = float(gp('reset_settle_seconds').value)
         self._heartbeat_fresh = float(gp('heartbeat_fresh_sec').value)
+        self._aim_tol = float(gp('aim_tolerance_deg').value)
+        self._aim_settle = float(gp('aim_settle_seconds').value)
         self._sensor_fresh = float(gp('sensor_fresh_sec').value)
         self._fuse_telemetry = bool(gp('fuse_telemetry').value)
         self._sphere_radius_mm = float(gp('sphere_radius_mm').value)
@@ -215,6 +223,7 @@ class OverheadTrackerNode(Node):
         self._fleet_name_safe = {}
         self._pose_pubs, self._led_pubs = {}, {}
         self._matrix_pubs, self._compass_pubs = {}, {}
+        self._heading_pubs, self._aim_pubs = {}, {}
         self._sensor_subs, self._compass_subs = {}, {}
 
         self._last_stamp = 0.0
@@ -367,6 +376,9 @@ class OverheadTrackerNode(Node):
         d('min_blob_area', 30)
         d('candidate_pad_px', 8)
         d('candidate_dilate_half_px', 0)
+        d('led_search_px', 30)
+        d('led_sat_min', 90)
+        d('led_val_min', 60)
         d('detect_scale', 2)
         d('max_robots', 16)
         d('min_separation_px', 34.0)
@@ -424,6 +436,8 @@ class OverheadTrackerNode(Node):
         d('reset_settle_seconds', 0.5)
         d('heartbeat_fresh_sec', 15.0)
         d('skip_compass_default', True)
+        d('aim_tolerance_deg', 8.0)
+        d('aim_settle_seconds', 1.5)
         d('compass_timeout_seconds', 25.0)
         # fusion
         d('body_to_field_yaw_offset', 0.0)
@@ -520,6 +534,32 @@ class OverheadTrackerNode(Node):
         if self._source is None:
             return None, 0.0
         return self._source.latest_gray()
+
+    def _latest_bgr(self):
+        if self._source is None:
+            return None
+        bgr, _stamp = self._source.latest_bgr()
+        return bgr
+
+    def _camera_heading(self, bgr, u, v, spine_deg):
+        """0-360 field heading, or None if the back LED is not visible.
+
+        Both LEDs give a continuous bearing; the red one alone only picks which
+        end of the spine is the front, so it inherits the 15 deg bank step.
+        """
+        if bgr is None:
+            return None
+        red = hdg.find_led(bgr, u, v, hdg.RED_HUE, self._led_search,
+                           self._led_sat_min, self._led_val_min)
+        if red is None:
+            return None
+        green = hdg.find_led(bgr, u, v, hdg.GREEN_HUE, self._led_search,
+                             self._led_sat_min, self._led_val_min)
+        if green is not None:
+            paired = hdg.heading_from_pair(red, green, self._pt_sep / 2.0)
+            if paired is not None:
+                return paired
+        return hdg.heading_from_spine(spine_deg, u, v, red[0], red[1])
 
     def _grab_fresh(self, timeout=1.0):
         """Block until a frame with a NEW stamp arrives (or timeout)."""
@@ -744,6 +784,10 @@ class OverheadTrackerNode(Node):
                 String, f'sphero/{ns}/matrix', 10)
             self._compass_pubs[name] = self.create_publisher(
                 String, f'sphero/{ns}/calibrate_compass', 10)
+            self._heading_pubs[name] = self.create_publisher(
+                String, f'sphero/{ns}/heading', 10)
+            self._aim_pubs[name] = self.create_publisher(
+                String, f'sphero/{ns}/reset_aim', 10)
         if name not in self._sensor_subs:
             self._sensor_subs[name] = self.create_subscription(
                 SpheroSensor, f'sphero/{ns}/sensors',
@@ -757,11 +801,70 @@ class OverheadTrackerNode(Node):
     def _on_sensor(self, name, msg):
         self._latest_sensor[name] = (msg, time.time())
 
-    def _set_led(self, name, r, g, b):
+    def _set_led(self, name, r, g, b, led_type='main'):
         pub = self._led_pubs.get(name)
         if pub is not None:
             pub.publish(String(data=json.dumps(
-                {'type': 'main', 'red': int(r), 'green': int(g), 'blue': int(b)})))
+                {'type': led_type, 'red': int(r), 'green': int(g), 'blue': int(b)})))
+
+    def _set_robot_heading(self, name, deg):
+        pub = self._heading_pubs.get(name)
+        if pub is not None:
+            pub.publish(String(data=json.dumps({'heading': int(round(deg)) % 360})))
+
+    def _reset_aim(self, name):
+        pub = self._aim_pubs.get(name)
+        if pub is not None:
+            pub.publish(String(data='{}'))
+
+    def _measure_heading(self, u, v):
+        """Field heading of the robot at pixel (u, v), or None."""
+        gray, _s = self._grab_fresh(1.0)
+        if gray is None:
+            return None
+        m = tmpl.match_bank_at(gray, self._bank, u, v, self._pad_extra)
+        if m is None:
+            return None
+        return self._camera_heading(self._latest_bgr(), m[0], m[1], m[3])
+
+    def _calibrate_aim(self, name, blob):
+        """Zero the robot's heading on field +x (left-to-right in the image).
+
+        reset_aim FIRST, so the robot's heading 0 is its current orientation and
+        the camera reading IS the offset -- no solving, no iteration. Then turn
+        by that offset and reset_aim again, leaving heading 0 == field +x.
+
+        Sphero headings are CLOCKWISE-positive (its own docs: 0 forward, 90
+        right) while camera/field angles are counter-clockwise-positive, so the
+        turn that brings a measured field heading back to 0 is +meas, not -meas.
+
+        Returns the body->field offset in degrees, or None on failure.
+        """
+        self._set_led(name, 0, 255, 0, 'front')
+        self._set_led(name, 255, 0, 0, 'back')
+        self._reset_aim(name)
+        time.sleep(self._aim_settle)
+        meas = self._measure_heading(blob['u'], blob['v'])
+        if meas is None:
+            self.get_logger().warning(
+                f'aim {name}: no heading -- back LED not visible')
+            return None
+        self._set_robot_heading(name, meas)          # CW turn cancels CCW offset
+        time.sleep(self._aim_settle)
+        self._reset_aim(name)
+        check = self._measure_heading(blob['u'], blob['v'])
+        if check is None:
+            self.get_logger().warning(f'aim {name}: offset {meas:.1f} deg applied, '
+                                      'but could not verify')
+        elif hdg.ang_diff(check, 0.0) > self._aim_tol:
+            self.get_logger().warning(
+                f'aim {name}: offset {meas:.1f} deg applied but robot reads '
+                f'{check:.1f} deg, not 0 (tolerance {self._aim_tol:.0f})')
+        else:
+            self.get_logger().info(
+                f'aim {name}: offset {meas:.1f} deg, now reads {check:.1f} deg, '
+                'aim zeroed on field +x')
+        return meas
 
     def _on_link_spheros(self, req, resp):
         state = self._get_state()
@@ -778,8 +881,10 @@ class OverheadTrackerNode(Node):
 
         self._set_state(LINKING)
         try:
+            skip_compass = bool(getattr(req, 'skip_compass',
+                                self.get_parameter('skip_compass_default').value))
             registered, failed, links, msg = self._run_linking(
-                list(req.callsigns), blobs)
+                list(req.callsigns), blobs, skip_compass)
             self._registered, self._failed = ident.merge_link_status(
                 self._registered, self._failed,
                 links.get('_targets', []), registered, failed)
@@ -803,7 +908,7 @@ class OverheadTrackerNode(Node):
                             else BLOBS_READY)
         return resp
 
-    def _run_linking(self, requested, blobs):
+    def _run_linking(self, requested, blobs, skip_compass=True):
         targets = ident.select_targets(requested, self._fleet_last_seen,
                                        time.time(), self._heartbeat_fresh)
         if not targets:
@@ -825,6 +930,8 @@ class OverheadTrackerNode(Node):
             ok, blob_idx = self._probe_one(name, centres, used)
             if ok:
                 b = blobs[blob_idx]
+                if not skip_compass:
+                    self._calibrate_aim(name, b)
                 self._lock_tracker(name, b['x_cm'], b['y_cm'])
                 links[name] = blob_idx
                 used.add(blob_idx)
@@ -1111,6 +1218,7 @@ class OverheadTrackerNode(Node):
                 if math.hypot(ua - ub, va - vb) < self._min_sep_px:
                     accepted.pop(a if sa < sb else b)
 
+        bgr = self._latest_bgr()
         for tname, (u, v, score, angle, x_cm, y_cm) in accepted.items():
             t = by_name[tname]
             t.kf.update_camera(x_cm, y_cm)
@@ -1119,6 +1227,9 @@ class OverheadTrackerNode(Node):
             t.last_px = (u, v)
             t.last_angle = angle
             t.last_score = score
+            h = self._camera_heading(bgr, u, v, angle)
+            if h is not None:
+                t.last_heading = h
 
         # T9 -- miss ladder
         now = time.time()
@@ -1217,6 +1328,8 @@ class OverheadTrackerNode(Node):
                 'x_cm': round(float(x), 2),           # field, as published above
                 'y_cm': round(float(y), 2),
                 'angle': round(float(t.last_angle), 1),
+                'heading_deg': (None if t.last_heading is None
+                                else round(float(t.last_heading), 1)),
                 'score': round(float(t.last_score), 3),
                 'status': t.status,
                 'miss': t.miss_count,
@@ -1400,6 +1513,8 @@ class OverheadTrackerNode(Node):
                                 'x_cm': round(t.kf.pos_cm[0], 1),
                                 'y_cm': round(t.kf.pos_cm[1], 1),
                                 'angle': round(t.last_angle, 1),
+                                'heading': (None if t.last_heading is None
+                                            else round(t.last_heading, 1)),
                                 'disagreements': t.disagreements}
                        for t in tracks},
         }

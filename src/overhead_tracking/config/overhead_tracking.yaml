@@ -80,6 +80,16 @@ overhead_tracker_node:
     # true-robot 0.668 and produces ~74 false positives per frame.
     min_bright: 60
     min_blob_area: 30
+    # Red BACK LED search, for absolute heading. The template bank only spans
+    # 0-180 deg because the two point LEDs are identical in grayscale; colour
+    # breaks that tie. Only the LED's BEARING from the ball centre is used, so
+    # this is a one-bit decision -- measured 2026-08-29, the real LED sat 8 deg
+    # from one spine end and 172 from the other. Searched, not sampled at a
+    # fixed offset: the lit matrix pulls the matched centre off the ball centre
+    # and the LED was 22 px out where the template puts point LEDs at 13.
+    led_search_px: 30
+    led_sat_min: 90                     # unlit ball measures ~26, lit LED ~145
+    led_val_min: 60
     # How far apart two bright lobes can be and still merge into ONE candidate.
     # It must be large enough to join a single robot's separate LED features and
     # small enough to keep two ADJACENT robots apart. detect_roi's old internal
@@ -201,6 +211,15 @@ overhead_tracker_node:
     reset_settle_seconds: 0.5
     heartbeat_fresh_sec: 15.0
     skip_compass_default: true
+    # Camera-closed-loop aim calibration, run per robot at link time when
+    # skip_compass is FALSE (it replaces the magnetometer spin). Target is
+    # field +x -- LEFT-TO-RIGHT in the camera image. reset_aim FIRST so the
+    # robot's heading 0 is its current orientation and the camera reading IS
+    # the offset; turn by it, reset_aim again. NOTE Sphero headings are
+    # CLOCKWISE-positive (0 forward, 90 right) while field angles are
+    # counter-clockwise, so the corrective turn is +meas, not -meas.
+    aim_tolerance_deg: 8.0              # comfortably inside the 15 deg bank step
+    aim_settle_seconds: 1.5
     compass_timeout_seconds: 25.0
 
     # ---------------------------------------------------------------- fusion

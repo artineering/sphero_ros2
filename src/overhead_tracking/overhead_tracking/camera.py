@@ -46,6 +46,7 @@ class V4L2Source:
 
         self._cap = None
         self._gray = None
+        self._bgr = None                     # colour kept for LED hue only
         self._stamp = 0.0
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -132,11 +133,14 @@ class V4L2Source:
             # fresh array every frame -- see the immutability invariant
             if frame.ndim == 3:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                bgr = np.array(frame, copy=True)
             else:
                 gray = np.array(frame, copy=True)
+                bgr = None
             now = time.time()
             with self._lock:
                 self._gray = gray
+                self._bgr = bgr
                 self._stamp = now
                 self._count += 1
                 dt = now - self._fps_t0
@@ -200,6 +204,10 @@ class V4L2Source:
         with self._lock:
             return self._gray, self._stamp
 
+    def latest_bgr(self):
+        with self._lock:
+            return self._bgr, self._stamp
+
     def stats(self):
         with self._lock:
             return {'frames': self._count,
@@ -246,6 +254,7 @@ class SimOverheadSource:
         self._lit = None
         self._tmpl = self._t.build_template(ball_d=self.ball_d)
         self._gray = None
+        self._bgr = None                     # colour kept for LED hue only
         self._stamp = 0.0
         self._rng = rng
         self._t0 = time.time()
@@ -302,6 +311,9 @@ class SimOverheadSource:
 
     def latest_gray(self):
         return self._gray, self._stamp
+
+    def latest_bgr(self):
+        return self._bgr, self._stamp
 
     def apply_controls(self):
         return {}
