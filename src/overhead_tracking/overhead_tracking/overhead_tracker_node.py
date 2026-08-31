@@ -43,7 +43,6 @@ from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, \
     qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
-from sphero_instance_controller.msg import SpheroSensor
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
@@ -58,7 +57,7 @@ from . import template as tmpl
 from .arena_store import ArenaCalibration, load_arena, save_arena
 from .association import associate
 from .camera import build_source
-from .fusion import VX, VY, FusionKF, FusionParams
+from .motion import MotionKF
 from .markers import build_arena_marker, build_track_markers
 
 # states
@@ -91,7 +90,7 @@ def latched_qos():
 @dataclass
 class TrackState:
     name: str
-    kf: FusionKF
+    kf: MotionKF
     status: str = HEALTHY
     miss_count: int = 0
     lost_since: float = 0.0
@@ -162,6 +161,13 @@ class OverheadTrackerNode(Node):
         self._swap_axes = bool(gp('arena_swap_axes').value)
         self._residual_tol = float(gp('homography_residual_tol_cm').value)
         self._arena_frames = int(gp('arena_detect_frames').value)
+        # Empty-arena reference frame. Lives beside the arena yaml: it is
+        # invalidated by exactly the same events (camera moved, lighting or
+        # exposure changed), so the two belong together.
+        self._ref = None
+        self._ref_path = os.path.join(
+            os.path.dirname(os.path.abspath(self._arena_yaml)),
+            'overhead_reference.png')
 
         # ---- linking
         self._probe_rgb = (int(gp('probe_red').value), int(gp('probe_green').value),
@@ -176,19 +182,15 @@ class OverheadTrackerNode(Node):
         self._heartbeat_fresh = float(gp('heartbeat_fresh_sec').value)
         self._aim_tol = float(gp('aim_tolerance_deg').value)
         self._aim_settle = float(gp('aim_settle_seconds').value)
-        self._sensor_fresh = float(gp('sensor_fresh_sec').value)
-        self._fuse_telemetry = bool(gp('fuse_telemetry').value)
         self._sphere_radius_mm = float(gp('sphere_radius_mm').value)
         self._use_tmpl_heading = bool(gp('use_template_heading').value)
 
-        self._fusion_params = FusionParams(
-            body_to_field_yaw_offset=float(gp('body_to_field_yaw_offset').value),
-            r_cam=float(gp('r_cam').value), r_vel=float(gp('r_vel').value),
-            r_ori=float(gp('r_ori').value), r_acc=float(gp('r_acc').value),
-            r_gyro=float(gp('r_gyro').value), q_pos=float(gp('q_pos').value),
-            q_vel=float(gp('q_vel').value), q_yaw=float(gp('q_yaw').value),
-            q_angle=float(gp('q_angle').value), q_acc=float(gp('q_acc').value),
-            q_gyro=float(gp('q_gyro').value))
+        self._r_cam = float(gp('r_cam').value)
+        self._q_pos = float(gp('q_pos').value)
+        self._q_vel = float(gp('q_vel').value)
+        self._q_yaw = float(gp('q_yaw').value)
+        self._cmd_speed_to_cms = float(gp('cmd_speed_to_cms').value)
+        self._cmd = {}                  # name -> (v_cms, theta_field_deg)
 
         # OpenCV's internal parallel-for would oversubscribe the cores against our
         # own pool and make the threading a net loss. Must be set before any work.
@@ -217,14 +219,14 @@ class OverheadTrackerNode(Node):
         self._links = {}                   # name -> blob index
         self._registered, self._failed = [], []
         self._marker_ids = {}
-        self._latest_sensor = {}           # name -> (SpheroSensor, recv_time)
         self._compass_done = {}
         self._fleet_last_seen = {}
         self._fleet_name_safe = {}
         self._pose_pubs, self._led_pubs = {}, {}
         self._matrix_pubs, self._compass_pubs = {}, {}
+        self._roll_subs, self._stop_subs = {}, {}
         self._heading_pubs, self._aim_pubs = {}, {}
-        self._sensor_subs, self._compass_subs = {}, {}
+        self._compass_subs = {}
 
         self._last_stamp = 0.0
         self._last_tick_wall = time.time()
@@ -309,6 +311,12 @@ class OverheadTrackerNode(Node):
                             callback_group=self._service_group)
         self.create_service(Trigger, '~/reapply_camera_controls',
                             self._on_reapply_controls,
+                            callback_group=self._service_group)
+        self.create_service(Trigger, '~/save_annotated',
+                            self._on_save_annotated,
+                            callback_group=self._service_group)
+        self.create_service(Trigger, '~/capture_reference',
+                            self._on_capture_reference,
                             callback_group=self._service_group)
 
         # ---- annotate worker (bounded FIFO; tick never draws or encodes)
@@ -423,6 +431,8 @@ class OverheadTrackerNode(Node):
         d('min_quad_area_frac', 0.05)
         d('max_quad_area_frac', 0.95)
         d('approx_eps_frac', 0.02)
+        d('arena_hue_lo', 90)
+        d('arena_hue_hi', 130)
         # linking
         d('probe_red', 255)
         d('probe_green', 255)
@@ -433,27 +443,19 @@ class OverheadTrackerNode(Node):
         d('render_timeout_seconds', 6.0)
         d('off_timeout_seconds', 4.0)
         d('probe_poll_seconds', 0.2)
-        d('reset_settle_seconds', 0.5)
+        d('reset_settle_seconds', 2.0)
         d('heartbeat_fresh_sec', 15.0)
         d('skip_compass_default', True)
         d('aim_tolerance_deg', 8.0)
         d('aim_settle_seconds', 1.5)
         d('compass_timeout_seconds', 25.0)
-        # fusion
-        d('body_to_field_yaw_offset', 0.0)
+        # motion model
         d('r_cam', 1.0)
-        d('r_vel', 4.0)
-        d('r_ori', 2.0)
-        d('r_acc', 50.0)
-        d('r_gyro', 4.0)
         d('q_pos', 0.04)
         d('q_vel', 1.0)
         d('q_yaw', 1.0)
-        d('q_angle', 1.0)
-        d('q_acc', 100.0)
-        d('q_gyro', 25.0)
-        d('sensor_fresh_sec', 1.0)
-        d('fuse_telemetry', False)
+        d('cmd_speed_to_cms', 1.0)
+        d('debug_positions', False)
         d('sphere_radius_mm', 36.5)
         d('use_template_heading', False)
         # sim
@@ -486,6 +488,63 @@ class OverheadTrackerNode(Node):
                 f'{cal.long_edge_len_cm}x{cal.short_edge_len_cm} cm')
         except Exception as e:                                  # noqa: BLE001
             self.get_logger().warning(f'arena load failed: {e}')
+        self._load_reference()
+
+    def _load_reference(self):
+        if not os.path.exists(self._ref_path):
+            return
+        try:
+            ref = cv2.imread(self._ref_path, cv2.IMREAD_GRAYSCALE)
+            if ref is None:
+                raise IOError('imread returned None')
+            self._ref = ref
+            self.get_logger().info(
+                f'loaded reference from {self._ref_path}: '
+                f'{ref.shape[1]}x{ref.shape[0]}')
+        except Exception as e:                                  # noqa: BLE001
+            self.get_logger().warning(f'reference load failed: {e}')
+
+    def _on_capture_reference(self, _req, resp):
+        """Store a median frame of the EMPTY arena as the background reference.
+
+        Everything static -- boundary tape, corner fiducials, mat seams, the
+        specular rail -- is in this frame, so subtracting it from a live frame
+        leaves only what moved. Capture it with NO robots on the mat.
+        """
+        ref = self._grab_median(self._arena_frames)
+        if ref is None:
+            resp.success, resp.message = False, 'no camera frame'
+            return resp
+        try:
+            if not cv2.imwrite(self._ref_path, ref):
+                raise IOError(f'imwrite failed: {self._ref_path}')
+        except Exception as e:                                  # noqa: BLE001
+            resp.success, resp.message = False, str(e)
+            return resp
+        self._ref = ref
+        resp.success = True
+        resp.message = (f'{self._ref_path} ({ref.shape[1]}x{ref.shape[0]}, '
+                        f'mean={float(ref.mean()):.1f}, max={int(ref.max())})')
+        self.get_logger().info(f'reference captured: {resp.message}')
+        return resp
+
+    def _subtract_ref(self, gray):
+        """Live frame minus the empty-arena reference, or the frame unchanged
+        when no reference is loaded.
+
+        cv2.subtract SATURATES at 0, so this keeps only what is BRIGHTER than
+        the empty arena -- which is what a robot is. A signed difference would
+        also fire on shadows, and absdiff would resurrect every static edge as a
+        pair of bright rims wherever the two frames disagree by a pixel.
+        """
+        if self._ref is None or gray is None:
+            return gray
+        if self._ref.shape != gray.shape:
+            self.get_logger().warning(
+                f'reference {self._ref.shape} != frame {gray.shape}; ignoring',
+                throttle_duration_sec=30.0)
+            return gray
+        return cv2.subtract(gray, self._ref)
 
     def _apply_arena(self, cal):
         H = cal.H_np
@@ -573,13 +632,22 @@ class OverheadTrackerNode(Node):
             time.sleep(0.005)
         return self._latest_frame()
 
-    def _grab_median(self, n=5):
-        """Median of n distinct frames -- suppresses sensor noise for calibration."""
+    def _grab_median(self, n=5, color=False):
+        """Median of n distinct frames -- suppresses sensor noise for calibration.
+
+        color=True returns BGR when the source has it. The arena detector ORs
+        Canny over luminance AND the two LAB chroma channels, and coloured tape
+        on a neutral floor is a strong CHROMA edge but a weak brightness one --
+        a gray frame silently disables the two channels that matter. Sources
+        with no colour (sim) return None here and fall back to gray.
+        """
+        use_color = color and self._latest_bgr() is not None
         frames = []
         for _ in range(max(1, n)):
             g, _s = self._grab_fresh(0.5)
-            if g is not None:
-                frames.append(g)
+            if g is None:
+                continue
+            frames.append(self._latest_bgr() if use_color else g)
         if not frames:
             return None
         return np.median(np.stack(frames), axis=0).astype(np.uint8)
@@ -633,9 +701,11 @@ class OverheadTrackerNode(Node):
         if self._long_cm <= 0 or self._short_cm <= 0:
             return (False, 'arena_long_edge_cm / arena_short_edge_cm must be set '
                            '(measure the arena)', None)
-        gray = self._grab_median(self._arena_frames)
-        if gray is None:
+        frame = self._grab_median(self._arena_frames, color=True)
+        if frame is None:
             return False, 'no camera frame', None
+        gray = (frame if frame.ndim == 2
+                else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
 
         manual = list(self.get_parameter('manual_corners_px').value or [])
         if self._arena_source == 'manual' or len(manual) == 8:
@@ -647,12 +717,14 @@ class OverheadTrackerNode(Node):
         else:
             gp = self.get_parameter
             corners, diag = arena_mod.detect_arena_quad(
-                gray, approx_eps_frac=float(gp('approx_eps_frac').value),
+                frame, approx_eps_frac=float(gp('approx_eps_frac').value),
                 canny_sigma=float(gp('canny_sigma').value),
                 close_iters=int(gp('morph_close_iters').value),
                 border_margin=int(gp('border_margin_px').value),
                 min_area_frac=float(gp('min_quad_area_frac').value),
-                max_area_frac=float(gp('max_quad_area_frac').value))
+                max_area_frac=float(gp('max_quad_area_frac').value),
+                hue_lo=int(gp('arena_hue_lo').value),
+                hue_hi=int(gp('arena_hue_hi').value))
             self._dump_arena_debug(gray, diag)
             if corners is None:
                 return (False, f"no arena quad: contours={diag['num_contours']} "
@@ -731,6 +803,7 @@ class OverheadTrackerNode(Node):
             self._blobs = blobs
         if state != TRACKING:
             self._set_state(BLOBS_READY)
+        self._snapshot('detect_spheros')
         resp.success = True
         resp.message = json.dumps(blobs)
         return resp
@@ -739,6 +812,7 @@ class OverheadTrackerNode(Node):
         gray, _s = self._grab_fresh(1.0)
         if gray is None:
             return [], 'no camera frame'
+        gray = self._subtract_ref(gray)
         _cal, H, _Hi, poly = self._arena_snapshot()
         hits = tmpl.detect_roi(gray, self._bank, self._match_thresh,
                                self._min_bright, self._min_blob_area,
@@ -788,24 +862,62 @@ class OverheadTrackerNode(Node):
                 String, f'sphero/{ns}/heading', 10)
             self._aim_pubs[name] = self.create_publisher(
                 String, f'sphero/{ns}/reset_aim', 10)
-        if name not in self._sensor_subs:
-            self._sensor_subs[name] = self.create_subscription(
-                SpheroSensor, f'sphero/{ns}/sensors',
-                lambda m, n=name: self._on_sensor(n, m), 10,
+        if name not in self._roll_subs:
+            self._roll_subs[name] = self.create_subscription(
+                String, f'sphero/{ns}/roll',
+                lambda m, n=name: self._on_roll_cmd(n, m), 10,
+                callback_group=self._sub_group)
+            self._stop_subs[name] = self.create_subscription(
+                String, f'sphero/{ns}/stop',
+                lambda m, n=name: self._on_stop_cmd(n, m), 10,
                 callback_group=self._sub_group)
             self._compass_subs[name] = self.create_subscription(
                 Bool, f'sphero/{ns}/calibrate_compass_done',
                 lambda m, n=name: self._compass_done.__setitem__(n, bool(m.data)),
                 10, callback_group=self._sub_group)
 
-    def _on_sensor(self, name, msg):
-        self._latest_sensor[name] = (msg, time.time())
+    def _on_roll_cmd(self, name, msg):
+        """Cache the control input. Sphero headings are CLOCKWISE-positive and
+        field angles counter-clockwise, so the field heading is the negation."""
+        try:
+            d = json.loads(msg.data)
+        except ValueError:
+            return
+        speed = float(d.get('speed', 0)) * self._cmd_speed_to_cms
+        self._cmd[name] = (speed, -float(d.get('heading', 0)) % 360.0)
+
+    def _on_stop_cmd(self, name, _msg):
+        self._cmd[name] = (0.0, self._cmd.get(name, (0.0, 0.0))[1])
 
     def _set_led(self, name, r, g, b, led_type='main'):
         pub = self._led_pubs.get(name)
         if pub is not None:
             pub.publish(String(data=json.dumps(
                 {'type': led_type, 'red': int(r), 'green': int(g), 'blue': int(b)})))
+
+    def _link_leds_on(self, name):
+        """The one lit state used for BOTH probing and aiming.
+
+        The MAIN LED is the whole 8x8 panel on a BOLT -- set_led('main') maps
+        straight to set_main_led, one command. Do not reach for the matrix API
+        here: set_matrix walks all 64 pixels with a set_matrix_pixel BLE write
+        each, which is far too slow to re-assert on the probe poll.
+
+        Front green and back red go on with it, so _calibrate_aim can find the
+        back LED without a second lighting step.
+        """
+        r, g, b = self._probe_rgb
+        self._set_led(name, r, g, b)
+        self._set_led(name, 0, 255, 0, 'front')
+        self._set_led(name, 255, 0, 0, 'back')
+
+    def _link_leds_off(self, name):
+        """Every emitter dark. Exactly one robot may be lit during probing: a
+        robot still lit when its own pre-frame is grabbed contributes nothing to
+        lit_blobs_gray's diff and fails as `no_lit` while visibly glowing."""
+        self._set_led(name, 0, 0, 0)
+        self._set_led(name, 0, 0, 0, 'front')
+        self._set_led(name, 0, 0, 0, 'back')
 
     def _set_robot_heading(self, name, deg):
         pub = self._heading_pubs.get(name)
@@ -840,8 +952,8 @@ class OverheadTrackerNode(Node):
 
         Returns the body->field offset in degrees, or None on failure.
         """
-        self._set_led(name, 0, 255, 0, 'front')
-        self._set_led(name, 255, 0, 0, 'back')
+        # LEDs are already on from the probe -- _run_linking owns them for the
+        # whole probe+aim step and turns them off once, afterwards.
         self._reset_aim(name)
         time.sleep(self._aim_settle)
         meas = self._measure_heading(blob['u'], blob['v'])
@@ -906,6 +1018,7 @@ class OverheadTrackerNode(Node):
                 have = bool(self._tracks)
             self._set_state(TRACKING if (have or state == TRACKING)
                             else BLOBS_READY)
+            self._snapshot('link_spheros')
         return resp
 
     def _run_linking(self, requested, blobs, skip_compass=True):
@@ -919,7 +1032,7 @@ class OverheadTrackerNode(Node):
 
         # all dark, so the first pre-frame is a true reference
         for name in targets:
-            self._set_led(name, 0, 0, 0)
+            self._link_leds_off(name)
         time.sleep(self._reset_settle)
 
         centres = [(b['u'], b['v']) for b in blobs]
@@ -927,7 +1040,10 @@ class OverheadTrackerNode(Node):
         registered, failed, links = [], [], {}
 
         for name in targets:
-            ok, blob_idx = self._probe_one(name, centres, used)
+            # One lit window per robot: light it, identify it, aim it, go dark.
+            # The LEDs stay on across probe AND aim so each robot is lit exactly
+            # once, and the next robot's pre-frame is taken against a dark field.
+            ok, blob_idx, pre = self._probe_one(name, centres, used)
             if ok:
                 b = blobs[blob_idx]
                 if not skip_compass:
@@ -938,6 +1054,9 @@ class OverheadTrackerNode(Node):
                 registered.append(name)
             else:
                 failed.append(name)
+            self._link_leds_off(name)
+            self._wait_dark(pre)
+            time.sleep(self._reset_settle)
 
         # Status colours go on only once EVERY probe is done. Painting a robot
         # green the moment it links leaves it lit while the next robot is being
@@ -948,7 +1067,11 @@ class OverheadTrackerNode(Node):
         # as a freshly-lit blob. Exactly one robot is lit at a time during
         # probing; the operator sees the outcome colours afterwards.
         for name in registered:
-            self._set_led(name, 0, 60, 0)          # green = linked
+            # Back on for tracking: _camera_heading reads the BACK LED for
+            # absolute heading, and the white panel is the bright square the
+            # template matches. Nothing is being probed now, so several lit at
+            # once is fine -- during probing it never is.
+            self._link_leds_on(name)
         for name in failed:
             self._set_led(name, 60, 0, 0)          # red = failed
 
@@ -960,17 +1083,21 @@ class OverheadTrackerNode(Node):
         return registered, failed, links, msg
 
     def _probe_one(self, name, centres, used):
-        """Light exactly one robot and find which blob got brighter."""
+        """Light exactly one robot and find which blob got brighter.
+
+        Returns (ok, blob_index, pre_frame). The caller keeps the robot lit for
+        the aim step and turns it off once afterwards, so `pre` comes back with
+        it for the dark check that follows.
+        """
         pre, _s = self._grab_fresh(1.0)
         if pre is None:
-            return False, -1
-        r, g, b = self._probe_rgb
+            return False, -1, None
         deadline = time.time() + self._render_timeout
         result = None
         last, n_lit = None, 0
         while time.time() < deadline:
             # re-assert every poll: other nodes write LEDs too and will stomp this
-            self._set_led(name, r, g, b)
+            self._link_leds_on(name)
             time.sleep(self._probe_poll)
             post, _s2 = self._grab_fresh(0.5)
             if post is None:
@@ -982,7 +1109,6 @@ class OverheadTrackerNode(Node):
             if m['matched']:
                 result = m['blob_index']
                 break
-        self._set_led(name, 0, 0, 0)
         if result is None:
             # The reason matters and used to be thrown away. 'no_lit' means the
             # robot never visibly brightened -- an LED/BLE problem, not a vision
@@ -995,33 +1121,31 @@ class OverheadTrackerNode(Node):
                 f'link {name}: no lit blob matched (reason={reason}, '
                 f'lit_blobs_seen={n_lit}, nearest={dist:.1f}px, '
                 f'tol={self._link_tol_px:.0f}px)')
-            return False, -1
-        # wait for it to go dark again so the next probe's pre-frame is clean
+            return False, -1, pre
+        return True, result, pre
+
+    def _wait_dark(self, pre):
+        """Block until the field looks like `pre` again, so the next robot's
+        pre-frame is taken against a dark arena."""
+        if pre is None:
+            return
         off_deadline = time.time() + self._off_timeout
         while time.time() < off_deadline:
             post, _s = self._grab_fresh(0.3)
             if post is None:
-                break
+                return
             lit, _m = ident.lit_blobs_gray(post, pre, self._lit_delta,
                                            self._lit_min_area)
             if not lit:
-                break
-        return True, result
+                return
 
     def _lock_tracker(self, name, x_cm, y_cm):
-        yaw0 = self._sensor_yaw_field(name)
-        kf = FusionKF(x_cm, y_cm, self._fusion_params, yaw0_deg=yaw0)
+        kf = MotionKF(x_cm, y_cm, self._q_pos, self._q_vel, self._q_yaw,
+                      self._r_cam)
         ts = TrackState(name=name, kf=kf)
         with self._tracks_lock:
             self._tracks[name] = ts
         self.get_logger().info(f'locked {name} at ({x_cm:.1f}, {y_cm:.1f}) cm')
-
-    def _sensor_yaw_field(self, name):
-        entry = self._latest_sensor.get(name)
-        if not entry:
-            return 0.0
-        msg, _t = entry
-        return float(msg.yaw) - self._fusion_params.body_to_field_yaw_offset
 
     # =====================================================================
     # Stage 4/5 -- reset
@@ -1072,7 +1196,8 @@ class OverheadTrackerNode(Node):
         # T3 -- predict (serial; KFs are tick-thread-only, hence no lock)
         preds = {}
         for t in tracks:
-            preds[t.name] = t.kf.predict(dt)
+            v_cmd, th_cmd = self._cmd.get(t.name, (0.0, 0.0))
+            preds[t.name] = t.kf.predict(dt, v_cmd, th_cmd)
 
         # While LINKING, LED probes are flashing robots all over the arena.
         # Taking a camera measurement then is a direct route to a baked-in ID
@@ -1082,12 +1207,9 @@ class OverheadTrackerNode(Node):
         n_comps = 0
         t_match = 0.0
         if allow_camera:
-            n_comps, t_match = self._camera_update(gray, tracks, preds, cal, H,
+            n_comps, t_match = self._camera_update(self._subtract_ref(gray),
+                                                   tracks, preds, cal, H,
                                                    Hinv, poly)
-
-        # T11 -- telemetry
-        for t in tracks:
-            self._apply_telemetry(t, now)
 
         # T12 -- publish. publish_rate_hz <= 0 means "every tick, as soon as the
         # pose exists": no decimation, so consumers see each estimate at the
@@ -1131,7 +1253,7 @@ class OverheadTrackerNode(Node):
                 scale = hg.px_per_cm_at(u_pred, v_pred, H)
             except (ValueError, np.linalg.LinAlgError):
                 continue
-            vx, vy = t.kf.x[VX], t.kf.x[VY]
+            vx, vy = t.kf.vel_cms
             vel_px = math.hypot(vx, vy) * scale
             half = roi_mod.roi_half(self._ball_d, self._roi_scale, vel_px,
                                     1.0 / self._track_rate, t.miss_count,
@@ -1292,22 +1414,6 @@ class OverheadTrackerNode(Node):
             t.last_score = m[2]
             self.get_logger().info(f're-acquired {t.name}')
 
-    def _apply_telemetry(self, t, now):
-        if not self._fuse_telemetry:
-            return
-        entry = self._latest_sensor.get(t.name)
-        if not entry:
-            return
-        msg, recv = entry
-        if now - recv > self._sensor_fresh:
-            return
-        # orientation FIRST so the yaw used to rotate body vectors is current
-        t.kf.update_orientation(float(msg.yaw), float(msg.pitch), float(msg.roll))
-        t.kf.update_velocity_body(float(msg.velocity_x), float(msg.velocity_y))
-        t.kf.update_accel_body_g(float(msg.accel_x), float(msg.accel_y),
-                                 float(msg.accel_z))
-        t.kf.update_gyro(float(msg.gyro_x), float(msg.gyro_y), float(msg.gyro_z))
-
     def _publish_tracks(self, tracks, age):
         stamp = self.get_clock().now().to_msg()
         positions, statuses, dets = {}, {}, []
@@ -1316,8 +1422,9 @@ class OverheadTrackerNode(Node):
             if self._extrapolate and age > 0:
                 # analytically what F would do, WITHOUT mutating the filter --
                 # the next tick's frame-time predict must stay monotonic
-                x += t.kf.x[VX] * age
-                y += t.kf.x[VY] * age
+                vx, vy = t.kf.vel_cms
+                x += vx * age
+                y += vy * age
             self._publish_pose(t.name, x, y, stamp)
             positions[t.name] = (x, y)
             statuses[t.name] = t.status
@@ -1344,6 +1451,16 @@ class OverheadTrackerNode(Node):
                 'frame_age_s': round(float(age), 4),
                 'robots': dets,
             })))
+            # Read live rather than caching in __init__ so the flag can be
+            # flipped on a running node with `ros2 param set`. Throttled: the
+            # tick is 30 Hz and an unthrottled line per robot per tick buries
+            # every other log. ~/detections carries the full-rate data.
+            if self.get_parameter('debug_positions').value:
+                self.get_logger().info(
+                    'pos  ' + '  |  '.join(
+                        f"{r['name']} ({r['x_cm']:6.1f}, {r['y_cm']:6.1f}) cm "
+                        f"{r['status']}" for r in dets),
+                    throttle_duration_sec=1.0)
 
     def _publish_pose(self, name, x_cm, y_cm, stamp):
         pub = self._pose_pubs.get(name)
@@ -1392,6 +1509,67 @@ class OverheadTrackerNode(Node):
             tracks = list(self._tracks.values())
         self._push_annotate(gray, stamp, self._get_state(), tracks)
 
+    def _render_dict(self, state, tracks):
+        """What the overlay is drawn from. Shared by the JPEG stream and the
+        ~/save_annotated snapshot so the two never drift apart."""
+        with self._blobs_lock:
+            blobs = list(self._blobs) if state in (BLOBS_READY, ARENA_READY) else []
+        cal = self._arena
+        return {
+            'state': state,
+            'arena_px': cal.corners_px if cal is not None else None,
+            'blobs': [{'id': b['id'], 'u': b['u'], 'v': b['v']} for b in blobs],
+            'tracks': [{'name': t.name, 'u': t.last_px[0], 'v': t.last_px[1],
+                        'status': t.status, 'score': t.last_score,
+                        'angle': t.last_angle if self._use_tmpl_heading
+                        else t.last_angle, 'roi': t.roi} for t in tracks],
+            'banner': f'{state}  tick={self._diag["tick_ms"]}ms',
+        }
+
+    def _on_save_annotated(self, _req, resp):
+        """Write ONE annotated PNG and return its path.
+
+        The point is to see the overlay without holding the camera hostage:
+        no annotate_rate_hz stream to enable, and no stopping the node so a
+        separate process can open /dev/video0. Files are timestamped, so
+        repeated calls accumulate instead of overwriting.
+        """
+        path, err = self._write_annotated('annotated')
+        resp.success, resp.message = (path is not None), (err or path)
+        return resp
+
+    def _write_annotated(self, tag):
+        """Write one annotated PNG, returning (path|None, error|None).
+
+        Never raises: a snapshot is a diagnostic, so a failure to write one must
+        not fail the calibration step that asked for it.
+        """
+        gray, _stamp = self._latest_frame()
+        if gray is None:
+            return None, 'no camera frame'
+        with self._tracks_lock:
+            tracks = list(self._tracks.values())
+        out = os.path.dirname(os.path.abspath(self._arena_yaml))
+        path = os.path.join(out, time.strftime(f'{tag}_%Y%m%d_%H%M%S.png'))
+        try:
+            os.makedirs(out, exist_ok=True)
+            bgr = ann.draw_overlay(gray, self._render_dict(self._get_state(),
+                                                           tracks), self._ball_d)
+            if not cv2.imwrite(path, bgr):
+                raise IOError(f'imwrite failed: {path}')
+        except Exception as e:                                  # noqa: BLE001
+            return None, str(e)
+        return path, None
+
+    def _snapshot(self, tag):
+        """Fire-and-forget snapshot for a calibration step. Logs the path so the
+        operator can open it; never touches the caller's response payload."""
+        path, err = self._write_annotated(tag)
+        if path:
+            self.get_logger().info(f'annotated: {path}')
+        else:
+            self.get_logger().warning(f'annotated snapshot failed: {err}')
+
     def _push_annotate(self, gray, stamp, state, tracks):
         if gray is None:
             return
@@ -1406,19 +1584,7 @@ class OverheadTrackerNode(Node):
         if now - self._last_annot_push < 1.0 / self._annotate_rate:
             return
         self._last_annot_push = now
-        with self._blobs_lock:
-            blobs = list(self._blobs) if state in (BLOBS_READY, ARENA_READY) else []
-        cal = self._arena
-        render = {
-            'state': state,
-            'arena_px': cal.corners_px if cal is not None else None,
-            'blobs': [{'id': b['id'], 'u': b['u'], 'v': b['v']} for b in blobs],
-            'tracks': [{'name': t.name, 'u': t.last_px[0], 'v': t.last_px[1],
-                        'status': t.status, 'score': t.last_score,
-                        'angle': t.last_angle if self._use_tmpl_heading
-                        else t.last_angle, 'roi': t.roi} for t in tracks],
-            'banner': f'{state}  tick={self._diag["tick_ms"]}ms',
-        }
+        render = self._render_dict(state, tracks)
         self._annot_seq += 1
         item = (gray, render, stamp, self._annot_seq)
         try:

@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """Arena boundary detection and polygon tests (pure, no ROS).
 
-Ported from the Kinect field-rectangle detector and generalised to accept a
-grayscale frame (the overhead camera is used as mono).
+Ported from the Kinect field-rectangle detector. Two paths, tried in order:
 
-A caution specific to this rig: with the exposure tuned so the matte-black arena
-reads p50 2-4, there is essentially no edge signal to find. Auto-detection is a
-convenience for a brightly-lit calibration capture, NOT the primary path --
-`arena_source: manual` with operator-supplied corner pixels is the default and
-the one that reliably works. Callers that want auto-detection should raise the
-exposure for the capture and restore it afterwards.
+1. HUE THRESHOLD on the boundary tape (needs a colour frame). The tape is a
+   different hue from everything else in the room, so it thresholds into a
+   filled closed ring whose outer contour and hole are its two edges; the
+   corners returned are the tape CENTRELINE.
+2. CANNY EDGES, the original path, used for a mono frame or if the hue mask
+   fails.
+
+Why the order: with the exposure tuned so the matte-black arena reads p50 2-4
+there is almost no brightness edge to find, and worse, the mat's edges merge
+with room structure running off-frame -- border suppression then cuts that
+junction and leaves the mat as an OPEN chain, whose contourArea is its stroke
+rather than its area, so it loses `max(contours, key=contourArea)` to any small
+closed object in the room. Thresholding sidesteps both problems: hue ignores
+brightness, and a filled region has a real area.
 """
 
 import cv2
@@ -26,9 +33,77 @@ def _as_bgr(img):
     raise ValueError(f'unsupported image shape {a.shape}')
 
 
+
+def _quad_from_contour(c, approx_eps_frac):
+    """Convex hull reduced to exactly 4 convex vertices, or None."""
+    hull = cv2.convexHull(c)
+    peri = cv2.arcLength(hull, True)
+    for epsf in (approx_eps_frac, 0.03, 0.04, 0.05, 0.06, 0.08):
+        approx = cv2.approxPolyDP(hull, epsf * peri, True)
+        if len(approx) == 4 and cv2.isContourConvex(approx):
+            return approx.reshape(4, 2).astype(float)
+    return None
+
+
+def _tape_centreline_quad(bgr, hue_lo, hue_hi, approx_eps_frac,
+                          min_area_frac, max_area_frac):
+    """Corners on the CENTRELINE of the boundary tape, from a hue mask.
+
+    Measured on this rig: tape H 102-112, mat 11-14, floor/wall 20-22 (OpenCV's
+    0-179 scale), so a hue band isolates the tape by ~80 units where no
+    brightness or chroma EDGE separates it at all -- the mat is matte black and
+    the tape is a weak luminance edge on it.
+
+    Thresholding also fixes a topology problem the edge path cannot: the tape
+    becomes a FILLED closed ring, so `contourArea` is its real area instead of
+    the area of an open stroke. The ring's outer contour and its largest hole
+    are the two edges of the tape, and matched corners averaged land on the
+    middle of the stroke.
+
+    Returns (corners|None, diag, reason).
+    """
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv[:, :, 0], int(hue_lo), int(hue_hi))
+    cs, hier = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    diag = {'mask': mask, 'num_contours': len(cs)}
+    if not cs:
+        return None, diag, f'hue mask [{hue_lo},{hue_hi}] is empty'
+    hier = hier[0]
+    tops = [i for i in range(len(cs)) if hier[i][3] == -1]
+    oi = max(tops, key=lambda i: cv2.contourArea(cv2.convexHull(cs[i])))
+    outer = _quad_from_contour(cs[oi], approx_eps_frac)
+    if outer is None:
+        return None, diag, 'largest hue blob is not a 4-vertex convex quad'
+
+    img_area = float(mask.shape[0] * mask.shape[1])
+    frac = cv2.contourArea(outer.astype(np.float32)) / img_area
+    if frac < min_area_frac:
+        return None, diag, f'hue quad too small ({frac:.2f} < {min_area_frac})'
+    if frac > max_area_frac:
+        return None, diag, f'hue quad fills the frame ({frac:.2f} > {max_area_frac})'
+
+    kids = [i for i in range(len(cs)) if hier[i][3] == oi]
+    inner = (_quad_from_contour(cs[max(kids, key=lambda i: cv2.contourArea(cs[i]))],
+                                approx_eps_frac) if kids else None)
+    if inner is None:
+        # No usable hole: the corners are the tape's OUTER edge, half a stroke
+        # width out from the centreline. Usable, but say so.
+        return outer, diag, 'no inner tape edge; corners are the OUTER edge'
+
+    # Pair each outer corner with its nearest unused inner corner. Winding is
+    # normally already aligned; matching makes it so regardless.
+    used, mid = set(), []
+    for p in outer:
+        j = min((k for k in range(4) if k not in used),
+                key=lambda k: float(np.hypot(*(inner[k] - p))))
+        used.add(j)
+        mid.append((p + inner[j]) / 2.0)
+    return np.asarray(mid, dtype=float), diag, ''
+
+
 def detect_arena_quad(img, approx_eps_frac=0.02, canny_sigma=0.33,
                       close_iters=3, border_margin=6, min_area_frac=0.05,
-                      max_area_frac=0.95):
+                      max_area_frac=0.95, hue_lo=90, hue_hi=130):
     """Largest convex 4-vertex quad in the image.
 
     The boundary is often COLOURED tape on a near-neutral floor: a strong colour
@@ -55,6 +130,29 @@ def detect_arena_quad(img, approx_eps_frac=0.02, canny_sigma=0.33,
     gray, vis = _as_bgr(img)
     h, w = gray.shape[:2]
     img_area = float(w * h)
+
+    # ---- primary: hue threshold on the boundary tape (colour frames only).
+    # Falls through to the Canny path below on a mono frame or any failure.
+    a0 = np.asarray(img)
+    if a0.ndim == 3 and a0.shape[2] == 3:
+        quad, hdiag, why = _tape_centreline_quad(
+            a0, hue_lo, hue_hi, approx_eps_frac, min_area_frac, max_area_frac)
+        if quad is not None:
+            cv2.polylines(vis, [quad.astype(np.int32)], True, (0, 0, 255), 3)
+            return quad, {
+                'edges': hdiag['mask'],
+                'num_contours': hdiag['num_contours'],
+                'num_quads': 1,
+                'largest_quad_area': float(cv2.contourArea(
+                    quad.astype(np.float32))),
+                'hull_verts': 4,
+                'rejected': why,          # '' unless the outer edge was used
+                'contours_img': vis,
+                'source': 'hue',
+            }
+        hue_rejected = f'hue: {why}'
+    else:
+        hue_rejected = 'hue: frame is mono'
 
     channels = [gray]
     a = np.asarray(img)
@@ -110,7 +208,12 @@ def detect_arena_quad(img, approx_eps_frac=0.02, canny_sigma=0.33,
     if best is not None:
         cv2.polylines(vis, [best], True, (0, 0, 255), 3)       # chosen quad
 
+    if rejected:
+        rejected = f'{hue_rejected}; canny: {rejected}'
+    else:
+        rejected = hue_rejected if best is None else ''
     diag = {
+        'source': 'canny',
         'edges': edges,
         'num_contours': len(contours),
         'num_quads': 1 if best is not None else 0,

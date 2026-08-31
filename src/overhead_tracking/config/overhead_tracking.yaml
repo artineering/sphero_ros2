@@ -30,7 +30,7 @@ overhead_tracker_node:
     # Measured 2026-08-08 against the matte-black arena. auto_exposure=1 is
     # manual mode; AWB off or the camera recolours the LEDs frame to frame.
     v4l2_auto_exposure: 1
-    v4l2_gain: 140
+    v4l2_gain: 120
     v4l2_white_balance_automatic: 0
     # 0 = do not set. Exposure is clamped to the frame period, so at 200 fps the
     # ceiling is 5 ms and every requested value above it is silently ignored --
@@ -128,6 +128,10 @@ overhead_tracker_node:
     # tool can rebuild the annotated frames from a bag of that topic.
     # Set back to 15.0 when you actually want to watch the video live.
     annotate_rate_hz: 0.0
+    # Log each linked robot's tracked field position to the console at 1 Hz.
+    # Off by default. Toggles live on a running node:
+    #   ros2 param set /overhead_tracker_node debug_positions true
+    debug_positions: false
     jpeg_quality: 70
     annotate_min_quality: 40            # degrade to here before dropping a frame
     annotate_scale: 0.5                 # half-res JPEG: quarter the encode work,
@@ -161,7 +165,7 @@ overhead_tracker_node:
     auto_load_arena: true
     # manual is the default and the one that works: at the calibrated exposure
     # the arena reads p50 2-4 and there is simply no edge for Canny to find.
-    arena_source: manual
+    arena_source: auto
     # Blue tape rectangle, re-located 2026-08-29 after the camera was re-aimed,
     # from a blue-channel mask (B - mean(G,R)). Corners come from fitting a line
     # to each of the four tape edges and intersecting them, NOT from a convex
@@ -176,7 +180,7 @@ overhead_tracker_node:
     # Validation: the centre registration cross maps to (122.75, 91.52) cm
     # against a true centre of (121.9, 91.4) -- 0.84 cm. That is the real check;
     # the 4-point homography residual is always ~0 and proves nothing.
-    manual_corners_px: [259.8, 58.5, 1681.5, 53.4, 1680.8, 1109.3, 269.6, 1120.2]
+    # manual_corners_px: [259.8, 58.5, 1681.5, 53.4, 1680.8, 1109.3, 269.6, 1120.2]
     arena_long_edge_cm: 243.84          # 96 in
     arena_short_edge_cm: 182.88         # 72 in
     arena_swap_axes: false              # if perspective picked the wrong long edge
@@ -196,6 +200,14 @@ overhead_tracker_node:
     min_quad_area_frac: 0.05
     max_quad_area_frac: 0.95            # rejects the whole-frame noise artefact
     approx_eps_frac: 0.02
+    # Hue band of the boundary tape, OpenCV's 0-179 scale. Measured 2026-08-31
+    # on the current lighting: tape 102-112, mat 11-14, floor/wall 20-22, so the
+    # band sits in empty space and the mask came out 165x larger than the next
+    # blob. Corners are the tape CENTRELINE (outer contour + hole, averaged).
+    # This is white-balance dependent -- it holds because
+    # v4l2_white_balance_automatic is 0. Re-measure if the room light changes.
+    arena_hue_lo: 90
+    arena_hue_hi: 130
 
     # --------------------------------------------------------------- linking
     probe_red: 255
@@ -208,7 +220,11 @@ overhead_tracker_node:
     off_timeout_seconds: 4.0
     probe_poll_seconds: 0.2             # LED re-asserted every poll: other nodes
                                         # write LEDs too and will stomp the probe
-    reset_settle_seconds: 0.5
+    # All targets are commanded dark before the first pre-frame. These are
+    # fire-and-forget BLE writes, one per robot, and any that has not landed
+    # leaves that robot lit in its own pre-frame -- which reads as `no_lit`
+    # because the diff sees no CHANGE. 0.5 s was not enough for 6 robots.
+    reset_settle_seconds: 2.0
     heartbeat_fresh_sec: 15.0
     skip_compass_default: true
     # Camera-closed-loop aim calibration, run per robot at link time when
@@ -219,32 +235,31 @@ overhead_tracker_node:
     # CLOCKWISE-positive (0 forward, 90 right) while field angles are
     # counter-clockwise, so the corrective turn is +meas, not -meas.
     aim_tolerance_deg: 8.0              # comfortably inside the 15 deg bank step
-    aim_settle_seconds: 1.5
+    # Fire-and-forget: _reset_aim and _set_robot_heading publish a String and
+    # nothing acks, so this is the ONLY thing that waits for the robot to finish
+    # turning. Measured 2026-08-31 at 1.5 s, two of four robots verified 11-14
+    # deg off against an 8 deg tolerance -- consistent with measuring mid-turn.
+    aim_settle_seconds: 3.0
     compass_timeout_seconds: 25.0
 
-    # ---------------------------------------------------------------- fusion
-    body_to_field_yaw_offset: 0.0
+    # ---------------------------------------------------- motion model / KF
+    # 4-state [px, py, v, theta] driven by the camera and the roll command.
+    # Robot telemetry is NOT an input: the IMU/odometry fusion path was removed
+    # 2026-08-31, so r_vel/r_ori/r_acc/r_gyro/q_angle/q_acc/q_gyro,
+    # sensor_fresh_sec and body_to_field_yaw_offset are gone with it.
     r_cam: 1.0
-    r_vel: 4.0
-    r_ori: 2.0
-    r_acc: 50.0
-    r_gyro: 4.0
     q_pos: 0.04
     q_vel: 1.0
     q_yaw: 1.0
-    q_angle: 1.0
-    q_acc: 100.0
-    q_gyro: 25.0
-    sensor_fresh_sec: 1.0
-    # false = camera-only tracking: the KF sees position fixes and nothing else,
-    # so velocity is inferred from successive camera updates rather than from
-    # the robot's own IMU/odometry. Turned off 2026-08-29 while diagnosing a
-    # track that was dropped as soon as the robot started moving -- with
-    # telemetry fused in, a bad body-frame velocity or yaw drags the prediction
-    # (and with it the ROI) away from where the robot actually is, and that
-    # failure is indistinguishable from a detection failure. Re-enable only
-    # once camera-only tracking is known good, so the two can be told apart.
-    fuse_telemetry: false
+    # Scales the Sphero roll `speed` field (0-255) to cm/s for the control
+    # input. Measured 2026-08-31 over a 182.88 cm (6 ft) straight run: speed 50
+    # -> 6.00 s, 100 -> 2.88 s, 150 -> 2.05 s, i.e. 30.5 / 63.5 / 89.2 cm/s.
+    # Least-squares through the origin gives 0.607, max residual 4% (speed 100
+    # is the outlier). A free intercept is not significant (+2.3 +/- 4.6 cm/s),
+    # so the proportional form is used. Above speed 150 this is extrapolation --
+    # motor saturation is unmeasured. Single run per speed; the 4% scatter is
+    # the size of hand-timing error, so repeats would tighten it, not more speeds.
+    cmd_speed_to_cms: 0.61
     sphere_radius_mm: 36.5
     # Template heading oscillates 60-120 deg when the matrix is off, and the
     # 15 deg bank quantises it regardless. Yaw comes from telemetry; the template

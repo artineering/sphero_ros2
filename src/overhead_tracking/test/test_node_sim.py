@@ -18,7 +18,6 @@ rclpy = pytest.importorskip('rclpy')
 from rclpy.parameter import Parameter                            # noqa: E402
 from std_srvs.srv import Trigger                                 # noqa: E402
 
-from overhead_tracking.fusion import VX, VY                      # noqa: E402
 from overhead_tracking.overhead_tracker_node import (            # noqa: E402
     ARENA_READY, BLOBS_READY, COASTING, HEALTHY, LINKING, LOST, OUT_OF_ARENA,
     TRACKING, UNRESOLVED, OverheadTrackerNode)
@@ -244,8 +243,11 @@ def test_link_binds_bijectively(ros, tmp_path):
         order = {'SB-AAAA': 1, 'SB-BBBB': 2, 'SB-CCCC': 0}
 
         def fake_probe(name, centres, used):
+            # _probe_one returns (ok, blob_index, pre_frame): the caller keeps
+            # the robot lit across probe AND aim, so it needs `pre` back for the
+            # dark check after it turns the LEDs off. None skips that check.
             idx = order[name]
-            return (idx not in used), idx
+            return (idx not in used), idx, None
         h.node._probe_one = fake_probe
         for n in names:
             h.node._fleet_last_seen[n] = time.time()
@@ -337,7 +339,11 @@ def test_publish_is_decimated_to_10hz(ros, tmp_path):
 
 
 def test_stale_frame_still_publishes_predict_only(ros, tmp_path):
-    """A missing/stale frame must not create a gap in the 10 Hz stream."""
+    """A missing/stale frame must not create a gap in the pose stream.
+
+    Motion is dead-reckoned from the COMMAND, not from an inferred velocity
+    state, so the control input is what carries the track over a stale frame.
+    """
     h = Harness(tmp_path, positions=[(600.0, 350.0)])
     try:
         h.arena()
@@ -346,7 +352,7 @@ def test_stale_frame_still_publishes_predict_only(ros, tmp_path):
         h.node._set_state(TRACKING)
         h.node._source.on_tick()
         h.node._tick()
-        t.kf.x[VX], t.kf.x[VY] = 30.0, 0.0
+        h.node._cmd['SB-AAAA'] = (30.0, 0.0)      # 30 cm/s along field +x
         before = t.kf.pos_cm[0]
         h.node._last_pub = 0.0
         h.node._tick()                                # same stamp -> not fresh
@@ -515,12 +521,12 @@ def test_no_publisher_is_created_from_the_tick(ros, tmp_path):
         h.add_track('SB-AAAA', x, y)
         h.node._set_state(TRACKING)
         before = (len(h.node._pose_pubs), len(h.node._led_pubs),
-                  len(h.node._sensor_subs))
+                  len(h.node._roll_subs))
         for _ in range(10):
             h.node._source.on_tick()
             h.node._tick()
         after = (len(h.node._pose_pubs), len(h.node._led_pubs),
-                 len(h.node._sensor_subs))
+                 len(h.node._roll_subs))
         assert before == after
     finally:
         h.close()

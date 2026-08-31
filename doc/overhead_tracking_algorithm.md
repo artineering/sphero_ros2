@@ -4,7 +4,8 @@ How `overhead_tracking` turns a USB3 global-shutter camera into per-Sphero field
 positions. Companion to the code in `src/overhead_tracking/`.
 
 **Output contract (do not change):** `/localization/<name_safe>/position`,
-`geometry_msgs/PoseStamped`, `frame_id='field'`, position in **centimetres**, 10 Hz.
+`geometry_msgs/PoseStamped`, `frame_id='field'`, position in **centimetres**,
+published every tick (`publish_rate_hz: 0`).
 Consumed by `sphero_instance_device_controller_node.py:236-239` and
 `sphero_instance_task_controller_node.py:949`.
 
@@ -91,10 +92,10 @@ reports both separately and only the driver rate drives the warning.
                     │      ▼                              ▼                         │
                     │  homography px→cm ──► gates ──► KF.update_camera (serial)     │
                     │      │                                                        │
- sphero/*/sensors ─►│  telemetry ──► KF.update_{ori,vel,accel,gyro}                 │
+    sphero/*/roll ─►│  roll command ──► KF control input (v, theta)                 │
  /sphero_fleet/  ──►│  roster                                                       │
                     │      │                                                        │
-                    │      ├──► /localization/<name_safe>/position  @10 Hz  [cm]    │
+                    │      ├──► /localization/<name_safe>/position  @tick   [cm]    │
                     │      ├──► ~/track_markers          (metres, for 3D views)     │
                     │      └──► bounded FIFO ═══► annotate worker ──► ~/annotated/  │
                     └───────────────────────────────────────────────────────────────┘
@@ -134,7 +135,7 @@ Rules that carry weight:
   from "the robots aren't lit".
 - **`LINKING` suppresses camera updates.** Probing flashes LEDs across the arena;
   a camera measurement taken then is a direct route to a baked-in ID swap. The KF
-  dead-reckons, so the 10 Hz output is unaffected.
+  dead-reckons, so the position output is unaffected.
 - **`~/reset` keeps publishers.** Destroying rclpy entities from a service thread
   while the tick runs is a known hazard.
 
@@ -225,8 +226,8 @@ T8   accept/reject per track:                                [serial, tick threa
        6. kf.update_camera(x_cm, y_cm)         -> HEALTHY, miss_count = 0
 T9   miss ladder: COASTING -> (max_misses) LOST -> (timeout) UNRESOLVED
 T10  re-acquire LOST tracks against unclaimed components via associate()
-T11  telemetry: orientation -> velocity -> accel -> gyro    [orientation FIRST]
-T12  publish, decimated to 10 Hz; extrapolate by v*age WITHOUT mutating the filter
+T11  publish every tick (publish_rate_hz: 0); extrapolate by v*age WITHOUT
+     mutating the filter
 T13  hand (frame, labels, stamp) to the annotate queue
 T14  diagnostics
 ```
@@ -273,34 +274,44 @@ half           = clamp(roi_scale * ball_d / 2 + ceil(|v| * scale * dt)
 
 Extrapolation happens in **cm** and only then maps to pixels — px/cm varies across
 the frame under perspective, so extrapolating a pixel velocity would be wrong. The
-velocity comes from the KF, fed by per-robot **telemetry**, which is the one signal
-the camera cannot supply. That is what makes the window trustworthy during occlusion.
+velocity comes from the KF, whose (v, theta) rows are set outright by the last
+**roll command** rather than inferred from successive camera fixes. That is what makes
+the window trustworthy during occlusion: the command is known even when the robot is
+not visible.
 
 ---
 
-## 7. Fusion
+## 7. Motion model
 
-13-state linear Kalman filter per robot, field frame, cm:
+4-state linear Kalman filter per robot, field frame, cm (`motion.py`):
 
 ```
-[ px, py, vx, vy, yaw, pitch, roll, ax, ay, az, gx, gy, gz ]
+state    x = [ px, py, v, theta ]      cm, cm, cm/s, deg CCW from +x
+control  u = (v_cmd, theta_cmd)        the last roll command, in field terms
+meas     z = [ x_cm, y_cm ]            template match through the homography
 ```
 
 - **Camera** gives absolute (px, py), only when a blob is associated.
-- **Telemetry** gives velocity, orientation, accel and gyro every cycle.
-- Telemetry **position is never fused** — the device controller feeds our own
-  `/localization` output back into its reported x,y, so fusing it would be circular.
+- **The roll command supplies (v, theta) outright.** `F` is identity on position and
+  zero on (v, theta): those two rows come entirely from the control, so position
+  integrates the *commanded* velocity instead of waiting for successive camera fixes
+  to reveal that the robot moved. `cmd_speed_to_cms` converts the Sphero `speed`
+  field (0–255) to cm/s; Sphero headings are clockwise-positive and field angles
+  counter-clockwise, so the field heading is the negation.
+- **Robot telemetry is not an input.** The IMU/odometry fusion path (a 13-state
+  filter over velocity, orientation, accel and gyro) was removed 2026-08-31 along
+  with `fusion.py`. It made a bad body-frame velocity or yaw indistinguishable from a
+  detection failure: a wrong telemetry reading dragged the prediction, and the ROI
+  with it, away from where the robot actually was. Telemetry position was never
+  fusable anyway — the device controller feeds our own `/localization` output back
+  into its reported x,y, so fusing it would have been circular.
 - A missing blob means predict-only, and we **still publish**. Downstream has no
   "invalid" path, so a slightly stale pose beats a gap in the stream.
 
-**Acceleration is a passive measured state and never drives motion.** Sphero accel is
-body-frame and gets only a yaw rotation, so gravity and bias leak into the field-plane
-components; double-integrating produced a quadratic runaway that drifted past the
-association gate. Position integrates velocity only.
-
-Heading is telemetry-only (`use_template_heading: false`): the template angle
-oscillates 60–120° when the matrix is off, and the 15° bank quantises it regardless.
-It is reported for display, not fused.
+Heading comes from the **camera** (`_camera_heading`, the LED spine/back-LED read),
+not from telemetry yaw. `use_template_heading: false` keeps the raw template angle out
+of it: that angle oscillates 60–120° when the matrix is off, and the 15° bank quantises
+it regardless. It is reported for display only.
 
 ---
 
@@ -313,7 +324,7 @@ It is reported for display, not fused.
 | Match pool (`min(4, cores)`) | `match_bank_at` per candidate |
 | Annotate worker (daemon) | draw + JPEG encode + publish, fed by a bounded FIFO |
 | Services (MutuallyExclusive) | arena / blobs / link / reset — these block for seconds |
-| Subs (Reentrant) | roster, sensors, compass |
+| Subs (Reentrant) | roster, roll/stop commands, compass |
 
 `cv2.setNumThreads(1)` before construction, or OpenCV's internal parallel-for
 oversubscribes the cores against the pool and the threading becomes a net loss.
@@ -364,12 +375,12 @@ time-truthful in a bag.
 
 | Mode | Handling |
 |---|---|
-| **Occlusion** | miss → `COASTING`, ROI grows 1.5×/miss, KF dead-reckons on telemetry. The tracker set is fixed at link time, so an occluded robot can never be replaced by a phantom. |
-| **Two robots overlapping** | claims resolved on centroids before matching; post-match exclusivity within 34 px; the loser dead-reckons on its own telemetry, which carries identity through the merge; re-acquisition suppressed during overlap. |
+| **Occlusion** | miss → `COASTING`, ROI grows 1.5×/miss, KF dead-reckons on the last roll command. The tracker set is fixed at link time, so an occluded robot can never be replaced by a phantom. |
+| **Two robots overlapping** | claims resolved on centroids before matching; post-match exclusivity within 34 px; the loser dead-reckons on its own commanded velocity, which carries identity through the merge; re-acquisition suppressed during overlap. |
 | **Leaving the arena** | measurement rejected, status `OUT_OF_ARENA`, **publishing continues**. |
 | **Dropped frames** | stale stamp → predict-only, still publish. >1 s warn; >5 s reopen **and re-arm the control re-apply**, because the UVC exposure discard happens on every stream start. |
 | **Framerate drift** | warn — fps sets the exposure clamp, so a drop to 60 fps silently triples exposure. |
-| **Matrix off** | still tracked (contrast-invariant matching); heading unreliable, hence telemetry yaw. A fully dark robot falls into the occlusion path. |
+| **Matrix off** | still tracked (contrast-invariant matching); the template angle is unreliable, hence camera LED heading. A fully dark robot falls into the occlusion path. |
 | **ID swap** | ROI containment → centroid conflict resolution → post-match exclusivity → innovation gate → `SUSPECT` after 20 disagreements. **Never auto-corrected**: repair is operator-driven `~/link_spheros ["A","B"]`, because auto-swapping on camera-only evidence is how a swap becomes silent and permanent. |
 
 ---
@@ -380,14 +391,16 @@ time-truthful in a bag.
 `~/link_spheros` (`multirobot_msgs/srv/Register`), `~/reset`,
 `~/reapply_camera_controls`.
 
-**Published** — `/localization/<name_safe>/position` (PoseStamped, cm, 10 Hz),
-`~/annotated/compressed` (CompressedImage jpeg, acquisition stamp),
-`~/arena_corners` (Marker, metres, latched), `~/track_markers` (MarkerArray, metres),
-`~/state` and `~/link_status` (String JSON, latched),
-`sphero/<name_safe>/{led,matrix,calibrate_compass}`.
+**Published** — `/localization/<name_safe>/position` (PoseStamped, cm, every tick
+at `publish_rate_hz: 0`), `~/detections` (String JSON: per-robot pixel u/v, field
+x/y, heading, score, status), `~/annotated/compressed` (CompressedImage jpeg,
+acquisition stamp), `~/arena_corners` (Marker, metres, latched), `~/track_markers`
+(MarkerArray, metres), `~/state` and `~/link_status` (String JSON, latched),
+`sphero/<name_safe>/{led,matrix,heading,reset_aim,calibrate_compass}`.
 
 **Subscribed** — `/sphero_fleet/robots` (FleetState, latched),
-`sphero/<name_safe>/sensors`, `sphero/<name_safe>/calibrate_compass_done`.
+`sphero/<name_safe>/roll`, `sphero/<name_safe>/stop`,
+`sphero/<name_safe>/calibrate_compass_done`.
 
 Units: `/localization` and all internal field maths are **centimetres**; markers and
 TF are **metres**. The split is deliberate and matches the existing control-stack
