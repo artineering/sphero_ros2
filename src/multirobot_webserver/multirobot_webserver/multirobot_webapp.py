@@ -35,15 +35,6 @@ from multirobot_msgs.msg import FleetRobot, FleetState
 from multirobot_webserver.worker_registry import WorkerRegistry
 
 # Marker pool: 16 LED-matrix markers (8 hues x {filled, ring}). Allocation
-# order per the Interface Contract: filled across all 8 hues first (slots 0-7),
-# then ring across all 8 hues (slots 8-15). Maximizes hue diversity for small
-# fleets. (hue, fill) tuples; index in the list is the slot number.
-MARKER_HUE_ORDER = [
-    'Red', 'Orange', 'Yellow', 'Green', 'Cyan', 'Blue', 'Magenta', 'Purple',
-]
-MARKER_FILLS = ['filled', 'ring']
-MARKER_POOL = [(hue, fill) for fill in MARKER_FILLS for hue in MARKER_HUE_ORDER]
-
 # Worker launcher-agent HTTP client tuning. (connect, read) seconds — every
 # agent call MUST pass this so a dead/slow Pi can never hang the webserver.
 AGENT_TIMEOUT = (3, 5)
@@ -71,7 +62,13 @@ INSTANCE_CONNECT_WINDOW = 180.0
 # within this window. The device controller's heartbeat timer + sensor stream
 # only fire while the BLE link is live, so a stale last_seen means the link is
 # down -- the real liveness signal, uniform for local AND remote instances.
-HEARTBEAT_FRESH_SEC = 15.0
+#
+# 3.0, not the old 15.0. That figure was sized as three beats of the 5 s
+# /status heartbeat, but last_seen is ALSO refreshed by the sensor stream
+# (_on_sensor), measured 2026-09-21 at 1.7 Hz -- so 15 s was ~25 samples of
+# slack and the dashboard lagged reality by up to 20 s. At 3 s a real drop is
+# caught in ~5 samples while a single missed sensor tick is still tolerated.
+HEARTBEAT_FRESH_SEC = 3.0
 
 # Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
 # can never block the others; worker pool capped at the fleet ceiling (16 units /
@@ -196,12 +193,10 @@ class FleetNode(Node):
         #                 'battery', 'x', 'y', 'heading',
         #                 'sensor_sub', 'pos_sub'}
         self.robots: Dict[str, Dict] = {}
-        # sphero name -> marker slot index (live assignments)
-        self.marker_assignments_map: Dict[str, int] = {}
         self._lock = threading.Lock()
         self.timer = self.create_timer(1.0, self._publish_fleet_state)
 
-    def add_robot(self, name: str, name_safe: str, marker_slot: int = -1):
+    def add_robot(self, name: str, name_safe: str):
         with self._lock:
             if name in self.robots:
                 return
@@ -230,8 +225,6 @@ class FleetNode(Node):
                 lambda msg, n=name: self._on_heartbeat(n),
                 10,
             )
-            if marker_slot >= 0:
-                self.marker_assignments_map[name] = marker_slot
             self.robots[name] = {
                 'name_safe': name_safe,
                 'status': 'running',
@@ -250,8 +243,6 @@ class FleetNode(Node):
     def remove_robot(self, name: str):
         with self._lock:
             entry = self.robots.pop(name, None)
-            if entry is not None:
-                self.marker_assignments_map.pop(name, None)
         if entry is not None:
             self.destroy_subscription(entry['sensor_sub'])
             if entry.get('pos_sub') is not None:
@@ -260,32 +251,30 @@ class FleetNode(Node):
                 self.destroy_subscription(entry['status_sub'])
             self._publish_fleet_state()
 
-    def free_marker_slots(self) -> List[int]:
-        """Marker pool slot indices (0-15) not currently assigned to a robot."""
-        with self._lock:
-            assigned = set(self.marker_assignments_map.values())
-        return [s for s in range(len(MARKER_POOL)) if s not in assigned]
-
-    def allocate_marker_slot(self) -> int:
-        """Reserve and return the next free marker slot, or -1 if pool full."""
-        free = self.free_marker_slots()
-        return free[0] if free else -1
-
-    def marker_assignments(self) -> Dict[str, int]:
-        """Snapshot of the live sphero name -> marker slot map."""
-        with self._lock:
-            return dict(self.marker_assignments_map)
-
     def set_robot_status(self, name: str, status: str):
         with self._lock:
             if name in self.robots:
                 self.robots[name]['status'] = status
 
+    def _entry(self, name: str):
+        """Roster entry for `name`, or None with a warning.
+
+        The miss used to be silent, and its only symptom was last_seen frozen at
+        0.0 while the dashboard read 'connecting' then 'failed' -- indistinguish-
+        able from a robot that is simply not sending telemetry. Say which.
+        """
+        entry = self.robots.get(name)
+        if entry is None:
+            self.get_logger().warning(
+                f'telemetry for unknown robot {name!r} (roster: '
+                f'{sorted(self.robots)})', throttle_duration_sec=10.0)
+        return entry
+
     def _on_sensor(self, name: str, msg: SpheroSensor):
         # Pose (x/y) now comes from localization (_on_localization); sensor
         # supplies battery + heading only.
         with self._lock:
-            entry = self.robots.get(name)
+            entry = self._entry(name)
             if entry is None:
                 return
             entry['last_seen'] = time.time()
@@ -295,7 +284,7 @@ class FleetNode(Node):
     def _on_heartbeat(self, name: str):
         """A /status heartbeat arrived -> the BLE link is live; refresh last_seen."""
         with self._lock:
-            entry = self.robots.get(name)
+            entry = self._entry(name)
             if entry is not None:
                 entry['last_seen'] = time.time()
 
@@ -569,15 +558,9 @@ class SpheroInstanceManager:
             if process.poll() is None:
                 instance_info['status'] = 'connecting'
                 print(f"✓ {sphero_name} added successfully on port {port}")
-                # Allocate a marker pool slot for this robot. -1 if pool is full.
-                marker_slot = -1
                 if self.fleet_node is not None:
-                    marker_slot = self.fleet_node.allocate_marker_slot()
                     self.fleet_node.add_robot(
-                        sphero_name, sphero_name.replace('-', '_'),
-                        marker_slot,
-                    )
-                instance_info['marker_slot'] = marker_slot
+                        sphero_name, sphero_name.replace('-', '_'))
                 return {
                     'success': True,
                     'message': f'Sphero {sphero_name} added successfully',
@@ -645,13 +628,9 @@ class SpheroInstanceManager:
             relay = TcpRelay(port, worker.host, port)
             relay.start()
             url = f'http://{worker.host}:{port}'
-            marker_slot = -1
             if self.fleet_node is not None:
-                marker_slot = self.fleet_node.allocate_marker_slot()
                 self.fleet_node.add_robot(
-                    sphero_name, sphero_name.replace('-', '_'),
-                    marker_slot,
-                )
+                    sphero_name, sphero_name.replace('-', '_'))
             instance_info = {
                 'name': sphero_name,
                 'port': port,
@@ -660,7 +639,6 @@ class SpheroInstanceManager:
                 'status': 'running',
                 'added_at': time.time(),
                 'url': url,
-                'marker_slot': marker_slot,
                 'worker': worker.name,
                 'host': worker.host,
             }
@@ -1408,26 +1386,6 @@ def health():
     return jsonify({
         'status': 'healthy',
         'sphero_count': len(manager.instances),
-    })
-
-
-@app.route('/api/markers', methods=['GET'])
-def markers():
-    """Report the LED-matrix marker pool: all slots, free slots, and current
-    assignments."""
-    pool = [{'slot': i, 'hue': hue, 'fill': fill}
-            for i, (hue, fill) in enumerate(MARKER_POOL)]
-    if manager.fleet_node is None:
-        free = list(range(len(MARKER_POOL)))
-        assigned: Dict[str, int] = {}
-    else:
-        free = manager.fleet_node.free_marker_slots()
-        assigned = manager.fleet_node.marker_assignments()
-    return jsonify({
-        'success': True,
-        'all': pool,
-        'free': free,
-        'assigned': assigned,
     })
 
 

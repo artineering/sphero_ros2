@@ -273,9 +273,6 @@ See [Distributed Workers](#distributed-workers--worker-registry).
 > `sphero_name` field; units join by callsign. When a worker registry is loaded,
 > the instance is spawned on the least-loaded remote worker instead of locally.
 
-> The webserver additionally exposes the LED-matrix marker pool
-> (`GET /api/markers`), primarily driven by the dashboard UI.
-
 ## WebSocket Events (Instance Server)
 
 Each Sphero instance WebSocket server supports these events:

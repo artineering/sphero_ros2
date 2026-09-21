@@ -180,8 +180,10 @@ class ControlStation {
         this.bindActions();
         this.startMissionClock();
         this.refresh();
-        // Fleet polling — every 5s
-        setInterval(() => this.refresh(), 5000);
+        // Fleet polling — every 1s. /api/spheros answers in ~15 ms and the
+        // server-side freshness window is 3 s, so a slower poll was the
+        // dominant term in how long a status change took to show up.
+        setInterval(() => this.refresh(), 1000);
     }
 
     bindActions() {
