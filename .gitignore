@@ -47,3 +47,12 @@ src/sphero_instance_controller/sphero_architecture.png
 src/sphero_instance_controller/sphero_data_flow.png
 src/sphero_instance_controller/sphero_multi_robot.png
 src/sphero_instance_controller/VISUALIZATION_GUIDE.md
+
+# Raw camera recordings (94-302 MB each; over the GitHub 100 MB limit)
+recordings/**/*.mjpeg
+recordings/**/*.avi
+recordings/*.mjpeg
+recordings/*.avi
+recordings/rec.log
+recordings/.current
+recordings/.pid
