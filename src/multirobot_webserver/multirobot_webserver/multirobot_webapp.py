@@ -72,6 +72,12 @@ INSTANCE_CONNECT_WINDOW = 180.0
 # dropout flipped a perfectly healthy robot to 'failed'. If the heartbeat rate
 # ever changes, change this with it.
 HEARTBEAT_FRESH_SEC = 15.0
+# Explicit link-down states the device controller publishes on /status
+# (connection_state) the moment the BLE link drops. They override freshness
+# immediately; HEARTBEAT_FRESH_SEC above remains the fallback for silent
+# failures (killed process, worker off the network) and for older device
+# controllers that never send these states.
+LINK_DOWN_STATES = ('reconnecting', 'disconnected')
 
 # Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
 # can never block the others; worker pool capped at the fleet ceiling (16 units /
@@ -194,7 +200,11 @@ class FleetNode(Node):
         )
         # robots[name] = {'name_safe', 'status', 'added_at', 'last_seen',
         #                 'battery', 'x', 'y', 'heading',
-        #                 'sensor_sub', 'pos_sub'}
+        #                 'link_state', 'link_state_at',
+        #                 'sensor_sub', 'pos_sub', 'status_sub', 'error_sub'}
+        # link_state = last explicit /status connection_state ('connected',
+        # 'reconnecting', 'disconnected'), or None for a device controller that
+        # never sent one (legacy -> pure heartbeat freshness).
         self.robots: Dict[str, Dict] = {}
         self._lock = threading.Lock()
         self.timer = self.create_timer(1.0, self._publish_fleet_state)
@@ -219,13 +229,22 @@ class FleetNode(Node):
                 self._loc_qos,
             )
             # Heartbeat: the device controller publishes a /status JSON on a
-            # timer while the BLE link is live. Refreshing last_seen from it
-            # makes connection liveness robust even when sensors aren't streaming
-            # -- and works for remote instances too (topic crosses the graph).
+            # timer while the BLE link is live, and immediately on every link
+            # transition (connection_state). Works for remote instances too
+            # (topic crosses the graph).
             status_sub = self.create_subscription(
                 String,
                 f'/sphero/{name_safe}/status',
-                lambda msg, n=name: self._on_heartbeat(n),
+                lambda msg, n=name: self._on_status(n, msg),
+                10,
+            )
+            # Terminal BLE loss: {"error": "ble_lost"} just before the device
+            # process exits. Backstop in case the final 'disconnected' status
+            # is lost while the process goes down.
+            error_sub = self.create_subscription(
+                String,
+                f'/sphero/{name_safe}/device_error',
+                lambda msg, n=name: self._on_device_error(n, msg),
                 10,
             )
             self.robots[name] = {
@@ -237,9 +256,12 @@ class FleetNode(Node):
                 'x': 0.0,
                 'y': 0.0,
                 'heading': 0,
+                'link_state': None,
+                'link_state_at': 0.0,
                 'sensor_sub': sub,
                 'pos_sub': pos_sub,
                 'status_sub': status_sub,
+                'error_sub': error_sub,
             }
         self._publish_fleet_state()
 
@@ -252,6 +274,8 @@ class FleetNode(Node):
                 self.destroy_subscription(entry['pos_sub'])
             if entry.get('status_sub') is not None:
                 self.destroy_subscription(entry['status_sub'])
+            if entry.get('error_sub') is not None:
+                self.destroy_subscription(entry['error_sub'])
             self._publish_fleet_state()
 
     def set_robot_status(self, name: str, status: str):
@@ -280,16 +304,57 @@ class FleetNode(Node):
             entry = self._entry(name)
             if entry is None:
                 return
-            entry['last_seen'] = time.time()
+            # /sensors and /status are separate topics with no mutual ordering:
+            # a sensor sample queued before the link dropped must not make a
+            # robot that reported link-down look live again. Only a /status
+            # 'connected' clears a down state.
+            if entry.get('link_state') not in LINK_DOWN_STATES:
+                entry['last_seen'] = time.time()
             entry['battery'] = int(msg.battery_percentage)
             entry['heading'] = int(msg.yaw)
 
-    def _on_heartbeat(self, name: str):
-        """A /status heartbeat arrived -> the BLE link is live; refresh last_seen."""
+    def _on_status(self, name: str, msg: String):
+        """A /status message arrived; track its connection_state.
+
+        'connected' (or a legacy heartbeat without a recognised state) refreshes
+        last_seen. 'reconnecting'/'disconnected' mark the link down at once and
+        zero last_seen so freshness can't read 'running'. Battery in those
+        messages is a stale cached value, and battery comes from /sensors
+        anyway, so nothing else is read from the payload.
+        """
+        try:
+            state = json.loads(msg.data).get('connection_state')
+        except (ValueError, AttributeError):
+            state = None
+        with self._lock:
+            entry = self._entry(name)
+            if entry is None:
+                return
+            now = time.time()
+            if state in LINK_DOWN_STATES:
+                entry['link_state'] = state
+                entry['link_state_at'] = now
+                entry['last_seen'] = 0.0
+                return
+            if state == 'connected':
+                entry['link_state'] = 'connected'
+                entry['link_state_at'] = now
+            entry['last_seen'] = now
+
+    def _on_device_error(self, name: str, msg: String):
+        """A ble_lost device_error is terminal: treat it as 'disconnected'."""
+        try:
+            error = json.loads(msg.data).get('error')
+        except (ValueError, AttributeError):
+            return
+        if error != 'ble_lost':
+            return
         with self._lock:
             entry = self._entry(name)
             if entry is not None:
-                entry['last_seen'] = time.time()
+                entry['link_state'] = 'disconnected'
+                entry['link_state_at'] = time.time()
+                entry['last_seen'] = 0.0
 
     def _on_localization(self, name: str, msg: PoseStamped):
         # Active positioning source publishes in cm; convert to meters once.
@@ -1071,23 +1136,40 @@ class SpheroInstanceManager:
         emits no heartbeat, so it never reads 'running'. The process/agent
         signals are used only to tell a still-coming-up unit
         ('connecting'/'unreachable'/'stopped') from a dead one ('failed').
+
+        An explicit connection_state on /status overrides freshness at once:
+        'disconnected' (reconnects exhausted; terminal, shown even after the
+        process exits so local and remote read alike) and 'reconnecting'
+        (while its ~1 Hz repeats stay fresh).
         """
         name = instance['name']
         worker_name = instance.get('worker')
         now = time.time()
 
-        # Local: a dead subprocess is definitively failed (no BLE link possible).
-        if worker_name is None and instance['process'].poll() is not None:
-            return 'failed'
-
-        # Connection truth: heartbeat/telemetry freshness from FleetNode.
         last_seen = 0.0
         added_at = instance.get('added_at', now)
+        link_state = None
+        link_state_at = 0.0
         if self.fleet_node is not None:
             entry = self.fleet_node.robots.get(name)
             if entry is not None:
                 last_seen = entry.get('last_seen', 0.0)
                 added_at = entry.get('added_at', added_at)
+                link_state = entry.get('link_state')
+                link_state_at = entry.get('link_state_at', 0.0)
+
+        if link_state == 'disconnected':
+            return 'disconnected'
+
+        # Local: a dead subprocess is definitively failed (no BLE link possible).
+        if worker_name is None and instance['process'].poll() is not None:
+            return 'failed'
+
+        if (link_state == 'reconnecting'
+                and (now - link_state_at) <= HEARTBEAT_FRESH_SEC):
+            return 'reconnecting'
+
+        # Connection truth: heartbeat/telemetry freshness from FleetNode.
         if last_seen > 0.0 and (now - last_seen) <= HEARTBEAT_FRESH_SEC:
             return 'running'
 

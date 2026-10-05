@@ -180,9 +180,10 @@ class ControlStation {
         this.bindActions();
         this.startMissionClock();
         this.refresh();
-        // Fleet polling — every 1s. /api/spheros answers in ~15 ms and the
-        // server-side freshness window is 3 s, so a slower poll was the
-        // dominant term in how long a status change took to show up.
+        // Fleet polling — every 1s. /api/spheros answers in ~15 ms and a BLE
+        // drop reaches it as an explicit 'reconnecting' state within ~0.2 s,
+        // so a slower poll was the dominant term in how long a status change
+        // took to show up.
         setInterval(() => this.refresh(), 1000);
     }
 
@@ -558,7 +559,7 @@ class ControlStation {
     unitTile(s, i) {
         const state = (s.status || 'stopped').toLowerCase();
         const stateLabel = state.toUpperCase();
-        const dotState = state === 'running' ? 'online' : ((state === 'starting' || state === 'connecting') ? 'starting' : 'error');
+        const dotState = state === 'running' ? 'online' : ((state === 'starting' || state === 'connecting' || state === 'reconnecting') ? 'starting' : 'error');
         const uptime = this.formatAge(s.added_at);
         const safe = (str) => String(str).replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
         const delay = (i * 60).toString();

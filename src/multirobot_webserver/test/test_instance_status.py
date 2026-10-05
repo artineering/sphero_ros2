@@ -31,12 +31,14 @@ class _Proc:
         return self._code
 
 
-def _status(*, fresh=None, alive=True, age=0.0):
+def _status(*, fresh=None, alive=True, age=0.0, link=None, link_age=0.0):
     """
     Run _instance_status for a LOCAL instance (worker=None).
 
     `fresh` = seconds since the last heartbeat (None => never seen). `age` =
-    seconds since spawn. `alive` = subprocess still running.
+    seconds since spawn. `alive` = subprocess still running. `link` = explicit
+    connection_state (None => legacy controller, key absent), set `link_age`
+    seconds ago.
     """
     now = time.time()
     name = 'SB-TEST'
@@ -46,8 +48,11 @@ def _status(*, fresh=None, alive=True, age=0.0):
         'added_at': now - age,
     }
     last_seen = 0.0 if fresh is None else now - fresh
-    fleet_node = types.SimpleNamespace(
-        robots={name: {'last_seen': last_seen, 'added_at': now - age}})
+    entry = {'last_seen': last_seen, 'added_at': now - age}
+    if link is not None:
+        entry['link_state'] = link
+        entry['link_state_at'] = now - link_age
+    fleet_node = types.SimpleNamespace(robots={name: entry})
     mgr = types.SimpleNamespace(fleet_node=fleet_node)
     return SpheroInstanceManager._instance_status(mgr, instance)
 
@@ -79,3 +84,37 @@ def test_no_link_past_window_is_failed():
     past = INSTANCE_CONNECT_WINDOW + 5.0
     assert _status(fresh=None, age=past) == 'failed'
     assert _status(fresh=HEARTBEAT_FRESH_SEC + past, age=past) == 'failed'
+
+
+def test_reconnecting_overrides_freshness():
+    # Explicit link-down state wins over a still-fresh heartbeat.
+    assert _status(fresh=1.0, link='reconnecting') == 'reconnecting'
+    assert _status(fresh=None, link='reconnecting', link_age=1.0) == 'reconnecting'
+
+
+def test_stale_reconnecting_falls_through():
+    # Repeats stopped (wedged process / worker off the network): fall back to
+    # the existing logic instead of reading 'reconnecting' forever.
+    stale = HEARTBEAT_FRESH_SEC + 5.0
+    past = INSTANCE_CONNECT_WINDOW + 5.0
+    assert _status(link='reconnecting', link_age=stale, age=past) == 'failed'
+    assert _status(link='reconnecting', link_age=stale, age=1.0) == 'connecting'
+
+
+def test_reconnecting_with_dead_process_is_failed():
+    assert _status(link='reconnecting', alive=False) == 'failed'
+
+
+def test_disconnected_is_terminal_even_after_exit():
+    # Shown alike for local and remote: wins over the dead-process check.
+    assert _status(link='disconnected') == 'disconnected'
+    assert _status(link='disconnected', alive=False) == 'disconnected'
+    assert _status(link='disconnected', link_age=1000.0,
+                   age=INSTANCE_CONNECT_WINDOW + 5.0) == 'disconnected'
+
+
+def test_connected_or_legacy_uses_freshness():
+    assert _status(fresh=1.0, link='connected') == 'running'
+    assert _status(fresh=1.0, link=None) == 'running'
+    assert _status(fresh=HEARTBEAT_FRESH_SEC + 5.0, link='connected',
+                   age=1.0) == 'connecting'

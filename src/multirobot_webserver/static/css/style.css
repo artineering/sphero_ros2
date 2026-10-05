@@ -304,6 +304,8 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
 .unit__state[data-state="online"]   { color: var(--green); }
 .unit__state[data-state="stopped"]  { color: var(--red); }
 .unit__state[data-state="starting"] { color: var(--amber); }
+.unit__state[data-state="reconnecting"] { color: var(--amber); }
+.unit__state[data-state="disconnected"] { color: var(--red); }
 
 .unit__rows {
     display: grid;

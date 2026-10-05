@@ -30,6 +30,11 @@ from sphero_instance_controller.msg import SpheroSensor
 
 from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
+try:
+    # spherov2 >= 0.13.0 raises this the moment the adapter reports the drop.
+    from spherov2.toy import ToyDisconnectedError
+except ImportError:
+    ToyDisconnectedError = None
 
 from sphero_instance_controller.core.sphero import Sphero
 from sphero_instance_controller.spherov2_collision_patch import apply_collision_patch
@@ -76,6 +81,9 @@ BLE_RECONNECT_ATTEMPTS = _env_int('SPHERO_BLE_RECONNECT_ATTEMPTS', 3)
 BLE_RECONNECT_BACKOFF = _env_float('SPHERO_BLE_RECONNECT_BACKOFF', 2.5)
 BLE_LIVENESS_PERIOD = _env_float('SPHERO_BLE_LIVENESS_PERIOD', 1.0)
 BLE_LIVENESS_FAIL_THRESHOLD = _env_int('SPHERO_BLE_LIVENESS_FAIL_THRESHOLD', 3)
+# While reconnecting, /status repeats 'reconnecting' this often so a webserver
+# that starts late still learns the state.
+BLE_RECONNECTING_REPEAT = 1.0
 
 # Substrings (lowercased) identifying a dead/broken BLE link vs. a transient.
 # spherov2 raises RuntimeError('Use toys in context manager') once the adapter
@@ -209,6 +217,13 @@ class SpheroInstanceDeviceController(Node):
         self._ble_fail_streak = 0
         self.ble_link_down = False
         self._device_error_pub = None  # lazily created on first ble_lost publish
+        # Reported on /status: 'connected' | 'reconnecting' | 'disconnected'.
+        self.connection_state = 'connected'
+        # Set by spherov2's disconnect listener (a worker thread); main() polls
+        # it, so all node state stays on the main thread.
+        self._ble_lost_evt = threading.Event()
+        self._beacon_stop = None  # Event stopping the 'reconnecting' repeater
+        self._attach_disconnect_listener()
 
         # Create timers
         self.sensor_timer = self.create_timer(self.sensor_period, self.publish_sensors)
@@ -232,6 +247,9 @@ class SpheroInstanceDeviceController(Node):
         green = 128 * random.randint(0,2)
         blue = 128 * random.randint(0,2)
         self.sphero.set_matrix('arrow_right', None, red, green, blue)
+
+        # Announce 'connected' now rather than at the first heartbeat tick.
+        self.publish_connection_state('connected')
 
     def _create_subscribers(self):
 
@@ -709,6 +727,10 @@ class SpheroInstanceDeviceController(Node):
 
     def publish_sensors(self):
         """Publish sensor data periodically."""
+        # No /state or /sensors from a dead link: update_sensors swallows read
+        # errors, so these would otherwise be stale cached values.
+        if self.ble_link_down or not getattr(self.sphero.robot, 'is_connected', True):
+            return
         try:
             # Update sensors from device
             self.sphero.update_sensors()
@@ -729,25 +751,15 @@ class SpheroInstanceDeviceController(Node):
 
     def publish_heartbeat(self):
         """Publish heartbeat with battery health information."""
+        # While the link is down main() owns /status ('reconnecting' repeats).
+        if self.ble_link_down:
+            return
         try:
             battery_percentage = self.sphero.get_battery_percentage()
 
-            # Create heartbeat message
-            heartbeat_data = {
-                'sphero_name': self.sphero_name,
-                'timestamp': self.get_clock().now().to_msg().sec,
-                'connection_state': 'connected',
-                'battery': {
-                    'percentage': battery_percentage,
-                    'health': 'GOOD' if battery_percentage > 10 else 'DEAD',
-                    'status': 'FULL' if battery_percentage >= 100 else 'DISCHARGING'
-                },
-                'is_healthy': self.sphero.is_healthy()
-            }
-
             # Publish heartbeat as JSON
             heartbeat_msg = String()
-            heartbeat_msg.data = json.dumps(heartbeat_data)
+            heartbeat_msg.data = json.dumps(self._status_payload())
             self.status_pub.publish(heartbeat_msg)
 
             # Publish battery state message
@@ -775,36 +787,113 @@ class SpheroInstanceDeviceController(Node):
         except Exception as e:
             self.get_logger().error(f'Error publishing heartbeat: {str(e)}')
 
+    def _status_payload(self):
+        """Build the /status JSON dict for the current connection_state.
+
+        battery / is_healthy are last-known cached values; they are only
+        meaningful while connection_state is 'connected'.
+        """
+        battery_percentage = self.sphero.get_battery_percentage()
+        return {
+            'sphero_name': self.sphero_name,
+            'timestamp': self.get_clock().now().to_msg().sec,
+            'connection_state': self.connection_state,
+            'battery': {
+                'percentage': battery_percentage,
+                'health': 'GOOD' if battery_percentage > 10 else 'DEAD',
+                'status': 'FULL' if battery_percentage >= 100 else 'DISCHARGING'
+            },
+            'is_healthy': self.sphero.is_healthy()
+        }
+
+    def publish_connection_state(self, state):
+        """Set connection_state and publish it on /status immediately.
+
+        Safe to call without spinning and from the reconnect beacon thread
+        (rclpy publishers are thread-safe).
+        """
+        self.connection_state = state
+        try:
+            self.status_pub.publish(String(data=json.dumps(self._status_payload())))
+        except Exception as e:
+            self.get_logger().error(f'Error publishing connection state: {str(e)}')
+
     # ===== Runtime BLE Liveness / Reconnect Support =====
+
+    def _on_ble_disconnect(self):
+        """spherov2 disconnect listener (runs on a spherov2 worker thread).
+
+        Only flags the event; main() turns it into mark_link_down().
+        """
+        self._ble_lost_evt.set()
+
+    def _attach_disconnect_listener(self):
+        """Register _on_ble_disconnect on the current robot (spherov2 >= 0.13.0)."""
+        add = getattr(self.sphero.robot, 'add_disconnect_listener', None)
+        if add is not None:
+            add(self._on_ble_disconnect)
+
+    def detach_disconnect_listener(self):
+        """Unregister from the current robot, so tearing the dead link down
+        can't re-trip the event."""
+        remove = getattr(self.sphero.robot, 'remove_disconnect_listener', None)
+        if remove is not None:
+            remove(self._on_ble_disconnect)
+
+    def mark_link_down(self, reason):
+        """Declare the link down: publish 'reconnecting' now and keep repeating it.
+
+        main() blocks in the reconnect loop without spinning (scan, connect,
+        lock wait, backoff), so a daemon thread repeats 'reconnecting' every
+        BLE_RECONNECTING_REPEAT seconds until stop_reconnect_beacon().
+        """
+        if self.ble_link_down:
+            return
+        self.ble_link_down = True
+        self.get_logger().error(
+            f'BLE link to {self.sphero_name} declared DOWN ({reason}); '
+            f'handing off to reconnect.')
+        self.publish_connection_state('reconnecting')
+        stop = threading.Event()
+        self._beacon_stop = stop
+
+        def _beacon():
+            while not stop.wait(BLE_RECONNECTING_REPEAT):
+                self.publish_connection_state('reconnecting')
+
+        threading.Thread(target=_beacon, name='sphero-reconnect-beacon',
+                         daemon=True).start()
+
+    def stop_reconnect_beacon(self):
+        """Stop the 'reconnecting' repeater (no-op if not running)."""
+        if self._beacon_stop is not None:
+            self._beacon_stop.set()
+            self._beacon_stop = None
 
     def _ble_liveness_probe(self):
         """Periodic real round-trip to detect a dead BLE link.
 
         Sensors swallow per-read exceptions, so they can't surface a drop. This
-        probe issues a real BLE write: it re-applies the CURRENT main-LED color
-        via `set_main_led`. `get_main_led()` is a cached dict lookup that never
-        round-trips, but `set_main_led` goes through spherov2's ToyUtil ->
-        adapter.write path, which raises (BleakError / disconnect / timeout) on a
-        dead link. Re-applying the existing color makes the write side-effect a
-        no-op visually. A SINGLE failure never trips reconnect: only
-        `BLE_LIVENESS_FAIL_THRESHOLD` consecutive link-dead failures set
-        `ble_link_down`, which main() acts on.
+        probe calls `Sphero.check_link()`, a response-bearing read with no
+        visible side effect. (It used to re-apply the main LED, but on a BOLT
+        `set_main_led` floods the whole matrix, wiping any drawn graphic every
+        second.) A `ToyDisconnectedError` (spherov2 >= 0.13.0) is definitive and
+        trips immediately; any other link-dead error needs
+        `BLE_LIVENESS_FAIL_THRESHOLD` consecutive failures. Tripping calls
+        `mark_link_down`, which main() acts on.
         """
         # main() owns the reconnect lifecycle once the link is declared down;
         # don't probe a connection that's being torn down / rebuilt.
         if self.ble_link_down:
             return
         try:
-            # Re-apply the current main color (visual no-op) as a real round-trip.
-            current = self.sphero.api.get_main_led()  # cached value
-            if current is None:
-                from spherov2.types import Color
-                current = Color(0, 0, 0)
-            self.sphero.api.set_main_led(current)
-            # A successful write means the link is alive.
+            self.sphero.check_link()
+            # A successful round trip means the link is alive.
             self._ble_fail_streak = 0
         except Exception as exc:
-            if not _is_link_dead_error(exc):
+            definitive = (ToyDisconnectedError is not None
+                          and isinstance(exc, ToyDisconnectedError))
+            if not definitive and not _is_link_dead_error(exc):
                 # Transient (e.g. packet-decode collision): treat as alive.
                 self._ble_fail_streak = 0
                 self.get_logger().warning(
@@ -815,12 +904,9 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().warning(
                 f'BLE liveness probe failed '
                 f'({self._ble_fail_streak}/{BLE_LIVENESS_FAIL_THRESHOLD}): {exc}')
-            if self._ble_fail_streak >= BLE_LIVENESS_FAIL_THRESHOLD:
-                self.ble_link_down = True
-                self.get_logger().error(
-                    f'BLE link to {self.sphero_name} declared DOWN after '
-                    f'{self._ble_fail_streak} consecutive probe failures; '
-                    f'handing off to reconnect.')
+            if definitive or self._ble_fail_streak >= BLE_LIVENESS_FAIL_THRESHOLD:
+                self.mark_link_down(
+                    f'{self._ble_fail_streak} probe failure(s): {exc}')
 
     def rebind_connection(self, robot, api):
         """Swap a freshly reconnected robot/api into the live node.
@@ -836,6 +922,10 @@ class SpheroInstanceDeviceController(Node):
         self.sphero.state.set_toy(robot)
         self._ble_fail_streak = 0
         self.ble_link_down = False
+        self._ble_lost_evt.clear()
+        self._attach_disconnect_listener()
+        self.stop_reconnect_beacon()
+        self.publish_connection_state('connected')
         self.get_logger().info(
             f'Rebound live BLE connection for {self.sphero_name}; resuming.')
 
@@ -856,7 +946,9 @@ class SpheroInstanceDeviceController(Node):
             'sphero_name': self.sphero_name,
             'message': str(last_error)
         })
+        self.stop_reconnect_beacon()
         for _ in range(10):
+            self.publish_connection_state('disconnected')
             self._device_error_pub.publish(error_msg)
             rclpy.spin_once(self, timeout_sec=0.05)
             time.sleep(0.05)
@@ -873,6 +965,41 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().error(f'Error during cleanup: {e}')
 
 
+def _reconnect(node, sphero_name):
+    """Try BLE_RECONNECT_ATTEMPTS fresh scan+connects and rebind the node.
+
+    Blocks without spinning; node.mark_link_down() already started the
+    'reconnecting' beacon. Returns (context_manager, None) on success, or
+    (None, last_error) once all attempts are exhausted.
+    """
+    reconnect_error = None
+    for attempt in range(1, BLE_RECONNECT_ATTEMPTS + 1):
+        # Backoff first: gives a power-cycled unit time to come back
+        # and avoids hammering the adapter immediately after a drop.
+        time.sleep(BLE_RECONNECT_BACKOFF)
+        attempt_cm = None
+        try:
+            with ble_connect_lock(label=f'{sphero_name}-reconnect'):
+                new_robot = scanner.find_toy(toy_name=sphero_name)
+                attempt_cm = SpheroEduAPI(toy=new_robot)
+                new_api = attempt_cm.__enter__()
+            node.rebind_connection(new_robot, new_api)
+            print(f"Reconnected to {sphero_name} "
+                  f"(attempt {attempt}/{BLE_RECONNECT_ATTEMPTS}).")
+            return attempt_cm, None
+        except Exception as re_err:
+            reconnect_error = re_err
+            print(f"✗ Reconnect attempt {attempt}/"
+                  f"{BLE_RECONNECT_ATTEMPTS} for {sphero_name} "
+                  f"failed: {re_err}")
+            if attempt_cm is not None:
+                try:
+                    attempt_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
+    return None, reconnect_error
+
+
 def main(args=None):
     """Main entry point for the Sphero instance device controller node."""
     rclpy.init(args=args)
@@ -882,11 +1009,13 @@ def main(args=None):
 
     def signal_handler(_sig, _frame):
         nonlocal shutdown_requested
-        print("\nKeyboard interrupt detected. Shutting down...")
+        print("\nShutdown signal received. Shutting down...")
         shutdown_requested = True
 
-    # Register signal handler for SIGINT (Ctrl+C)
+    # Register signal handler for SIGINT (Ctrl+C) and SIGTERM (the webserver /
+    # worker agent removing the robot), so either path publishes 'disconnected'.
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     try:
         # Create a temporary node to read the sphero_name parameter
@@ -997,52 +1126,37 @@ def main(args=None):
             while rclpy.ok() and not shutdown_requested:
                 rclpy.spin_once(node, timeout_sec=0.1)
 
+                if node._ble_lost_evt.is_set():
+                    node.mark_link_down('spherov2 disconnect listener')
+
                 if node.ble_link_down:
                     # The live link is dead. Tear down the dead context manager
                     # cleanly before attempting fresh scan+connect under the lock.
                     print(f"BLE link to {sphero_name} down; starting reconnect "
                           f"({BLE_RECONNECT_ATTEMPTS} attempts).")
+                    node.detach_disconnect_listener()
                     try:
                         cm.__exit__(None, None, None)
                     except Exception:
                         pass
-                    cm = None
+                    cm = None  # closed; never __exit__ it again if _reconnect raises
+                    cm, reconnect_error = _reconnect(node, sphero_name)
 
-                    reconnect_error = None
-                    for attempt in range(1, BLE_RECONNECT_ATTEMPTS + 1):
-                        # Backoff first: gives a power-cycled unit time to come back
-                        # and avoids hammering the adapter immediately after a drop.
-                        time.sleep(BLE_RECONNECT_BACKOFF)
-                        attempt_cm = None
-                        try:
-                            with ble_connect_lock(label=f'{sphero_name}-reconnect'):
-                                new_robot = scanner.find_toy(toy_name=sphero_name)
-                                attempt_cm = SpheroEduAPI(toy=new_robot)
-                                new_api = attempt_cm.__enter__()
-                                cm = attempt_cm
-                            node.rebind_connection(new_robot, new_api)
-                            print(f"Reconnected to {sphero_name} "
-                                  f"(attempt {attempt}/{BLE_RECONNECT_ATTEMPTS}).")
-                            break
-                        except Exception as re_err:
-                            reconnect_error = re_err
-                            print(f"✗ Reconnect attempt {attempt}/"
-                                  f"{BLE_RECONNECT_ATTEMPTS} for {sphero_name} "
-                                  f"failed: {re_err}")
-                            if attempt_cm is not None:
-                                try:
-                                    attempt_cm.__exit__(None, None, None)
-                                except Exception:
-                                    pass
-                            cm = None
-
-                    if node.ble_link_down:
-                        # Still down => all reconnect attempts exhausted. Report
-                        # the terminal error and break to clean process exit.
+                    if cm is None:
+                        # All reconnect attempts exhausted. Report the terminal
+                        # error ('disconnected' + ble_lost) and exit cleanly.
                         print(f"✗ Failed to reconnect to {sphero_name} after "
                               f"{BLE_RECONNECT_ATTEMPTS} attempts: {reconnect_error}")
                         node.publish_ble_lost(reconnect_error)
                         break
+
+            if shutdown_requested and rclpy.ok():
+                # Deliberate shutdown (Ctrl-C / SIGTERM from the dashboard):
+                # tell the webserver now, before the link is closed.
+                node.stop_reconnect_beacon()
+                for _ in range(3):
+                    node.publish_connection_state('disconnected')
+                    time.sleep(0.05)
         finally:
             # Manual __exit__ mirrors the manual __enter__ done under the lock.
             if cm is not None:
@@ -1065,6 +1179,7 @@ def main(args=None):
 
         # Clean up the controller node
         if node:
+            node.stop_reconnect_beacon()
             node.cleanup()
             node.destroy_node()
 

@@ -15,6 +15,7 @@ from spherov2.toy.sphero import Sphero as SpheroToy
 from spherov2.sphero_edu import SpheroEduAPI, EventType
 from spherov2.types import Color
 from spherov2.commands.sensor import Sensor, CollisionDetectionMethods
+from spherov2.commands.power import Power
 from spherov2.commands.sphero import RawMotorModes
 from spherov2.controls.v2 import Processors
 
@@ -423,6 +424,12 @@ class Sphero:
             if matrix_data is None:
                 return False
 
+            # Blank first: only lit pixels are written below, so stale pixels
+            # from the previous graphic would otherwise remain. No sleep
+            # between clear and draw, to keep the blank flash minimal.
+            if hasattr(self.api, 'clear_matrix'):
+                self.api.clear_matrix()
+
             # Set matrix pixels
             for i, brightness in enumerate(matrix_data):
                 if brightness > 0:
@@ -774,6 +781,17 @@ class Sphero:
             True if healthy, False otherwise
         """
         return self.state.is_healthy()
+
+    def check_link(self):
+        """
+        One real BLE round trip with no visible side effect (BLE liveness).
+
+        Reads the battery voltage, which needs a response from the robot. Unlike
+        the other methods here it does NOT swallow errors: the caller classifies
+        the exception. Never use set_main_led for this: on a BOLT it floods the
+        whole 8x8 matrix with one color.
+        """
+        Power.get_battery_voltage(self.robot)
 
     # ===== Properties =====
 
