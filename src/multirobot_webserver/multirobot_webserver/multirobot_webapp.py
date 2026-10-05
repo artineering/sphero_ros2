@@ -63,12 +63,15 @@ INSTANCE_CONNECT_WINDOW = 180.0
 # only fire while the BLE link is live, so a stale last_seen means the link is
 # down -- the real liveness signal, uniform for local AND remote instances.
 #
-# 3.0, not the old 15.0. That figure was sized as three beats of the 5 s
-# /status heartbeat, but last_seen is ALSO refreshed by the sensor stream
-# (_on_sensor), measured 2026-09-21 at 1.7 Hz -- so 15 s was ~25 samples of
-# slack and the dashboard lagged reality by up to 20 s. At 3 s a real drop is
-# caught in ~5 samples while a single missed sensor tick is still tolerated.
-HEARTBEAT_FRESH_SEC = 3.0
+# MUST stay at least ~3x the device controller's `heartbeat_rate` (5 s, declared
+# in sphero_instance_device_controller_node.py). They live in different packages
+# with nothing tying them together, which is exactly how they drifted apart:
+# briefly set to 3.0 on 2026-09-21, which is SHORTER than one heartbeat period,
+# so the heartbeat alone could never hold a robot at 'running' and the dashboard
+# silently became dependent on the sensor stream -- any BLE stall or sensor
+# dropout flipped a perfectly healthy robot to 'failed'. If the heartbeat rate
+# ever changes, change this with it.
+HEARTBEAT_FRESH_SEC = 15.0
 
 # Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
 # can never block the others; worker pool capped at the fleet ceiling (16 units /

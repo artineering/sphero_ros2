@@ -62,6 +62,14 @@ class Sphero:
         # Internal state
         self._current_heading = 0
         self._current_speed = 0
+        # Optional sink for "the commanded motion just changed", set by the ROS
+        # device controller. It lives HERE, not in the node, because the task
+        # stack calls roll/set_speed/set_heading on this object directly
+        # (direct_task_executor) and never goes through a topic -- so a
+        # fleet-wide broadcast was invisible to anything outside this process.
+        # Signature: on_motion(speed, heading, is_moving). Kept a plain callable
+        # so this module stays free of ROS.
+        self.on_motion = None
         self._is_moving = False
         self._collision_mode = None
         self._collision_event_handler = None
@@ -143,6 +151,17 @@ class Sphero:
 
     # ===== Movement Control =====
 
+    def _emit_motion(self):
+        """Announce the commanded motion. Never let a subscriber's failure break
+        an actuator call -- the robot has already moved."""
+        cb = self.on_motion
+        if cb is None:
+            return
+        try:
+            cb(self._current_speed, self._current_heading, self._is_moving)
+        except Exception as e:                                  # noqa: BLE001
+            print(f"Error emitting motion: {e}")
+
     def roll(self, heading: int, speed: int, duration: float = 0) -> bool:
         """
         Roll the Sphero in a direction.
@@ -172,6 +191,7 @@ class Sphero:
                 self.api.set_heading(heading)
                 self.api.set_speed(speed)
 
+            self._emit_motion()
             return True
 
         except Exception as e:
@@ -216,6 +236,7 @@ class Sphero:
             heading = heading % 360
             self.api.set_heading(heading)
             self._current_heading = heading
+            self._emit_motion()
             return True
 
         except Exception as e:
@@ -262,6 +283,7 @@ class Sphero:
             self.api.set_speed(speed)
             self._current_speed = speed
             self._is_moving = speed > 0
+            self._emit_motion()
 
             # If duration specified, stop after duration
             if duration > 0:
@@ -269,6 +291,7 @@ class Sphero:
                 self.api.set_speed(0)
                 self._current_speed = 0
                 self._is_moving = False
+                self._emit_motion()
 
             return True
 
@@ -287,6 +310,7 @@ class Sphero:
             self.api.set_speed(0)
             self._current_speed = 0
             self._is_moving = False
+            self._emit_motion()
             return True
 
         except Exception as e:

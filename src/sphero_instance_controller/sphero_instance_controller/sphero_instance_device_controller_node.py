@@ -173,6 +173,10 @@ class SpheroInstanceDeviceController(Node):
 
         # Declare and get ROS parameters
         self.declare_parameter('sensor_rate', 10.0)  # Default: 10 Hz
+        # Paired with multirobot_webserver's HEARTBEAT_FRESH_SEC, which must stay
+        # at least ~3x this. Shortening this without widening that (or vice
+        # versa) makes the fleet dashboard unable to hold a robot at 'running'
+        # on the heartbeat alone.
         self.declare_parameter('heartbeat_rate', 5)  # Default: 5 seconds
         self.declare_parameter('external_localization', False) # Default: turned OFF
 
@@ -296,6 +300,21 @@ class SpheroInstanceDeviceController(Node):
         self.tap_pub = self.create_publisher(
             String, f'{self.topic_prefix}/tap', 10)
 
+        # Commanded motion, echoed for anything that needs to predict where this
+        # robot is going -- the overhead tracker feeds it straight into its
+        # Kalman control input. A SEPARATE topic, not a republish of /roll:
+        # this node subscribes to /roll, so echoing there would feed its own
+        # commands back to itself.
+        self.motion_cmd_pub = self.create_publisher(
+            String, f'{self.topic_prefix}/motion_cmd', 10)
+
+        # Hook the CORE object, not the callbacks above. Every motion path ends
+        # at Sphero.roll/set_speed/set_heading/stop, but only some of them come
+        # in over a topic: the task stack calls the core directly in-process
+        # (direct_task_executor), so a /fleet/policy broadcast never appears on
+        # /roll. Hooking here is the one place that sees both.
+        self.sphero.on_motion = self._publish_motion_cmd
+
         self.obstacle_pub = self.create_publisher(
             String, f'{self.topic_prefix}/obstacle', 10)
 
@@ -358,6 +377,22 @@ class SpheroInstanceDeviceController(Node):
             self.get_logger().error(f'Invalid JSON in LED command: {str(e)}')
         except Exception as e:
             self.get_logger().error(f'Error in LED callback: {str(e)}')
+
+    def _publish_motion_cmd(self, speed: int, heading: int, is_moving: bool):
+        """Echo the commanded motion for external consumers.
+
+        Called from whichever thread issued the command, including the task
+        executor's. Publishing is cheap and rclpy publishers are thread-safe, so
+        it happens inline; a failure here must never break the actuator call.
+        """
+        try:
+            self.motion_cmd_pub.publish(String(data=json.dumps({
+                'speed': int(speed),
+                'heading': int(heading),
+                'is_moving': bool(is_moving),
+            })))
+        except Exception as e:                                  # noqa: BLE001
+            self.get_logger().warning(f'motion_cmd publish failed: {e}')
 
     def roll_callback(self, msg: String):
         """Handle roll commands."""
