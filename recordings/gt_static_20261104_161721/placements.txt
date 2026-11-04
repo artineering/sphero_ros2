@@ -1,0 +1,7 @@
+SB-5B47 cross_userTL u1607.2 v994.6 x230.7 y11.3
+SB-AAAD cross_userTR u382.2 v986.8 x13.9 y13.8
+SB-E531 cross_userBL u1605.1 v117.8 x233.4 y176.1
+SB-E12C cross_userBR u413.0 v103.7 x16.8 y175.0
+SB-1FA8 centre u1009.3 v561.3 x123.4 y91.0
+SB-BBBE line_userL_mid u1522.4 v807.0 x215.8 y45.9
+SB-3660 line_userR_mid u491.2 v774.1 x32.2 y51.9

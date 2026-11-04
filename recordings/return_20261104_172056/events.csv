@@ -1,0 +1,17 @@
+t,robot,event
+1793830871.5679,SB-1FA8,pass1 -> (145.8,2.4), 44 cm (short)
+1793830871.5682,SB-3660,pass1 -> (229.9,172.6), 107 cm
+1793830871.5682,SB-5B47,pass1 -> (194.3,15.1), 65 cm
+1793830871.5683,SB-AAAD,pass1 -> (3.7,56.1), 94 cm
+1793830871.5683,SB-BBBE,pass1 -> (93.8,22.5), 45 cm (short)
+1793830871.5684,SB-DADB,pass1 -> (20.4,183.8), 98 cm
+1793830871.5685,SB-E12C,pass1 -> (79.2,182.9), 72 cm
+1793830871.5685,SB-E531,pass1 -> (241.1,91.2), 85 cm
+1793830873.4089,SB-1FA8,pass1 stop rem=26.1 moved=18.0
+1793830873.4470,SB-BBBE,pass1 stop rem=27.0 moved=18.5
+1793830873.5894,SB-E12C,pass1 stop rem=42.8 moved=29.5
+1793830873.6559,SB-5B47,pass1 stop rem=42.4 moved=22.5
+1793830873.8064,SB-E531,pass1 stop rem=42.6 moved=42.3
+1793830874.1086,SB-AAAD,pass1 stop rem=42.7 moved=51.3
+1793830874.4787,SB-DADB,pass1 stop rem=42.9 moved=58.4
+1793830874.5284,SB-3660,pass1 stop rem=42.4 moved=65.1

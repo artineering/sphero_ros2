@@ -1,0 +1,27 @@
+t,robot,event
+1793830235.4315,SB-AAAD,pass1 -> (92.3,86.7), 94 cm
+1793830235.4317,SB-BBBE,pass1 -> (104.3,67.2), 46 cm (short)
+1793830235.4318,SB-1FA8,pass1 -> (126.6,61.8), 62 cm
+1793830235.4319,SB-5B47,pass1 -> (146.2,73.8), 76 cm
+1793830235.4319,SB-E531,pass1 -> (151.5,96.2), 90 cm
+1793830235.4320,SB-3660,pass1 -> (139.5,115.7), 107 cm
+1793830235.4321,SB-E12C,pass1 -> (117.2,121.1), 73 cm
+1793830235.4321,SB-DADB,pass1 -> (97.6,109.0), 108 cm
+1793830237.1969,SB-1FA8,pass1 stop rem=42.6 moved=20.0
+1793830237.2169,SB-BBBE,pass1 stop rem=27.4 moved=18.4
+1793830237.4827,SB-E12C,pass1 stop rem=42.4 moved=30.2
+1793830237.6920,SB-5B47,pass1 stop rem=42.7 moved=33.3
+1793830237.8978,SB-E531,pass1 stop rem=42.7 moved=48.3
+1793830238.0924,SB-AAAD,pass1 stop rem=42.4 moved=52.3
+1793830238.3775,SB-DADB,pass1 stop rem=42.6 moved=64.9
+1793830238.4430,SB-3660,pass1 stop rem=42.4 moved=64.6
+1793830242.9522,SB-1FA8,pass2 -> (126.6,61.8), 12 cm (short)
+1793830242.9524,SB-E531,pass2 -> (151.5,96.2), 12 cm (short)
+1793830242.9525,SB-DADB,pass2 -> (97.6,109.0), 11 cm (short)
+1793830244.3250,SB-E531,pass2 stop rem=7.4 moved=5.0
+1793830244.4198,SB-1FA8,pass2 stop rem=7.1 moved=5.3
+1793830244.6371,SB-DADB,pass2 stop rem=8.4 moved=4.3
+1793830249.1516,SB-1FA8,pass3 -> (126.6,61.8), 24 cm (short)
+1793830249.1518,SB-E531,pass3 -> (151.5,96.2), 25 cm (short)
+1793830250.6249,SB-E531,pass3 stop rem=14.8 moved=10.3
+1793830250.7401,SB-1FA8,pass3 stop rem=14.4 moved=9.6

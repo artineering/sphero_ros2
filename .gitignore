@@ -56,3 +56,5 @@ recordings/*.avi
 recordings/rec.log
 recordings/.current
 recordings/.pid
+# rosbag2 mcap files (patrol bag is ~380 MB; over the GitHub 100 MB limit)
+recordings/**/*.mcap
