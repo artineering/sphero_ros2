@@ -200,10 +200,9 @@ reference drifts 5–10° between runs, so every run re-measures it.
 4. Stop timing jitter from BLE latency limits a single approach to ~±4–8 cm at
    speed 50; short moves with a 5% tolerance rely on pulses.
 5. Port the final blob pipeline + grayscale-only decode into the
-   `overhead_tracking` node (it currently decodes full BGR every frame and
-   copies it for LED hue).
-6. Decide whether the user-frame convention should apply fleet-wide (arena
-   calibration / node) or stay in the scripts.
+   `overhead_tracking` node — in progress, see §10.
+6. ~~Decide whether the user-frame convention should apply fleet-wide~~ —
+   decided 2026-11-04: it stays in the scripts; the node publishes the field frame.
 
 ## 9. Files
 
@@ -215,3 +214,68 @@ Data (`recordings/`, raw `*.mjpeg`/`*.avi` excluded from git):
 `motion_*` (blob motion tests), `kf_*` (EKF recordings: frames.csv, cmds.csv,
 leds.csv, meas.pkl, kf_tracks.png), `stopsweep_*` (stop sweeps, per-frame
 log.csv), `goto_*` (go-to runs: log.csv, result.jpg), `first_frame.jpg`.
+
+## 10. Porting into the `overhead_tracking` node — progress (2026-11-04)
+
+Master plan: `plans/overhead-tracking-blob-ekf-port-2026-11-04T00-00-00.md`
+(per-step plans alongside it). Nothing below is committed yet; robot-motion
+features get a live fleet test first.
+
+### Design decisions (user, 2026-11-04)
+
+| # | Decision |
+|---|---|
+| 1 | After linking: front LED green, back LED red, matrix off (main LED black). Probing still uses the white main panel. |
+| 2 | EKF heading goes in the pose orientation of `/localization/<ns>/position` (yaw quaternion, field frame; identity until the first LED fix). Each robot's estimated heading offset is published on `/localization/<ns>/heading_offset` (`std_msgs/Float32`, deg, transient-local). |
+| 3 | Process every frame at 60 Hz; `track_rate_hz` may select 30. Processing is frame-driven, all timing from frame stamps. |
+| 4 | Remove empty-arena reference subtraction (no effect on false detections at ratio 3.2 — 0% extra-blob frames with or without it over ~1,600 frames). |
+| 5 | User frame (top-right origin) stays script-only. |
+| 6 | `link_method` param: `probe` (LED lit-diff, default) or `nudge` (roll one robot, see which blob moves); explicit choice, no automatic fallback. |
+| D1–D3 | `arena_margin_cm` 0 → 5; delete `template.py`; `~/detections` keeps `score`/`angle` as null and adds `area`, `split`. |
+
+### Steps
+
+All wired into the node and replay-tested on 2026-11-04; not committed, not yet live-tested.
+
+| Step | What | Status |
+|---|---|---|
+| 1 | `ReplaySource` (raw MJPEG + `frames.csv` + `cmds.csv` feed; realtime or lockstep) | done |
+| 2 | `blobs.py` detector | done |
+| 3 | Raw-byte capture, grayscale decode on the grab thread; optional `publish_raw_jpeg` raw video topic | done |
+| 4 | `blobs.py` + `floor_map.py` in the node; templates and reference subtraction removed | done |
+| 5 | `ekf.py` (`HeadingEKF`, `CommandHistory`, `HeadingOffsetEstimator`); pose yaw + `/localization/<ns>/heading_offset` | done |
+| 6 | LED heading from the half-res `ColorWorker` paired by frame seq; `led_color_space` hsv/bgr | done |
+| 7 | `track_manager.py` (covariance gate, time-based loss, merge/crossing, first-LED consistency 8 @ 15 deg); LED reading skipped for crowded blobs | done |
+| 8 | Floor-map rebuild (`~/rebuild_floor`, drift trigger) | done |
+| 9 | Nudge linking (1.0 s) + replay `link_seed_csv` | done |
+| 10 | Frame-driven processing (`track_rate_hz` 60/30), post-link LEDs (front green, back red, matrix off; re-sent on reconnect), docs | done |
+
+Replays (lockstep, 2-8 robots, 60 and 30 Hz): 0 swaps and 100% HEALTHY on kf, cross, ring, return and
+patrol; the old tracker was lost from the first fast leg (median 90 cm). Realtime 8 robots at 60 Hz:
+process p95 16.2-16.4 ms with `hsv`, 13.4-13.5 ms with `bgr` (budget 16.6 ms).
+
+### Findings along the way
+
+- **The `kf_20261005_171405` recording has 10 robots in view.** The node showed 9 because `arena_margin_cm: 0` dropped one on the top tape (fixed by D1).
+- **Brightness tolerance of a stale floor map** (real 12-robot frame):
+  - 0.7× still finds 12 of 12, with blobs about 22% smaller.
+  - 0.5× finds 10.
+  - 1.3× gives 3 false blobs.
+  - A rebuild restores 12 of 12 in each case.
+- **Heading offset (SB-418F, Oct 5):**
+  - 230°, steady to ±7°.
+  - The spread follows the commanded heading (about 222–233°), which matches the robot's ±8° turn accuracy. A single offset can't do better than that.
+  - Later runs that day jumped to about 290° and then about 330°, consistent with aim resets or reconnects.
+- **LEDs at half-resolution colour:** they still resolve because the camera's MJPEG is 4:2:2, so horizontal chroma is kept. Heading error against a full-resolution decode is 2.45° mean.
+- **EKF covariance:** `q_pos = 1000` (tuned for the 0.5 s blind error) gave σ ≈ 22 cm at 0.5 s against a real 4.4–5.3 cm error. Retuned to `q_pos` 100 / `q_th` 0.3, with `q_pos_no_heading` 500 before the first LED fix: the 3σ gate now covers 97.6–99.4% of real 0.3–1 s errors and is 23 cm at 0.5 s, with no loss in tracking accuracy. Based on one robot (SB-418F); recheck with multi-robot data.
+- **Frames without an end marker:** 14 of 2,471 frames in the kf recording have no JPEG end marker mid-stream. The replay drops them and keeps stamps aligned with `frames.csv`, which shows 62.5 fps rather than 60.
+- **No real crossings recorded yet:** merged-blob handling is tested in simulation only. All 3 real touching events were split correctly.
+- **Go-to logs lack the heading offset:** they don't log it, and they record `cmd_heading = 0` in the settle and face phases, so they can't be used for offset analysis.
+
+### Still needed from the next lab session
+
+The items that matter most for this port are:
+
+- multi-robot runs with LEDs lit and crossing, close-pass and touching paths (crossing logic, 16-lit-robot timing, `q_pos` check);
+- the registration sequence, for the probe and nudge linking;
+- a live test of nudge linking and post-link LEDs before committing.

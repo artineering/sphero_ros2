@@ -5,25 +5,37 @@
 #   ros2 service call /overhead_tracker_node/detect_spheros std_srvs/srv/Trigger
 #   ros2 service call /overhead_tracker_node/link_spheros \
 #       multirobot_msgs/srv/Register "{callsigns: [], skip_compass: true}"
+# After a lighting, gain or exposure change (robots may stay on the floor):
+#   ros2 service call /overhead_tracker_node/rebuild_floor  std_srvs/srv/Trigger
 
 overhead_tracker_node:
   ros__parameters:
 
     # ---------------------------------------------------------------- camera
-    source: v4l2                        # v4l2 | sim
+    source: v4l2                        # v4l2 | sim | replay
     camera_device: /dev/video0
+    # source: replay -- a raw MJPEG recording (e.g. recordings/<run>/raw.mjpeg).
+    # Frame times come from a frames.csv next to it, else 1/camera_fps.
+    replay_path: ''
+    replay_rate: 1.0                    # realtime multiplier (skips frames if behind)
+    replay_loop: false                  # false: hold the last frame at end of file
+    replay_lockstep: false              # true: never drop, advance as frames are pulled
+    # Publish every camera frame's own MJPEG bytes (not re-encoded) on
+    # ~/camera/compressed, stamped with the capture time, so a rosbag holds the
+    # full video. ~50-200 KB per frame at 60 fps.
+    publish_raw_jpeg: false
     # 1920x1200 is the sensor's FULL field of view. 1280x720 is NOT a downscale
     # of it -- measured 2026-08-08, it is a 1:1 CENTRE CROP (matched at scale 1.00,
     # NCC 0.97, offset 316,236), so 720p throws away 33% of the horizontal and
     # 40% of the vertical field for no gain in robot detail. Magnification is
-    # identical between the two modes, which is why every template constant below
-    # stayed valid across the switch.
+    # identical between the two modes, which is why every pixel-size constant
+    # below stayed valid across the switch.
     frame_width: 1920
     frame_height: 1200
     # 60, not the 120 the sensor can do: frame period IS the exposure ceiling,
     # so halving fps doubles the light to 16.6 ms. 120 fps bought nothing the
-    # tracker uses (the tick is 30 Hz) while costing half the exposure, which
-    # is what an unlit/reflective-only ball needs. Still 2x the tick rate.
+    # tracker uses (it processes at most 60) while costing half the exposure,
+    # which is what an unlit/reflective-only ball needs.
     camera_fps: 60.0                    # -> 16.6 ms exposure clamp
     fourcc: MJPG                        # native; anything else collapses the fps
 
@@ -55,76 +67,58 @@ overhead_tracker_node:
     fps_warn_tolerance: 0.15            # fps sets the exposure clamp; drift matters
     camera_stale_warn_sec: 1.0
     camera_restart_sec: 5.0             # 0 disables auto-reopen
-    opencv_num_threads: 1               # do not fight the match pool for cores
+    opencv_num_threads: 1               # do not oversubscribe the cores
 
-    # ------------------------------------------------------ template geometry
-    # Measured on the real robots at 1280x720: ball 33-35 px, matrix 26-32 px,
-    # point-LED separation 25.8-25.9 px.
-    ball_diameter_px: 34
-    # Sized geometrically: the square fits exactly BETWEEN the two point LEDs
-    # without overlapping them. They sit at +/- pt_sep/2 = 13 with radius
-    # pt_r = 3, so their inner edges are at +/- 10 -> square = pt_sep - 2*pt_r
-    # = 20. Keep this consistent if point_sep_px or point_radius_px change.
-    # The old 28 overlapped both LEDs and was WORSE THAN NOISE on real
-    # robots (2026-08-29 sweep): worst robot 0.549 against a loudest arena
-    # spot of 0.619, margin -0.069. At 20 the worst robot is 0.648, margin
-    # +0.006. A free sweep peaked at 14 (0.673, +0.025) if the geometric
-    # constraint is ever relaxed.
-    matrix_square_px: 20
-    point_sep_px: 26
-    point_radius_px: 3
-    bank_step_deg: 15                   # 0-180; the two point LEDs are symmetric
-    match_thresh: 0.45
-    # Load-bearing, not an optimisation: normalised correlation is contrast
-    # invariant, so without this gate arena noise scores up to 0.634 against a
-    # true-robot 0.668 and produces ~74 false positives per frame.
-    min_bright: 60
-    min_blob_area: 30
-    # Red BACK LED search, for absolute heading. The template bank only spans
-    # 0-180 deg because the two point LEDs are identical in grayscale; colour
-    # breaks that tie. Only the LED's BEARING from the ball centre is used, so
-    # this is a one-bit decision -- measured 2026-08-29, the real LED sat 8 deg
-    # from one spine end and 172 from the other. Searched, not sampled at a
-    # fixed offset: the lit matrix pulls the matched centre off the ball centre
-    # and the LED was 22 px out where the template puts point LEDs at 13.
+    # ------------------------------------------------------- robot geometry
+    # Measured on the real robots at 1280x720: ball 33-35 px, point-LED
+    # separation 25.8-25.9 px.
+    ball_diameter_px: 34                # ROI size, overlay
+    point_sep_px: 26                    # LED pair: shorter than half this is no pair
+    # Red BACK + green FRONT LED search, for absolute heading (LED pair only;
+    # a robot without both visible keeps its last heading). Searched, not
+    # sampled at a fixed offset: measured 2026-08-29 the LED sat 22 px from
+    # the ball centre.
     led_search_px: 30
     led_sat_min: 90                     # unlit ball measures ~26, lit LED ~145
     led_val_min: 60
-    # How far apart two bright lobes can be and still merge into ONE candidate.
-    # It must be large enough to join a single robot's separate LED features and
-    # small enough to keep two ADJACENT robots apart. detect_roi's old internal
-    # default was ts // 2 = 20 (half the TEMPLATE, which is wider than the ball):
-    # measured 2026-08-29 on 12 robots, that merged a tight cluster and silently
-    # lost two of them -- (1224,770) score 0.766 and (1200,822) score 0.762 were
-    # never offered as candidates at all. 17 (= ball_d // 2) finds all 12 with no
-    # robot split in two. 0 means "derive as ball_diameter_px // 2".
-    candidate_dilate_half_px: 0
-    candidate_pad_px: 8                 # -> 64x64 window, sized for detect_scale=2.
-                                        # Do NOT raise further: at pad 12 the larger
-                                        # response map admitted false positives
-                                        # (7 hits where 5 were real).
-    # The candidate mask, not the matching, is the bottleneck: a 20x20 dilation
-    # over 2.3 MP costs 31.6 ms versus 0.93 ms to match one candidate. Running it
-    # at half resolution costs 5.2 ms and returned byte-identical detections on a
-    # real frame. Net: 1920x1200 runs in 17.1 ms -- the same as 1280x720 full-res
-    # (16.9 ms) for 2.5x the coverage.
-    detect_scale: 2                     # 1 = full-res candidate mask
+    # Colour space of the half-res LED image the colour worker hands back:
+    # hsv (worker converts the whole frame once) | bgr (each LED patch is
+    # converted). Identical headings; pick by timing.
+    led_color_space: bgr
     max_robots: 16
-    min_separation_px: 34.0
+
+    # ------------------------------------------------------------ detection
+    # A robot is a blob brighter than floor_ratio x the LOCAL floor (61 px
+    # opening of still frames, so robots and tape vanish from the map). Measured:
+    # robots 3.4-5.6x, blue tape <= 2.75x, floor noise <= 2.5x. At 3.2 a
+    # 1,600-frame replay had 0% extra-blob frames with no reference subtraction.
+    floor_ratio: 3.2
+    blob_roi_margin_px: 25              # arena polygon grown by this; centroid decides
+    blob_min_area_px: 200               # robot ~700-900 px at 1920x1200; fragments join
+    blob_link_px: 25                    # fragment -> nearest piece within this (< a robot)
+    # Rebuild the map when the in-arena floor median drifts > frac for hold s
+    # (room light / daylight). Also rebuilt by ~/detect_arena and ~/rebuild_floor.
+    # Assumes fixed gain + manual exposure (v4l2_gain 120).
+    floor_drift_frac: 0.20
+    floor_drift_hold_sec: 2.0
+    floor_rebuild_frames: 5             # frames medianed by ~/detect_arena, ~/rebuild_floor
 
     # ------------------------------------------------------- rates/annotation
-    track_rate_hz: 30.0                 # ~5 ms mask + ~1 ms/robot over 4 cores
-    # 0 = publish every tick, undecimated: the pose goes out as soon as it is
-    # calculated, at track_rate_hz. Decimating only added latency -- a pose
-    # could sit up to a publish period before anyone saw it -- and the gate
-    # can only fire on a tick boundary, so a rate that does not divide
+    # Processing is driven by the camera's frames: 60 = every frame, 30 = every
+    # second one (each keeps its own capture stamp). Only 60 or 30; anything
+    # else warns and uses 60. The camera runs at camera_fps either way.
+    track_rate_hz: 60.0
+    # 0 = publish every processed frame, undecimated: the pose goes out as soon
+    # as it is calculated, at track_rate_hz. Decimating only added latency -- a
+    # pose could sit up to a publish period before anyone saw it -- and the gate
+    # can only fire on a processed frame, so a rate that does not divide
     # track_rate_hz quantises badly (15 Hz of a 30 Hz tick measured 11.5 Hz).
     # Set a positive value only to deliberately rate-limit consumers.
-    publish_rate_hz: 0.0                # 0 -> every tick (30 Hz)
+    publish_rate_hz: 0.0                # 0 -> every processed frame
     # 0 = OFF. The annotated JPEG stream was pure operator convenience and
     # it cost a full-frame draw + encode in a thread competing with the
-    # match pool. ~/detections now carries everything the overlay was drawn
-    # from -- pixel u/v, field x/y, heading, score, status -- so an offline
+    # processing. ~/detections now carries everything the overlay was drawn
+    # from -- pixel u/v, field x/y, heading, blob area, status -- so an offline
     # tool can rebuild the annotated frames from a bag of that topic.
     # Set back to 15.0 when you actually want to watch the video live.
     annotate_rate_hz: 0.0
@@ -141,24 +135,28 @@ overhead_tracker_node:
     annotate_queue_max: 5               # ~4.5 MB of pinned frames = memory bound
     marker_republish_hz: 1.0            # Foxglove subscribes volatile by default
 
-    # ------------------------------------------------------------ roi/gating
-    roi_mode: shared_mask               # shared_mask | per_roi
-    roi_scale: 3.0                      # ROI edge = 3 x ball diameter
-    roi_growth_on_miss: 1.5
-    roi_min_half_px: 30
-    roi_max_half_px: 160
-    max_consecutive_misses: 10          # ~0.33 s at 30 Hz -> LOST
-    lost_timeout_sec: 2.0               # LOST beyond this -> UNRESOLVED
-    reacquire_gate_cm: 25.0
-    innovation_gate_cm: 15.0            # second line of defence against ID swaps
-    swap_suspect_n: 20
+    # -------------------------------------------------------------- tracking
+    # One TrackManager (track_manager.py) owns every robot's track; all timing
+    # is frame time, so 60 and 30 Hz processing behave the same.
+    # Gate: a blob is a candidate within gate_sigma Mahalanobis on the EKF
+    # position covariance, always within gate_min_cm, never beyond gate_max_cm
+    # (the gate opens while a robot is unseen because P grows).
+    gate_sigma: 3.0
+    gate_min_cm: 15.0
+    gate_max_cm: 50.0
+    lost_after_s: 0.5                   # no fix for this long -> LOST
+    unresolved_after_s: 2.0             # LOST for this long -> UNRESOLVED
+    ambiguity_d2: 4.0                   # crossing pairings closer than this -> doubt / SUSPECT
+    reacquire_ratio: 0.5                # reacquire only if nearest <= ratio x runner-up
+    merge_area_frac: 1.3                # unsplit blob >= this x link-time area holds two robots
+    min_sep_cm: 6.0                     # no reacquire this close to a claimed blob
+    # First LED heading of a robot linked without one: first_led_n readings
+    # within first_led_window_s agreeing to first_led_tol_deg (dead LEDs give
+    # scattered false readings).
+    first_led_n: 8
+    first_led_window_s: 0.5
+    first_led_tol_deg: 15.0
     extrapolate_to_now: true
-
-    # ------------------------------------------------------------- threading
-    match_workers: 0                    # 0 -> min(4, cpu_count). Sized to CORES:
-                                        # 16 threads on 4 cores is the same work
-                                        # with more context switching.
-    match_timeout_sec: 0.05
 
     # ----------------------------------------------------------------- arena
     arena_yaml_path: ''                 # '' -> ~/overhead_field/overhead_arena.yaml
@@ -184,14 +182,13 @@ overhead_tracker_node:
     arena_long_edge_cm: 243.84          # 96 in
     arena_short_edge_cm: 182.88         # 72 in
     arena_swap_axes: false              # if perspective picked the wrong long edge
-    # 0, not 5: this margin DILATES the arena polygon (contains_cm returns
-    # d >= -margin), so 5 cm admitted detections up to 5 cm OUTSIDE the tape.
-    # The right-hand wooden frame rail throws specular highlights that score
-    # like robots -- normalised correlation is contrast invariant -- and one
-    # landed at x=246.8 cm against a 243.84 cm field on 2026-08-29. A real
-    # robot on the field has its centre >= one ball radius (3.65 cm) inside
-    # the tape, so 0 rejects the rail without costing a single true robot.
-    arena_margin_cm: 0.0
+    # This margin DILATES the arena polygon (contains_cm returns d >= -margin).
+    # 5 cm matches the detector's own blob_roi_margin_px (25 px ~ 4.4 cm), so a
+    # robot sitting on the tape (one measured 0.2 cm outside the 182.88 cm edge
+    # in kf_20261005_171405) is linked, not dropped from detect_spheros. It was 0
+    # only because template NCC scored the frame rail's speculars as robots;
+    # ratio blobs did not fire on the rail in replays.
+    arena_margin_cm: 5.0
     arena_detect_frames: 5
     homography_residual_tol_cm: 0.5
     canny_sigma: 0.33
@@ -210,6 +207,26 @@ overhead_tracker_node:
     arena_hue_hi: 130
 
     # --------------------------------------------------------------- linking
+    # probe: serial LED lit-diff (needs the robots' LEDs, live only).
+    # nudge: identity by motion -- in each window where exactly one robot is
+    #   commanded to move (motion_cmd echoes live, cmds.csv on a replay), the one
+    #   blob that moved is that robot. Live, the node rolls each robot itself at
+    #   nudge_speed for nudge_duration_sec toward free space, one at a time, no
+    #   LED writes; replays (source: replay) only watch the recorded nudges.
+    # Explicit choice, no fallback: a robot that does not link is reported failed.
+    link_method: probe                  # probe | nudge
+    nudge_speed: 50                     # floor 50 enforced (never command < 50)
+    # then stop: ~30 cm at speed 50. 0.5 linked 5/7 live (2026-11-04): the stop
+    # beat the 0.6-1.1 s BLE start latency; 1.0 linked 7/7.
+    nudge_duration_sec: 1.0
+    nudge_settle_sec: 1.5               # stop echo -> 'after' frame: BLE latency ~1 s + coast
+    nudge_min_move_px: 5.0              # a blob further than this from every old one moved
+    nudge_timeout_sec: 8.0              # per robot (replay: x robots, in recording time)
+    # REPLAY ONLY (source: replay), overrides link_method: a reference
+    # track.csv (t,robot,x,y,... field cm); each robot is linked to the
+    # detect_spheros blob nearest its first row. For recordings without a
+    # solo-nudge phase. Ignored on a live camera.
+    link_seed_csv: ''
     probe_red: 255
     probe_green: 255
     probe_blue: 255
@@ -242,15 +259,22 @@ overhead_tracker_node:
     aim_settle_seconds: 3.0
     compass_timeout_seconds: 25.0
 
-    # ---------------------------------------------------- motion model / KF
-    # 4-state [px, py, v, theta] driven by the camera and the roll command.
-    # Robot telemetry is NOT an input: the IMU/odometry fusion path was removed
-    # 2026-08-31, so r_vel/r_ori/r_acc/r_gyro/q_angle/q_acc/q_gyro,
-    # sensor_fresh_sec and body_to_field_yaw_offset are gone with it.
-    r_cam: 1.0
-    q_pos: 0.04
-    q_vel: 1.0
-    q_yaw: 1.0
+    # ----------------------------------------------- motion model / heading EKF
+    # Per robot [x, y, theta] (ekf.py), driven by its sphero/<ns>/motion_cmd
+    # echoes: speed applied lag_v_sec late (start/stop latency + coast), turns
+    # from CHANGES of the commanded heading at <= turn_rate_dps, so the robot's
+    # aim offset cancels. theta comes from the LED pair; until the first fix the
+    # speed is not applied and q_pos_no_heading carries the motion.
+    # Q per second from covariance consistency on kf_20261005_171405 +
+    # motion_20261005_16* (2026-11-04): 3-sigma gate holds 98-99 % of real
+    # 0.3-1 s prediction errors.
+    q_pos: 100.0                        # cm^2/s
+    q_th: 0.3                           # rad^2/s
+    q_pos_no_heading: 500.0             # cm^2/s
+    r_pos: 0.05                         # cm^2
+    r_th: 0.001                         # rad^2 (LED jitter 1.3-1.5 deg)
+    lag_v_sec: 0.45
+    turn_rate_dps: 180.0
     # Scales the Sphero roll `speed` field (0-255) to cm/s for the control
     # input. Measured 2026-08-31 over a 182.88 cm (6 ft) straight run: speed 50
     # -> 6.00 s, 100 -> 2.88 s, 150 -> 2.05 s, i.e. 30.5 / 63.5 / 89.2 cm/s.
@@ -261,10 +285,6 @@ overhead_tracker_node:
     # the size of hand-timing error, so repeats would tighten it, not more speeds.
     cmd_speed_to_cms: 0.61
     sphere_radius_mm: 36.5
-    # Template heading oscillates 60-120 deg when the matrix is off, and the
-    # 15 deg bank quantises it regardless. Yaw comes from telemetry; the template
-    # angle is reported for display only.
-    use_template_heading: false
 
     # ------------------------------------------------------------------- sim
     sim_spheros: 5

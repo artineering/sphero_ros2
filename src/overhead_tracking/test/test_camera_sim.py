@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Frame sources. The sim must feed the REAL matcher, or node tests prove nothing."""
+"""Frame sources. The sim must feed the REAL detector, or node tests prove nothing."""
 
 import os
 
 import numpy as np
 import pytest
 
+from overhead_tracking import blobs as B
 from overhead_tracking import camera as C
-from overhead_tracking import template as T
+
+# the node sim tests' arena quad (1280x720), as (u, v) corners
+QUAD = [(80.0, 650.0), (1200.0, 660.0), (1210.0, 60.0), (70.0, 50.0)]
 
 
 def test_sim_produces_a_frame_of_the_requested_size():
@@ -17,15 +20,31 @@ def test_sim_produces_a_frame_of_the_requested_size():
     assert g.shape == (480, 640) and g.dtype == np.uint8 and ts > 0
 
 
-def test_sim_frames_are_detected_by_the_real_matcher():
-    """The coupling that makes the node sim tests meaningful."""
-    s = C.build_source('sim', width=1280, height=720, n=5, seed=3)
+def test_sim_frames_are_detected_by_the_real_detector():
+    """The coupling that makes the node sim tests meaningful. The map is built
+    from the same frame: the 61 px opening removes the robots from it."""
+    pos = [(300, 300), (600, 350), (900, 400), (500, 500), (1100, 200)]
+    s = C.build_source('sim', width=1280, height=720, positions=pos, seed=3)
     s.start()
     g, _ = s.latest_gray()
-    hits = T.detect_roi(g, T.bank(T.build_template()))
-    assert len(hits) == 5
+    roi = B.make_roi(QUAD, g.shape)
+    blobs = B.detect(g, roi, B.threshold_map([g], roi))
+    assert len(blobs) == 5
     for cx, cy in s.positions:
-        assert any(abs(x - cx) <= 3 and abs(y - cy) <= 3 for x, y, _s, _a in hits)
+        assert any(abs(b['Centroid'][0] - cx) <= 1 and abs(b['Centroid'][1] - cy) <= 1
+                   for b in blobs)
+
+
+def test_sim_floor_is_uneven_and_realistic():
+    """Real arena: ~19 mid, ~8 in the corners, in-arena median ~16."""
+    s = C.build_source('sim', width=1280, height=720, positions=[])
+    s.start()
+    g, _ = s.latest_gray()
+    roi = B.make_roi(QUAD, g.shape, margin=0)
+    assert 13 <= np.median(g[roi['sl']][roi['mask'] > 0]) <= 19
+    centre = g[340:380, 620:660].mean()
+    corner = g[:40, :40].mean()
+    assert centre - corner > 8
 
 
 def test_fresh_array_every_tick():

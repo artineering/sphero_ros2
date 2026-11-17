@@ -13,11 +13,12 @@ from visualization_msgs.msg import Marker, MarkerArray
 STATUS_COLOR = {
     'HEALTHY': (0.0, 1.0, 0.0),
     'COASTING': (1.0, 0.8, 0.0),
+    'MERGED': (0.0, 0.8, 1.0),
     'LOST': (1.0, 0.3, 0.0),
     'UNRESOLVED': (1.0, 0.0, 0.0),
-    'OUT_OF_ARENA': (0.4, 0.4, 1.0),
     'SUSPECT': (1.0, 0.0, 1.0),
 }
+UNKNOWN_COLOR = (0.6, 0.6, 0.6)     # a status not listed above: never "healthy" green
 
 
 def build_track_markers(positions_cm, sphere_radius_mm, stamp, id_map,
@@ -39,7 +40,7 @@ def build_track_markers(positions_cm, sphere_radius_mm, stamp, id_map,
     for name, (x_cm, y_cm) in positions_cm.items():
         base = id_map.setdefault(name, 2 * len(id_map))
         x_m, y_m = x_cm / 100.0, y_cm / 100.0
-        r, g, b = STATUS_COLOR.get(statuses.get(name, 'HEALTHY'), (0.0, 1.0, 0.0))
+        r, g, b = STATUS_COLOR.get(statuses.get(name, 'HEALTHY'), UNKNOWN_COLOR)
 
         sph = Marker()
         sph.header.frame_id = frame_id

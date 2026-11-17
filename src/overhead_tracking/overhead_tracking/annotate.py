@@ -13,11 +13,12 @@ import numpy as np
 STATUS_BGR = {
     'HEALTHY': (0, 255, 0),
     'COASTING': (0, 200, 255),
+    'MERGED': (255, 200, 0),
     'LOST': (0, 80, 255),
     'UNRESOLVED': (0, 0, 255),
-    'OUT_OF_ARENA': (255, 100, 100),
     'SUSPECT': (255, 0, 255),
 }
+UNKNOWN_BGR = (160, 160, 160)       # a status not listed above: never "healthy" green
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -29,7 +30,8 @@ def draw_overlay(gray, render, ball_d=34, draw_roi=True):
          'arena_px': [[u,v] x4] | None,
          'blobs': [{'id': int, 'u': float, 'v': float}],       # pre-link staging
          'tracks': [{'name', 'u', 'v', 'status', 'score',
-                     'angle', 'roi': (x0,y0,x1,y1)}],
+                     'angle', 'roi': (x0,y0,x1,y1) (optional),
+                     'heading_tip': [u,v] | None}],
          'banner': str | None}
     """
     if gray is None:
@@ -51,7 +53,7 @@ def draw_overlay(gray, render, ball_d=34, draw_roi=True):
 
     for t in render.get('tracks') or ():
         status = t.get('status', 'HEALTHY')
-        col = STATUS_BGR.get(status, (0, 255, 0))
+        col = STATUS_BGR.get(status, UNKNOWN_BGR)
         u, v = int(t['u']), int(t['v'])
         if draw_roi and t.get('roi'):
             x0, y0, x1, y1 = (int(q) for q in t['roi'])
@@ -65,6 +67,14 @@ def draw_overlay(gray, render, ball_d=34, draw_roi=True):
                      (int(u - d * np.cos(th)), int(v - d * np.sin(th))),
                      (int(u + d * np.cos(th)), int(v + d * np.sin(th))),
                      col, 1)
+        # ABSOLUTE heading: the EKF's, from the LED pair (red back -> green
+        # front). The optional `angle` line above is a 180 deg ambiguous axis;
+        # the node passes None for it. The caller projects the tip through the
+        # homography; None means the robot has no heading yet.
+        tip = t.get('heading_tip')
+        if tip is not None:
+            cv2.arrowedLine(img, (u, v), (int(tip[0]), int(tip[1])),
+                            col, 2, cv2.LINE_AA, tipLength=0.3)
         label = str(t.get('name', '?'))
         if status != 'HEALTHY':
             label = f'{label} [{status}]'
