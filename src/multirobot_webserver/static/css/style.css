@@ -306,6 +306,24 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
 .unit__state[data-state="starting"] { color: var(--amber); }
 .unit__state[data-state="reconnecting"] { color: var(--amber); }
 .unit__state[data-state="disconnected"] { color: var(--red); }
+/* Pre-connect stage / BLE quiet-gate sub-label under the state. */
+.unit__sub {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin: -8px 0 10px;
+    font-size: 9.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-2);
+}
+.unit__sub[hidden] { display: none; }
+.unit__badge {
+    padding: 0 5px;
+    border: 1px solid var(--line-strong);
+    border-radius: 3px;
+}
+.unit__badge--hold { color: var(--amber); border-color: var(--amber); }
 
 .unit__rows {
     display: grid;
@@ -407,6 +425,11 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
     max-width: 480px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
     position: relative;
+    /* Never taller than the viewport: head + foot stay put, body scrolls. */
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
 }
 
 .modal__head {
@@ -445,7 +468,7 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
     transition: color 0.14s ease;
 }
 .modal__close:hover { color: var(--fg); }
-.modal__body { padding: 18px; }
+.modal__body { padding: 18px; overflow-y: auto; min-height: 0; flex: 1 1 auto; }
 .modal__copy { color: var(--fg-1); font-size: 12px; line-height: 1.7; }
 .modal__foot {
     display: flex;
@@ -453,7 +476,11 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
     gap: 8px;
     padding: 14px 18px;
     border-top: 1px solid var(--line);
+    flex-wrap: wrap;
 }
+.modal__foot-start { margin-right: auto; }
+.modal__foot-start[hidden] { display: none; }
+.modal__panel--deploy { max-width: 600px; }
 
 /* Form fields inside modal */
 .field__label {
@@ -516,6 +543,131 @@ code { font: 0.95em var(--mono); color: var(--amber); background: var(--amber-so
 .roster__item:hover { border-color: var(--line-strong); color: var(--fg); }
 .roster__item input { accent-color: var(--amber); cursor: pointer; }
 .roster__item--on { border-color: var(--amber); color: var(--fg); background: var(--amber-soft); }
+.roster__meta { margin-left: auto; color: var(--fg-2); font-size: 11px; white-space: nowrap; }
+
+/* BLE scan (NEARBY) section inside the DEPLOY modal */
+.scan { margin-bottom: 18px; }
+.scan__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+.scan__head .field__label { margin-bottom: 0; margin-right: auto; }
+.scan__toggle {
+    color: var(--fg-2);
+    font: inherit;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    padding: 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--rad);
+}
+.scan__toggle:hover { color: var(--fg); border-color: var(--line-strong); }
+/* Scan results: dense chips, capped height with their own scroll. */
+.roster--compact {
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    gap: 4px;
+    max-height: 40vh;
+    overflow-y: auto;
+}
+.roster--compact .roster__item {
+    gap: 5px;
+    padding: 4px 6px;
+    font-size: 12px;
+    min-width: 0;
+}
+.roster--compact .roster__item > span:first-of-type {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.roster--compact .roster__meta { font-size: 10px; }
+.scan__notes {
+    margin-top: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.scan__note--busy { color: var(--amber); }
+/* Saved scan groups: one wrapping row of small chips + SAVE GROUP. */
+.scan__groups {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+.scan__groups[hidden], .scan__notes[hidden] { display: none; }
+.scan__group-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
+}
+.scan__group {
+    display: inline-flex;
+    align-items: stretch;
+    max-width: 100%;
+    border: 1px solid var(--line);
+    border-radius: var(--rad);
+    font-size: 11px;
+}
+.scan__group:hover { border-color: var(--line-strong); }
+.scan__group button { font: inherit; color: var(--fg-2); padding: 3px 6px; }
+.scan__group-apply {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.scan__group-apply:hover { color: var(--fg); }
+.scan__group-del { border-left: 1px solid var(--line); }
+.scan__group-del:hover { color: var(--red); }
+.scan__group-empty { color: var(--fg-2); font-size: 11px; }
+.scan__toggle:disabled { opacity: 0.4; cursor: default; }
+.scan__note--err  { color: var(--red); }
+.spin { display: inline-block; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+/* ============================================================
+   Batched deploy progress bar
+   ============================================================ */
+.deploy-job {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--amber);
+    border-radius: var(--rad);
+    padding: 8px 12px;
+    font-size: 11px;
+}
+.deploy-job[hidden] { display: none; }
+.deploy-job--done  { border-left-color: var(--green); }
+.deploy-job--error { border-left-color: var(--red); }
+.deploy-job__head { display: flex; align-items: center; gap: 10px; }
+.deploy-job__tag { color: var(--fg-3); font-size: 10px; letter-spacing: 0.14em; }
+.deploy-job__line {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.deploy-job__head button[hidden],
+.ribbon .action[hidden] { display: none; }
+.deploy-job__batches {
+    list-style: none;
+    margin-top: 6px;
+    display: grid;
+    gap: 2px;
+    color: var(--fg-1);
+}
+.deploy-job__batches:empty { display: none; }
+.deploy-job__batches li { overflow-wrap: anywhere; }
+.dj-ok   { color: var(--green); }
+.dj-bad  { color: var(--red); }
+.dj-wait { color: var(--amber); }
 
 /* ============================================================
    Toast notifications

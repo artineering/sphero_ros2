@@ -118,3 +118,44 @@ def test_connected_or_legacy_uses_freshness():
     assert _status(fresh=1.0, link=None) == 'running'
     assert _status(fresh=HEARTBEAT_FRESH_SEC + 5.0, link='connected',
                    age=1.0) == 'connecting'
+
+
+# --- Pre-connect beacon -------------------------------------------------------
+
+def test_fresh_pre_connect_is_connecting_even_past_window():
+    past = INSTANCE_CONNECT_WINDOW + 60.0
+    for state in ('initializing', 'connecting'):
+        assert _status(link=state, link_age=1.0, age=past) == 'connecting'
+
+
+def test_stale_pre_connect_past_window_is_failed():
+    stale = HEARTBEAT_FRESH_SEC + 5.0
+    past = INSTANCE_CONNECT_WINDOW + 5.0
+    assert _status(link='connecting', link_age=stale, age=past) == 'failed'
+    assert _status(link='initializing', link_age=stale, age=1.0) == 'connecting'
+
+
+def test_pre_connect_beats_old_last_seen():
+    # Respawned robot: the previous spawn's heartbeat must not read 'running'.
+    assert _status(fresh=1.0, link='initializing', link_age=0.5) == 'connecting'
+
+
+def test_instance_detail_stage_and_holding():
+    now = time.time()
+    entry = {'link_state': 'initializing', 'link_state_at': now - 1.0,
+             'holding': False}
+    mgr = types.SimpleNamespace(
+        fleet_node=types.SimpleNamespace(robots={'SB-TEST': entry}))
+    detail = SpheroInstanceManager._instance_detail
+    assert detail(mgr, 'SB-TEST', 'connecting') == {
+        'stage': 'initializing', 'holding': False, 'startup_complete': False}
+    entry.update(link_state='connected', holding=True)
+    assert detail(mgr, 'SB-TEST', 'running') == {
+        'stage': None, 'holding': True, 'startup_complete': False}
+    entry.update(holding=False, startup_complete=True)
+    assert detail(mgr, 'SB-TEST', 'running')['startup_complete'] is True
+    entry.update(link_state='connecting',
+                 link_state_at=now - HEARTBEAT_FRESH_SEC - 5.0)
+    assert detail(mgr, 'SB-TEST', 'failed')['stage'] is None
+    assert detail(mgr, 'SB-UNKNOWN', 'running') == {
+        'stage': None, 'holding': False, 'startup_complete': False}

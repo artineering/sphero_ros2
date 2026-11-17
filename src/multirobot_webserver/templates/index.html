@@ -57,7 +57,23 @@
                 <span class="action__glyph">⇶</span>
                 <span class="action__label">BROADCAST TASK</span>
             </button>
+            <button class="action" id="releaseHeldBtn" type="button" hidden title="Release every robot held by the fleet BLE hold">
+                <span class="action__glyph">⏵</span>
+                <span class="action__label">RELEASE HELD</span>
+            </button>
             <span class="ribbon__hint">DEPLOY → enter callsign → unit binds to next channel</span>
+        </section>
+
+        <!-- Batched deploy progress (one robot per worker per batch) -->
+        <section id="deployJobBar" class="deploy-job" aria-label="Deploy progress" hidden>
+            <div class="deploy-job__head">
+                <span class="deploy-job__tag">[ DEPLOY ]</span>
+                <span id="deployJobLine" class="deploy-job__line" role="status" aria-live="polite"></span>
+                <button id="deployJobReleaseBtn" class="scan__toggle" type="button" title="Release every holding robot of this job now">RELEASE NOW</button>
+                <button id="deployJobCancelBtn" class="scan__toggle" type="button">CANCEL</button>
+                <button id="deployJobCloseBtn" class="scan__toggle" type="button" aria-label="Dismiss deploy summary" hidden>×</button>
+            </div>
+            <ol id="deployJobBatches" class="deploy-job__batches"></ol>
         </section>
 
         <!-- ============================================================ -->
@@ -146,13 +162,30 @@
     <!-- DEPLOY MODAL                                                     -->
     <!-- ================================================================ -->
     <div id="addSpheroModal" class="modal" role="dialog" aria-modal="true">
-        <div class="modal__panel">
+        <div class="modal__panel modal__panel--deploy">
             <div class="modal__head">
                 <span class="modal__tag">[ DEPLOY ]</span>
                 <h3 class="modal__title">BIND NEW UNITS</h3>
                 <button class="modal__close close" aria-label="Close">×</button>
             </div>
             <div class="modal__body">
+                <div id="scanSection" class="scan" aria-busy="false">
+                    <div class="scan__head">
+                        <span class="field__label">[ NEARBY ]</span>
+                        <button id="scanToggleBtn" class="scan__toggle" type="button" hidden>NONE</button>
+                        <button id="scanBtn" class="action action--accent" type="button">
+                            <span class="action__glyph" id="scanGlyph" aria-hidden="true">◎</span>
+                            <span class="action__label" id="scanLabel">SCAN</span>
+                        </button>
+                    </div>
+                    <div id="scanGroups" class="scan__groups" hidden>
+                        <div id="scanGroupList" class="scan__group-list" role="group" aria-label="Saved groups"></div>
+                        <button id="saveGroupBtn" class="scan__toggle" type="button" disabled title="Save the ticked units as a named group">SAVE GROUP</button>
+                    </div>
+                    <div id="scanGrid" class="roster roster--compact" role="group" aria-label="Nearby Spheros"></div>
+                    <p id="scanNotes" class="field__hint scan__notes" role="status" aria-live="polite">Press SCAN to list advertising units.</p>
+                    <p id="scanGroupNote" class="field__hint scan__notes" role="status" aria-live="polite" hidden></p>
+                </div>
                 <label class="field__label">[ ROSTER ]</label>
                 <div id="rosterGrid" class="roster" role="group" aria-label="Known Spheros"></div>
                 <p class="field__hint">Tick known units to queue them, or type custom callsigns below. Both feed the same deploy.</p>
@@ -162,6 +195,7 @@
                 <p class="field__hint"><span id="batchSummary">0 callsigns</span></p>
             </div>
             <div class="modal__foot">
+                <button id="addScannedBtn" class="action action--primary modal__foot-start" type="button" disabled hidden>ADD SELECTED (0)</button>
                 <button id="cancelBtn" class="action action--ghost">CANCEL</button>
                 <button id="confirmAddBtn" class="action action--primary">DEPLOY ALL</button>
             </div>

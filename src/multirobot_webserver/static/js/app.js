@@ -180,6 +180,8 @@ class ControlStation {
         this.bindActions();
         this.startMissionClock();
         this.refresh();
+        // Resume a batched deploy that is still running (survives reloads).
+        this.resumeDeployJob();
         // Fleet polling — every 1s. /api/spheros answers in ~15 ms and a BLE
         // drop reaches it as an explicit 'reconnecting' state within ~0.2 s,
         // so a slower poll was the dominant term in how long a status change
@@ -190,6 +192,8 @@ class ControlStation {
     bindActions() {
         $('#addSpheroBtn').addEventListener('click', () => {
             this.renderRoster();
+            this.clearScan();
+            this.loadScanGroups();
             this.openModal('addSpheroModal', 'spheroNamesInput');
             this.updateBatchSummary();
         });
@@ -206,6 +210,27 @@ class ControlStation {
         });
         cancelAdd.addEventListener('click', () => this.closeModal('addSpheroModal'));
         namesInput.addEventListener('input', () => this.updateBatchSummary());
+        $('#scanBtn').addEventListener('click', () => this.scanNearby());
+        $('#scanToggleBtn').addEventListener('click', () => {
+            const boxes = [...$$('#scanGrid input[type="checkbox"]')];
+            const check = boxes.some((cb) => !cb.checked);
+            boxes.forEach((cb) => {
+                cb.checked = check;
+                cb.closest('.roster__item').classList.toggle('roster__item--on', check);
+            });
+            this.updateScanCount();
+        });
+        $('#saveGroupBtn').addEventListener('click', () => this.saveScanGroup());
+        $('#deployJobCancelBtn').addEventListener('click', () => this.cancelDeployJob());
+        $('#deployJobReleaseBtn').addEventListener('click', () => this.releaseDeployJob());
+        $('#releaseHeldBtn').addEventListener('click', () => this.releaseHeld());
+        $('#deployJobCloseBtn').addEventListener('click', () => { $('#deployJobBar').hidden = true; });
+        $('#addScannedBtn').addEventListener('click', async () => {
+            const names = this.selectedScanNames();
+            if (!names.length) return;
+            await this.deploySpheros(names);
+            this.clearScan();
+        });
 
         // Detach modal
         $('#confirmRemoveBtn').addEventListener('click', () => {
@@ -348,6 +373,234 @@ class ControlStation {
         });
     }
 
+    // --- BLE scan (NEARBY section of the DEPLOY modal) ----------------------
+    // GET /api/scan fans out to every worker; results are advertising units
+    // not yet deployed. ADD SELECTED reuses deploySpheros (batch path).
+    async scanNearby() {
+        const btn = $('#scanBtn');
+        if (btn.disabled) return;
+        btn.disabled = true;
+        $('#scanSection').setAttribute('aria-busy', 'true');
+        $('#scanGlyph').classList.add('spin');
+        $('#scanLabel').textContent = 'SCANNING…';
+        $('#scanNotes').textContent = 'Scanning…';
+        try {
+            const r = await fetch('/api/scan?duration=4');
+            const data = await r.json();
+            if (!data.success) throw new Error(data.message || 'scan failed');
+            this.renderScan(data);
+        } catch (err) {
+            this.clearScan();
+            this.toast('Scan failed.', 'error', 'SCAN');
+        } finally {
+            btn.disabled = false;
+            $('#scanSection').setAttribute('aria-busy', 'false');
+            $('#scanGlyph').classList.remove('spin');
+            $('#scanLabel').textContent = 'SCAN';
+        }
+    }
+
+    renderScan(data) {
+        const grid = $('#scanGrid');
+        const robots = data.robots || [];
+        grid.innerHTML = robots.map((r) => {
+            const rssi = r.rssi == null ? '—' : String(r.rssi);
+            const tip = `${r.name} · ${r.rssi == null ? 'no RSSI' : `${r.rssi} dBm`}`
+                + (r.best_worker ? ` · via ${r.best_worker}` : '');
+            return `<label class="roster__item roster__item--on" title="${safeHtml(tip)}">`
+                + `<input type="checkbox" value="${safeHtml(r.name)}" checked>`
+                + `<span>${safeHtml(r.name)}</span>`
+                + `<span class="roster__meta">${safeHtml(rssi)}</span></label>`;
+        }).join('');
+        grid.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+            cb.addEventListener('change', () => {
+                cb.closest('.roster__item').classList.toggle('roster__item--on', cb.checked);
+                this.updateScanCount();
+            });
+        });
+
+        // One short line; the full per-worker detail lives in its tooltip.
+        const notes = $('#scanNotes');
+        notes.innerHTML = '';
+        const head = robots.length
+            ? `${robots.length} found · RSSI dBm`
+            : 'No advertising units found (deployed units are hidden)';
+        notes.append(head);
+        const detail = [head];
+        if (data.registry_loaded === false) {
+            notes.append(' · no worker registry');
+            detail.push('no worker registry loaded');
+        }
+        (data.workers || []).filter((w) => !w.ok).forEach((w) => {
+            const span = document.createElement('span');
+            span.className = w.busy ? 'scan__note--busy' : 'scan__note--err';
+            span.textContent = w.busy ? `${w.name} busy` : `${w.name} err`;
+            notes.append(' · ', span);
+            detail.push(w.busy ? `${w.name} busy (${w.error})` : `${w.name}: ${w.error}`);
+        });
+        notes.title = detail.join('\n');
+        $('#scanToggleBtn').hidden = robots.length === 0;
+        $('#addScannedBtn').hidden = robots.length === 0;
+        $('#scanGroupNote').hidden = true;
+        this.scanDone = true;
+        this.updateScanCount();
+        // A group clicked before any scan had run: apply it now.
+        if (this.pendingGroup) {
+            const g = this.pendingGroup;
+            this.pendingGroup = null;
+            this.applyScanGroup(g);
+        }
+    }
+
+    clearScan() {
+        $('#scanGrid').innerHTML = '';
+        $('#scanNotes').textContent = 'Press SCAN to list advertising units.';
+        $('#scanNotes').title = '';
+        $('#scanToggleBtn').hidden = true;
+        $('#addScannedBtn').hidden = true;
+        $('#scanGroupNote').hidden = true;
+        this.scanDone = false;
+        this.pendingGroup = null;
+        this.updateScanCount();
+    }
+
+    // --- Saved scan groups (server-side, /api/scan_groups) ------------------
+    // If the routes are missing (older server) or unreachable, the group row
+    // stays hidden and the rest of the NEARBY picker works as before.
+    async loadScanGroups() {
+        try {
+            const r = await fetch('/api/scan_groups');
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            if (!data.success || !data.groups || typeof data.groups !== 'object') throw new Error('bad reply');
+            this.scanGroups = data.groups;
+        } catch (err) {
+            this.scanGroups = null;
+        }
+        this.renderScanGroups();
+    }
+
+    renderScanGroups() {
+        const row = $('#scanGroups');
+        const list = $('#scanGroupList');
+        list.innerHTML = '';
+        if (!this.scanGroups) { row.hidden = true; return; }
+        const names = Object.keys(this.scanGroups).sort((a, b) => a.localeCompare(b));
+        if (!names.length) {
+            const empty = document.createElement('span');
+            empty.className = 'scan__group-empty';
+            empty.textContent = 'No saved groups';
+            list.append(empty);
+        }
+        names.forEach((name) => {
+            const robots = this.scanGroups[name] || [];
+            const chip = document.createElement('span');
+            chip.className = 'scan__group';
+            const apply = document.createElement('button');
+            apply.type = 'button';
+            apply.className = 'scan__group-apply';
+            apply.textContent = name;
+            apply.title = `${name} (${robots.length}): ${robots.join(', ')}`;
+            apply.addEventListener('click', () => this.applyScanGroup(name));
+            const del = document.createElement('button');
+            del.type = 'button';
+            del.className = 'scan__group-del';
+            del.textContent = '×';
+            del.setAttribute('aria-label', `Delete group ${name}`);
+            del.addEventListener('click', () => this.deleteScanGroup(name));
+            chip.append(apply, del);
+            list.append(chip);
+        });
+        row.hidden = false;
+        this.updateScanCount();
+    }
+
+    // Tick exactly the group's units present in the scan; untick the rest.
+    // With no scan yet, start one and apply when results arrive.
+    applyScanGroup(name) {
+        const robots = (this.scanGroups || {})[name];
+        if (!robots) return;
+        if (!this.scanDone) {
+            this.pendingGroup = name;
+            this.scanNearby();
+            return;
+        }
+        const want = new Set(robots);
+        const present = new Set();
+        $$('#scanGrid input[type="checkbox"]').forEach((cb) => {
+            cb.checked = want.has(cb.value);
+            if (cb.checked) present.add(cb.value);
+            cb.closest('.roster__item').classList.toggle('roster__item--on', cb.checked);
+        });
+        const missing = robots.filter((n) => !present.has(n));
+        const note = $('#scanGroupNote');
+        note.textContent = missing.length
+            ? `${name}: ${present.size}/${robots.length} · missing: ${missing.join(', ')}`
+            : `${name}: all ${robots.length} found`;
+        note.title = note.textContent;
+        note.classList.toggle('scan__note--busy', missing.length > 0);
+        note.hidden = false;
+        this.updateScanCount();
+    }
+
+    async saveScanGroup() {
+        const robots = this.selectedScanNames();
+        if (!robots.length) { this.toast('Tick at least one unit first.', 'error', 'GROUP'); return; }
+        const raw = window.prompt(`Save ${robots.length} ticked unit${robots.length === 1 ? '' : 's'} as group:`);
+        if (raw == null) return;
+        const name = raw.trim();
+        if (!name || name.length > 40) { this.toast('Group name must be 1-40 characters.', 'error', 'GROUP'); return; }
+        if (this.scanGroups && Object.prototype.hasOwnProperty.call(this.scanGroups, name)
+            && !window.confirm(`Overwrite group "${name}"?`)) return;
+        await this.scanGroupRequest('PUT', name, { robots }, `Group ${name} saved (${robots.length})`);
+    }
+
+    async deleteScanGroup(name) {
+        if (!window.confirm(`Delete group "${name}"?`)) return;
+        await this.scanGroupRequest('DELETE', name, null, `Group ${name} deleted`);
+    }
+
+    async scanGroupRequest(method, name, body, okMsg) {
+        try {
+            const opts = { method };
+            if (body) {
+                opts.headers = { 'Content-Type': 'application/json' };
+                opts.body = JSON.stringify(body);
+            }
+            const r = await fetch(`/api/scan_groups/${encodeURIComponent(name)}`, opts);
+            let data = null;
+            try { data = await r.json(); } catch (e) { /* non-JSON, e.g. an HTML 404 page */ }
+            if (!r.ok || !data || !data.success) {
+                const verb = method === 'PUT' ? 'save' : 'delete';
+                this.toast(`Group ${verb} failed: ${(data && data.message) || `HTTP ${r.status}`}`, 'error', 'GROUP');
+                if (method === 'DELETE' && r.status === 404) this.loadScanGroups();
+                return;
+            }
+            this.scanGroups = data.groups || {};
+            this.renderScanGroups();
+            this.toast(okMsg, 'success', 'GROUP');
+        } catch (err) {
+            this.toast('Group uplink lost.', 'error', 'GROUP');
+        }
+    }
+
+    selectedScanNames() {
+        return [...$$('#scanGrid input[type="checkbox"]:checked')].map((cb) => cb.value);
+    }
+
+    updateScanCount() {
+        const n = this.selectedScanNames().length;
+        const btn = $('#addScannedBtn');
+        btn.textContent = `ADD SELECTED (${n})`;
+        btn.disabled = n === 0;
+        $('#saveGroupBtn').disabled = n === 0;
+        const total = $$('#scanGrid input[type="checkbox"]').length;
+        const allOn = total > 0 && n === total;
+        const toggle = $('#scanToggleBtn');
+        toggle.textContent = allOn ? 'NONE' : 'ALL';
+        toggle.setAttribute('aria-label', allOn ? 'Select none' : 'Select all');
+    }
+
     // Names ticked in the roster (excluding disabled/already-deployed).
     selectedRosterNames() {
         return [...$$('#rosterGrid input[type="checkbox"]:checked:not(:disabled)')]
@@ -386,8 +639,23 @@ class ControlStation {
                 body: JSON.stringify({ names }),
             });
             const data = await r.json();
+            if (r.status === 409) {
+                // A batched deploy is already running: show it instead.
+                this.toast(data.message || 'A deploy job is already running', 'error', 'DEPLOY');
+                if (data.job_id) this.watchDeployJob(data.job_id);
+                return;
+            }
             if (!data.success) {
                 this.toast(`Deploy failed: ${data.message || 'bad request'}`, 'error', 'DEPLOY');
+                return;
+            }
+            if (data.batched) {
+                // Server-side job: one robot per worker per batch. Progress
+                // and the final summary come from polling the job.
+                this.closeModal('addSpheroModal');
+                this.toast(`Deploying ${names.length} units in ${data.job.total_batches} batches`, 'info', 'DEPLOY');
+                this.renderDeployJob(data.job);
+                this.watchDeployJob(data.job_id);
                 return;
             }
             this.summarizeBatch(data, 'DEPLOY', 'deployed');
@@ -406,6 +674,185 @@ class ControlStation {
         } catch (err) {
             this.toast('Deploy uplink lost.', 'error', 'DEPLOY');
         }
+    }
+
+    /* -------------------------------------------------------- batched deploy job */
+    async resumeDeployJob() {
+        try {
+            const r = await fetch('/api/deploy_jobs/latest');
+            const data = await r.json();
+            if (data.job && data.job.state === 'running') {
+                this.renderDeployJob(data.job);
+                this.watchDeployJob(data.job.job_id);
+            }
+        } catch (err) {
+            console.error('deploy job resume error', err);
+        }
+    }
+
+    // Poll GET /api/deploy_jobs/<id> about once a second until it ends.
+    watchDeployJob(jobId) {
+        if (this._deployJobId === jobId) return;  // already polling it
+        this._deployJobId = jobId;
+        const poll = async () => {
+            if (this._deployJobId !== jobId) return;
+            let job = null;
+            try {
+                const r = await fetch(`/api/deploy_jobs/${encodeURIComponent(jobId)}`);
+                job = (await r.json()).job;
+            } catch (err) {
+                console.error('deploy job poll error', err);
+            }
+            if (this._deployJobId !== jobId) return;
+            if (job) {
+                this.renderDeployJob(job);
+                if (job.state !== 'running') {
+                    this._deployJobId = null;
+                    this.finishDeployJob(job);
+                    return;
+                }
+            }
+            setTimeout(poll, 1000);
+        };
+        setTimeout(poll, 1000);
+    }
+
+    // RELEASE HELD: fleet-level, shown when a robot holds outside a job.
+    updateReleaseHeld() {
+        const btn = $('#releaseHeldBtn');
+        if (btn) btn.hidden = !(this.spheros.some((s) => s.holding) && !this._deployJobId);
+    }
+
+    async releaseHeld() {
+        // '*' is ONE message: every held robot starts its BLE setup at once,
+        // which is what dropped 9/16 robots live. Make the operator mean it.
+        if (!window.confirm('RELEASE HELD releases EVERY held robot at once (not staggered). Simultaneous startups can cause BLE drops. Continue?')) return;
+        try {
+            const r = await fetch('/api/fleet/ble_release', { method: 'POST' });
+            const data = await r.json();
+            if (data.success) this.toast(`Fleet release sent (seq ${data.seq})`, 'success', 'RELEASE');
+            else this.toast(`Release failed: ${data.message || r.status}`, 'error', 'RELEASE');
+        } catch (err) {
+            this.toast('Release uplink lost.', 'error', 'RELEASE');
+        }
+    }
+
+    async releaseDeployJob() {
+        const jobId = this._deployJobId;
+        if (!jobId) return;
+        try {
+            const r = await fetch(`/api/deploy_jobs/${encodeURIComponent(jobId)}/release`, { method: 'POST' });
+            const data = await r.json();
+            if (data.job) this.renderDeployJob(data.job);
+            const n = (data.released || []).length;
+            this.toast(n ? `Releasing ${n} holding unit${n === 1 ? '' : 's'} one at a time` : 'No unit is holding', n ? 'success' : 'info', 'RELEASE');
+        } catch (err) {
+            this.toast('Release uplink lost.', 'error', 'RELEASE');
+        }
+    }
+
+    async cancelDeployJob() {
+        const jobId = this._deployJobId;
+        if (!jobId) return;
+        try {
+            const r = await fetch(`/api/deploy_jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+            const data = await r.json();
+            if (data.job) this.renderDeployJob(data.job);
+            this.toast('Deploy will stop after the current batch and release its units', 'info', 'DEPLOY');
+        } catch (err) {
+            this.toast('Deploy uplink lost.', 'error', 'DEPLOY');
+        }
+    }
+
+    finishDeployJob(job) {
+        this.summarizeBatch(job, 'DEPLOY', 'deployed');
+        const drops = job.batches.reduce((n, b) => n + b.drops.length, 0);
+        if (drops) this.toast(`${drops} drop${drops === 1 ? '' : 's'} during deploy — see batch list`, 'error', 'DEPLOY');
+        if (job.error) this.toast(`Deploy job error: ${job.error}`, 'error', 'DEPLOY');
+        if (job.startup_timeouts.length) this.toast(`Startup timed out: ${this.truncateNames(job.startup_timeouts)}`, 'error', 'RELEASE');
+        if (job.startup_drops.length) this.toast(`Dropped during startup: ${this.truncateNames(job.startup_drops)}`, 'error', 'RELEASE');
+        const relDrops = job.releases.reduce((k, e) => k + e.drops.length, 0);
+        if (relDrops) this.toast(`${relDrops} other drop${relDrops === 1 ? '' : 's'} during release waves — see list`, 'error', 'RELEASE');
+        this.refresh();
+    }
+
+    // One robot inside the progress line: ✓ when connected and holding (the
+    // fleet hold keeps it quiet until the single release), or released.
+    deployRobotText(r) {
+        const n = safeHtml(r.name);
+        if (r.state === 'stable' || (r.state === 'running' && (r.holding || r.released))) return `<span class="dj-ok">${n} ✓</span>`;
+        if (r.state === 'running') return `<span class="dj-wait">${n} connected, not holding</span>`;
+        if (r.state === 'failed' || r.state === 'timeout') return `<span class="dj-bad">${n} ✗</span>`;
+        if (r.state === 'cancelled') return `${n} –`;
+        const what = r.state === 'connecting' ? (r.stage || r.status || 'connecting') : r.state;
+        return `<span class="dj-wait">${n} ${safeHtml(what)}</span>`;
+    }
+
+    renderDeployJob(job) {
+        const bar = $('#deployJobBar');
+        if (!bar || !job) return;
+        bar.hidden = false;
+        const running = job.state === 'running';
+        bar.classList.toggle('deploy-job--done', !running && !job.failed && !job.error);
+        bar.classList.toggle('deploy-job--error', !running && (job.failed > 0 || !!job.error));
+        $('#deployJobCancelBtn').hidden = !running || job.cancel_requested;
+        $('#deployJobReleaseBtn').hidden = !running;
+        this.updateReleaseHeld();
+        $('#deployJobCloseBtn').hidden = running;
+
+        const total = job.total_batches;
+        let line;
+        const rp = job.release_progress;
+        if (running && rp) {
+            // Staggered release: one wave at a time, waiting for startup.
+            line = `Releasing ${rp.index}/${rp.total} · ${rp.robots.map(safeHtml).join(', ')} starting up…`;
+        } else if (running && job.stage !== 'batches') {
+            // batches -> all connected, holding -> released
+            line = 'All batches done · all connected, holding · releasing';
+        } else if (running) {
+            const phase = { spawning: 'spawning', waiting_stable: 'waiting for stable', waiting_calm: 'waiting for fleet calm' }[job.phase] || 'starting';
+            const cur = job.batches[job.current_batch - 1];
+            const robots = cur ? job.robots.filter((r) => r.batch === cur.index) : [];
+            line = `Deploying batch ${job.current_batch}/${total} · ${phase}`
+                + (robots.length ? ` (${robots.map((r) => this.deployRobotText(r)).join(' ')})` : '')
+                + (job.cancel_requested ? ' · stopping after this batch' : '');
+        } else {
+            const ok = job.deployed;
+            const n = job.results.length;
+            line = `${job.state === 'cancelled' ? 'Cancelled' : 'Done'} · ${ok}/${n} deployed in ${total} batch${total === 1 ? '' : 'es'}`;
+            const relN = job.releases.reduce((k, e) => k + e.robots.length, 0);
+            line += relN ? ` · released ${relN}` : ' · nothing released';
+        }
+        $('#deployJobLine').innerHTML = line;
+
+        // Per-batch result list: state, duration, robots@worker, drops.
+        const items = job.batches.filter((b) => b.state !== 'pending').map((b) => {
+            const cls = b.state === 'stable' ? 'dj-ok' : (b.state === 'timeout' || b.state === 'failed' ? 'dj-bad' : 'dj-wait');
+            const dur = b.duration_s != null ? ` ${b.duration_s}s` : '';
+            const who = b.robots.map((n, i) => `${safeHtml(n)}@${safeHtml(b.workers[i])}`).join(', ');
+            const drops = b.drops.length
+                ? `<span class="dj-bad">drops: ${b.drops.map((d) => `${safeHtml(d.name)}(${safeHtml(d.worker || 'local')})${d.in_batch ? '*' : ''}`).join(', ')}</span>`
+                : 'drops: none';
+            const calm = b.calm === false ? ' · <span class="dj-bad">fleet not calm</span>' : '';
+            return `<li>B${b.index} <span class="${cls}">${safeHtml(b.state)}${dur}</span> · ${who} · ${drops}${calm}</li>`;
+        });
+        // Release waves (final staggered release, RELEASE NOW, cancel).
+        job.releases.forEach((e) => {
+            const who = e.robots.map((n, i) => `${safeHtml(n)}@${safeHtml(e.workers[i] || 'local')}`).join(', ');
+            const tag = e.wave ? `R${e.wave}/${e.total_waves}` : 'R*';
+            let res;
+            if (e.startup === null || e.startup === undefined) {
+                res = e.wave ? '<span class="dj-wait">starting up…</span>' : '<span class="dj-wait">sent (not connected)</span>';
+            } else {
+                const cls = e.startup === 'ok' ? 'dj-ok' : 'dj-bad';
+                res = `<span class="${cls}">startup ${safeHtml(e.startup)} ${e.startup_s}s</span>`;
+            }
+            const drops = e.drops.length
+                ? `<span class="dj-bad">drops: ${e.drops.map((d) => `${safeHtml(d.name)}(${safeHtml(d.worker || 'local')})`).join(', ')}</span>`
+                : 'drops: none';
+            items.push(`<li>${tag} ${who} · ${res} · ${drops}${e.reason === 'manual' ? ' · manual' : ''}</li>`);
+        });
+        $('#deployJobBatches').innerHTML = items.join('');
     }
 
     // One summary toast for a batch result. `verb` is the success past-tense
@@ -475,6 +922,8 @@ class ControlStation {
             broadcastBtn.setAttribute('aria-disabled', String(disabled));
         }
 
+        this.updateReleaseHeld();
+
         // Prune selection of any units no longer present (detached out-of-band).
         const currentNames = new Set(this.spheros.map((s) => s.name));
         this.selected = new Set([...this.selected].filter((n) => currentNames.has(n)));
@@ -493,7 +942,7 @@ class ControlStation {
         // [UPT] is computed client-side from added_at and is updated in place
         // below, so it must not be part of this signature.
         const sig = this.spheros
-            .map((s) => `${s.name}|${s.port}|${s.status}|${s.added_at}|${s.url}`)
+            .map((s) => `${s.name}|${s.port}|${s.status}|${s.added_at}|${s.url}|${s.stage || ''}|${s.holding ? 1 : 0}`)
             .join('::');
 
         if (sig === this._lastFleetSig) {
@@ -563,6 +1012,13 @@ class ControlStation {
         const uptime = this.formatAge(s.added_at);
         const safe = (str) => String(str).replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
         const delay = (i * 60).toString();
+        // Sub-label: pre-connect stage (initializing / connecting, from the
+        // controller's ~1 Hz beacon) and the BLE quiet-gate hold.
+        const subs = [];
+        if (s.stage) subs.push(`<span class="unit__badge">${safe(s.stage)}</span>`);
+        if (s.holding && ['running', 'connecting', 'reconnecting'].includes(state)) {
+            subs.push('<span class="unit__badge unit__badge--hold" title="BLE quiet gate: holding traffic while a neighbour connects">BLE quiet</span>');
+        }
 
         return `
         <article id="unit-${safe(s.name)}" class="unit" style="animation-delay:${delay}ms">
@@ -574,6 +1030,7 @@ class ControlStation {
                     ${stateLabel}
                 </span>
             </div>
+            <div class="unit__sub"${subs.length ? '' : ' hidden'}>${subs.join('')}</div>
             <div class="unit__rows">
                 <span class="unit__k">[CH]</span>      <span class="unit__v">${s.port}</span>
                 <span class="unit__k">[UPT]</span>     <span class="unit__v unit__upt">${uptime}</span>

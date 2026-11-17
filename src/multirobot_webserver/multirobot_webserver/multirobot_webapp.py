@@ -8,13 +8,17 @@ multiple Sphero instances through their individual WebSocket servers.
 """
 
 import json
+import math
 import os
+import re
 import socket
 import subprocess
 import threading
 import time
 import signal
+import uuid
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -33,11 +37,21 @@ from sphero_instance_controller.msg import SpheroSensor
 from multirobot_msgs.msg import FleetRobot, FleetState
 
 from multirobot_webserver.worker_registry import WorkerRegistry
+from multirobot_webserver.deploy_job import DeployJob, plan_batches
 
 # Marker pool: 16 LED-matrix markers (8 hues x {filled, ring}). Allocation
 # Worker launcher-agent HTTP client tuning. (connect, read) seconds — every
 # agent call MUST pass this so a dead/slow Pi can never hang the webserver.
 AGENT_TIMEOUT = (3, 5)
+# BLE scan fan-out (GET /api/scan -> each worker's GET /scan). Duration is
+# clamped server-side. The worker may wait up to duration+5 s for its BLE
+# connect lock and then scan for duration s, so the per-worker read timeout is
+# 2*duration + SCAN_TIMEOUT_MARGIN.
+SCAN_DEFAULT_SEC = 4.0
+SCAN_MIN_SEC = 1.0
+SCAN_MAX_SEC = 10.0
+SCAN_CONNECT_TIMEOUT = 3
+SCAN_TIMEOUT_MARGIN = 7.0
 # Liveness cache TTL (seconds): remote-instance status is derived from a cached
 # per-worker GET /status so per-request listing can't stall on a dead agent.
 AGENT_STATUS_TTL = 2.0
@@ -78,6 +92,14 @@ HEARTBEAT_FRESH_SEC = 15.0
 # failures (killed process, worker off the network) and for older device
 # controllers that never send these states.
 LINK_DOWN_STATES = ('reconnecting', 'disconnected')
+# Fleet-wide BLE hold release, published by FleetNode (std_msgs/String JSON
+# {seq, stamp, spawn_ids, reason}). See deploy_job.py.
+FLEET_RELEASE_TOPIC = '/fleet/ble_release'
+# Pre-connect states: the controller beacons these (~1 Hz) from process start
+# ('initializing') and once it holds the per-host BLE connect lock
+# ('connecting'), until 'connected'. They prove the process is alive but NOT
+# that the link is up, so they never refresh last_seen.
+PRE_CONNECT_STATES = ('initializing', 'connecting')
 
 # Broadcast fan-out tuning. (connect, read) per-POST timeout so a dead/slow unit
 # can never block the others; worker pool capped at the fleet ceiling (16 units /
@@ -85,9 +107,190 @@ LINK_DOWN_STATES = ('reconnecting', 'disconnected')
 BROADCAST_POST_TIMEOUT = (3, 5)
 BROADCAST_MAX_WORKERS = 16
 
+# Batched deploy: how many finished jobs to keep for GET /api/deploy_jobs.
+DEPLOY_JOBS_KEPT = 10
+
+
+class DeployBusy(RuntimeError):
+    """A deploy job is already running (HTTP 409)."""
+
+    def __init__(self, job_id: str):
+        super().__init__(f'deploy job {job_id} is already running')
+        self.job_id = job_id
+
 # Robot-to-robot IR channel pairs, one (near, far) per broadcaster. Max 4
 # broadcasters; the server assigns pairs in payload order (source of truth).
 IR_CHANNEL_PAIRS = [(0, 1), (2, 3), (4, 5), (6, 7)]
+
+
+def quat_to_yaw_deg(x: float, y: float, z: float,
+                    w: float) -> Optional[float]:
+    """Yaw (rotation about +z) of a quaternion, in degrees, (-180, 180].
+
+    Returns None for the all-zero quaternion and for the identity, which the
+    overhead tracker publishes before a robot's first LED heading fix (it
+    cannot be told apart from a real heading of exactly 0).
+    """
+    if x == 0.0 and y == 0.0 and z == 0.0 and (w == 0.0 or abs(w) == 1.0):
+        return None
+    return math.degrees(math.atan2(2.0 * (w * z + x * y),
+                                   1.0 - 2.0 * (y * y + z * z)))
+
+
+def merge_scan_results(results: List[Dict], exclude) -> List[Dict]:
+    """
+    Merge per-worker scan results into one list keyed by robot name.
+
+    `results` are _agent_scan() dicts ({'name' (registry worker), 'ok',
+    'robots'}); only ok ones contribute. Names in `exclude` are dropped. Each
+    robot keeps its strongest RSSI and the worker that heard it best; `seen_by`
+    lists every hearing worker as {worker, rssi}. Sorted strongest first,
+    unknown RSSI last.
+    """
+    merged: Dict[str, Dict] = {}
+    for res in results:
+        if not res.get('ok'):
+            continue
+        worker = res['name']
+        for robot in res.get('robots') or []:
+            if not isinstance(robot, dict):
+                continue
+            name = str(robot.get('name') or '').strip()
+            if not name or name in exclude:
+                continue
+            rssi = robot.get('rssi')
+            rssi = int(rssi) if isinstance(rssi, (int, float)) else None
+            entry = merged.setdefault(name, {'name': name, 'rssi': None,
+                                             'best_worker': None,
+                                             'seen_by': []})
+            entry['seen_by'].append({'worker': worker, 'rssi': rssi})
+            if rssi is not None and (entry['rssi'] is None
+                                     or rssi > entry['rssi']):
+                entry['rssi'] = rssi
+                entry['best_worker'] = worker
+            elif entry['best_worker'] is None:
+                entry['best_worker'] = worker
+
+    def _key(item):
+        return (item['rssi'] is None, -(item['rssi'] or 0))
+
+    for entry in merged.values():
+        entry['seen_by'].sort(key=lambda s: (_key(s), s['worker']))
+    return sorted(merged.values(), key=lambda e: (_key(e), e['name']))
+
+
+# Named scan groups (DEPLOY modal NEARBY picker). Stored server-side in a JSON
+# file outside install/ so a rebuild can't wipe it; shared by every browser.
+# Format: {"groups": {"<name>": ["SB-xxxx", ...]}}.
+SCAN_GROUPS_ENV = 'SPHERO_SCAN_GROUPS_FILE'
+SCAN_GROUPS_DEFAULT = '~/.config/sphero_ros2/scan_groups.json'
+SCAN_GROUP_NAME_MAX = 40
+SCAN_GROUP_MAX_ROBOTS = 64
+SCAN_GROUPS_MAX = 50
+SPHERO_NAME_RE = re.compile(r'^[A-Za-z0-9]{2}-[A-Za-z0-9]{2,8}$')
+_scan_groups_lock = threading.Lock()
+
+
+def scan_groups_path() -> Path:
+    """Groups file path; env SPHERO_SCAN_GROUPS_FILE overrides the default."""
+    return Path(os.path.expanduser(
+        os.environ.get(SCAN_GROUPS_ENV) or SCAN_GROUPS_DEFAULT))
+
+
+def _read_scan_groups(path: Path) -> Dict[str, List[str]]:
+    """Read groups; missing file -> {}. A corrupt file is moved aside
+    (<file>.corrupt-<epoch>) with a warning and also reads as {}."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        groups = data['groups']
+        if not isinstance(groups, dict) or not all(
+                isinstance(k, str) and isinstance(v, list)
+                and all(isinstance(n, str) for n in v)
+                for k, v in groups.items()):
+            raise ValueError('bad groups shape')
+        return groups
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        aside = path.with_name(f'{path.name}.corrupt-{int(time.time())}')
+        try:
+            os.replace(path, aside)
+            print(f'⚠️  scan groups file {path} unreadable ({exc}); '
+                  f'moved aside to {aside}')
+        except OSError as mv_exc:
+            print(f'⚠️  scan groups file {path} unreadable ({exc}); '
+                  f'could not move aside: {mv_exc}')
+        return {}
+
+
+def _write_scan_groups(path: Path, groups: Dict[str, List[str]]):
+    """Atomic write: temp file in the same dir, then os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix='.scan_groups.',
+                               suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump({'groups': groups}, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def validate_scan_group(name, robots):
+    """Return (clean_name, sorted_unique_robots); raise ValueError(msg)."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError('group name is required')
+    name = name.strip()
+    if len(name) > SCAN_GROUP_NAME_MAX:
+        raise ValueError(f'group name must be 1-{SCAN_GROUP_NAME_MAX} chars')
+    if not isinstance(robots, list) or not robots:
+        raise ValueError('robots must be a non-empty list')
+    clean = set()
+    for r in robots:
+        if not isinstance(r, str) or not SPHERO_NAME_RE.match(r.strip()):
+            raise ValueError(f'invalid robot name: {str(r)[:40]!r}')
+        clean.add(r.strip())
+    if len(clean) > SCAN_GROUP_MAX_ROBOTS:
+        raise ValueError(f'at most {SCAN_GROUP_MAX_ROBOTS} robots per group')
+    return name, sorted(clean)
+
+
+def list_scan_groups() -> Dict[str, List[str]]:
+    with _scan_groups_lock:
+        return _read_scan_groups(scan_groups_path())
+
+
+def put_scan_group(name, robots) -> Dict[str, List[str]]:
+    """Create/overwrite a group. Raises ValueError on bad input or cap."""
+    name, robots = validate_scan_group(name, robots)
+    with _scan_groups_lock:
+        path = scan_groups_path()
+        groups = _read_scan_groups(path)
+        if name not in groups and len(groups) >= SCAN_GROUPS_MAX:
+            raise ValueError(f'at most {SCAN_GROUPS_MAX} groups')
+        groups[name] = robots
+        _write_scan_groups(path, groups)
+        return groups
+
+
+def delete_scan_group(name) -> Optional[Dict[str, List[str]]]:
+    """Delete a group; returns remaining groups, or None if it didn't exist."""
+    name = name.strip() if isinstance(name, str) else ''
+    with _scan_groups_lock:
+        path = scan_groups_path()
+        groups = _read_scan_groups(path)
+        if name not in groups:
+            return None
+        del groups[name]
+        _write_scan_groups(path, groups)
+        return groups
 
 
 class TcpRelay:
@@ -191,6 +394,15 @@ class FleetNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
         )
         self.publisher = self.create_publisher(FleetState, '/sphero_fleet/robots', latched)
+        # Fleet-wide BLE hold release (batched deploy). Reliable +
+        # transient_local depth 1, so a controller that subscribes late still
+        # gets the last release. seq starts at wall-clock ms so it keeps
+        # increasing across webserver restarts (the latched message from a
+        # previous run must never look newer).
+        self.release_pub = self.create_publisher(
+            String, FLEET_RELEASE_TOPIC, latched)
+        self._release_lock = threading.Lock()
+        self._release_seq = int(time.time() * 1000)
         # QoS for /localization position subscriptions: depth-10 VOLATILE to
         # match the position publishers' default PoseStamped profile.
         self._loc_qos = QoSProfile(
@@ -200,16 +412,25 @@ class FleetNode(Node):
         )
         # robots[name] = {'name_safe', 'status', 'added_at', 'last_seen',
         #                 'battery', 'x', 'y', 'heading',
-        #                 'link_state', 'link_state_at',
-        #                 'sensor_sub', 'pos_sub', 'status_sub', 'error_sub'}
+        #                 'link_state', 'link_state_at', 'link_down_at',
+        #                 'worker', 'sensor_sub', 'pos_sub', 'status_sub', 'error_sub'}
         # link_state = last explicit /status connection_state ('connected',
         # 'reconnecting', 'disconnected'), or None for a device controller that
-        # never sent one (legacy -> pure heartbeat freshness).
+        # never sent one (legacy -> pure heartbeat freshness). link_state_at is
+        # refreshed by every /status (reconnecting repeats ~1 Hz), so the time
+        # the link first went down is kept separately in link_down_at for the
+        # transition log. worker = remote worker name, None when local.
+        # link_state may also be a PRE_CONNECT_STATES value. holding = the
+        # controller's BLE quiet gate is holding (from /status); spawn_id =
+        # the controller's per-spawn id (from /status), None until seen.
+        # startup_complete = the controller finished its post-release BLE
+        # setup (from /status; False when the field is missing).
         self.robots: Dict[str, Dict] = {}
         self._lock = threading.Lock()
         self.timer = self.create_timer(1.0, self._publish_fleet_state)
 
-    def add_robot(self, name: str, name_safe: str):
+    def add_robot(self, name: str, name_safe: str,
+                  worker: Optional[str] = None):
         with self._lock:
             if name in self.robots:
                 return
@@ -258,6 +479,12 @@ class FleetNode(Node):
                 'heading': 0,
                 'link_state': None,
                 'link_state_at': 0.0,
+                'link_down_at': 0.0,
+                'ble_lost_logged': False,
+                'holding': False,
+                'startup_complete': False,
+                'spawn_id': None,
+                'worker': worker,
                 'sensor_sub': sub,
                 'pos_sub': pos_sub,
                 'status_sub': status_sub,
@@ -298,8 +525,9 @@ class FleetNode(Node):
         return entry
 
     def _on_sensor(self, name: str, msg: SpheroSensor):
-        # Pose (x/y) now comes from localization (_on_localization); sensor
-        # supplies battery + heading only.
+        # Pose (x/y) AND heading now come from the overhead tracker
+        # (_on_localization); /sensors supplies battery only. Its IMU yaw is
+        # robot-relative and must not overwrite the field-frame heading.
         with self._lock:
             entry = self._entry(name)
             if entry is None:
@@ -311,7 +539,6 @@ class FleetNode(Node):
             if entry.get('link_state') not in LINK_DOWN_STATES:
                 entry['last_seen'] = time.time()
             entry['battery'] = int(msg.battery_percentage)
-            entry['heading'] = int(msg.yaw)
 
     def _on_status(self, name: str, msg: String):
         """A /status message arrived; track its connection_state.
@@ -321,49 +548,148 @@ class FleetNode(Node):
         zero last_seen so freshness can't read 'running'. Battery in those
         messages is a stale cached value, and battery comes from /sensors
         anyway, so nothing else is read from the payload.
+
+        'initializing'/'connecting' (PRE_CONNECT_STATES) set link_state only:
+        the process is alive but the link is not up, so last_seen is left
+        alone. `holding` (quiet gate) and `spawn_id` are stored from any
+        /status that carries them.
         """
         try:
-            state = json.loads(msg.data).get('connection_state')
+            payload = json.loads(msg.data)
+            state = payload.get('connection_state')
         except (ValueError, AttributeError):
+            payload = None
             state = None
+        log = None
+        pre_log = None
         with self._lock:
             entry = self._entry(name)
             if entry is None:
                 return
             now = time.time()
-            if state in LINK_DOWN_STATES:
+            prev = entry.get('link_state')
+            if isinstance(payload, dict):
+                entry['holding'] = bool(payload.get('holding', False))
+                entry['startup_complete'] = bool(
+                    payload.get('startup_complete', False))
+                spawn_id = payload.get('spawn_id')
+                new_spawn = (spawn_id is not None
+                             and spawn_id != entry.get('spawn_id'))
+                if spawn_id is not None:
+                    entry['spawn_id'] = spawn_id
+            else:
+                new_spawn = False
+            if state in PRE_CONNECT_STATES:
+                # First sight of each stage per spawn; the ~1 Hz repeats are
+                # silent.
+                if state != prev or new_spawn:
+                    pre_log = (state, entry.get('worker'))
+                entry['link_state'] = state
+                entry['link_state_at'] = now
+            elif state in LINK_DOWN_STATES:
+                if state != prev:
+                    if prev not in LINK_DOWN_STATES:
+                        entry['link_down_at'] = now
+                    log = ('warning', state, None, entry.get('worker'))
                 entry['link_state'] = state
                 entry['link_state_at'] = now
                 entry['last_seen'] = 0.0
-                return
-            if state == 'connected':
-                entry['link_state'] = 'connected'
-                entry['link_state_at'] = now
-            entry['last_seen'] = now
+            else:
+                if state == 'connected':
+                    if prev != 'connected':
+                        down_for = (now - entry.get('link_down_at', 0.0)
+                                    if prev in LINK_DOWN_STATES else None)
+                        log = ('info', state, down_for, entry.get('worker'))
+                        entry['ble_lost_logged'] = False
+                    entry['link_state'] = 'connected'
+                    entry['link_state_at'] = now
+                entry['last_seen'] = now
+        if pre_log is not None:
+            state, worker = pre_log
+            text = f'{name} link {state}'
+            if worker:
+                text += f' [worker {worker}]'
+            # Own call site (info only); see the severity note below.
+            self.get_logger().info(text)
+        # Transitions only (never per heartbeat); formatted outside the lock.
+        if log is not None:
+            level, state, down_for, worker = log
+            text = f'{name} link {state}'
+            if down_for is not None:
+                text += f' (was down {down_for:.1f}s)'
+            if worker:
+                text += f' [worker {worker}]'
+            # One call site per severity: rclpy raises if a single call site
+            # logs at different severities ('Logger severity cannot be
+            # changed between calls'), which killed the executor thread.
+            if level == 'warning':
+                self.get_logger().warning(text)
+            else:
+                self.get_logger().info(text)
 
     def _on_device_error(self, name: str, msg: String):
         """A ble_lost device_error is terminal: treat it as 'disconnected'."""
         try:
-            error = json.loads(msg.data).get('error')
+            payload = json.loads(msg.data)
+            error = payload.get('error')
         except (ValueError, AttributeError):
             return
         if error != 'ble_lost':
             return
+        worker = None
         with self._lock:
             entry = self._entry(name)
-            if entry is not None:
-                entry['link_state'] = 'disconnected'
-                entry['link_state_at'] = time.time()
-                entry['last_seen'] = 0.0
+            if entry is None:
+                return
+            now = time.time()
+            if entry.get('link_state') not in LINK_DOWN_STATES:
+                entry['link_down_at'] = now
+            entry['link_state'] = 'disconnected'
+            entry['link_state_at'] = now
+            entry['last_seen'] = 0.0
+            # The controller bursts ~10 ble_lost (interleaved with
+            # 'disconnected' /status), so log once per down episode; a later
+            # 'connected' re-arms it.
+            first = not entry.get('ble_lost_logged', False)
+            entry['ble_lost_logged'] = True
+            worker = entry.get('worker')
+        if first:
+            text = (f'{name} link lost: controller exited '
+                    f'(ble_lost: {payload.get("message", "")})')
+            if worker:
+                text += f' [worker {worker}]'
+            self.get_logger().error(text)
 
     def _on_localization(self, name: str, msg: PoseStamped):
         # Active positioning source publishes in cm; convert to meters once.
+        # Orientation = the tracker's EKF yaw in the field frame (CCW from
+        # field +x). heading = that yaw in integer degrees, (-180, 180]; an
+        # identity/zero orientation (no heading fix yet) keeps the last one.
+        q = msg.pose.orientation
+        yaw = quat_to_yaw_deg(float(q.x), float(q.y), float(q.z), float(q.w))
         with self._lock:
             entry = self.robots.get(name)
             if entry is None:
                 return
             entry['x'] = float(msg.pose.position.x) / 100.0
             entry['y'] = float(msg.pose.position.y) / 100.0
+            if yaw is not None:
+                entry['heading'] = int(round(yaw))
+
+    def publish_ble_release(self, spawn_ids: List[str], reason: str) -> int:
+        """Publish one /fleet/ble_release. Controllers holding with
+        fleet_hold release when their spawn_id is listed ('*' = all)."""
+        with self._release_lock:
+            self._release_seq += 1
+            seq = self._release_seq
+            payload = {'seq': seq, 'stamp': time.time(),
+                       'spawn_ids': list(spawn_ids), 'reason': reason}
+            self.release_pub.publish(String(data=json.dumps(payload)))
+        # Own info call site (see the severity note in _on_status).
+        self.get_logger().info(
+            f'fleet BLE release seq={seq} reason={reason} '
+            f'spawn_ids={list(spawn_ids)}')
+        return seq
 
     def _publish_fleet_state(self):
         msg = FleetState()
@@ -421,6 +747,10 @@ class SpheroInstanceManager:
         # Per-local-instance cached /api/status: name -> {'ts', 'data'}.
         # Populated lazily by _instance_health_cached(); TTL INSTANCE_HEALTH_TTL.
         self._instance_health_cache: Dict[str, Dict] = {}
+        # Batched deploy jobs (one running at a time). job_id -> DeployJob,
+        # newest last; only the last few are kept.
+        self._deploy_lock = threading.Lock()
+        self._deploy_jobs: Dict[str, DeployJob] = {}
 
     def _load_worker_registry(self) -> Optional[WorkerRegistry]:
         """Load config/workers.yaml into a WorkerRegistry, or None if absent."""
@@ -445,22 +775,29 @@ class SpheroInstanceManager:
         return {'Authorization': f'Bearer {token}'} if token else {}
 
     def _agent_spawn(self, worker, sphero_name: str, port: int,
-                     external_localization: bool) -> Dict:
+                     external_localization: bool,
+                     fleet_hold: bool = False) -> Dict:
         """
         POST {base}/spawn on `worker`. The caller allocates the port; the agent
-        does not. Returns the agent's JSON payload on a 2xx response. Raises
-        RuntimeError on timeout, transport error, non-2xx, or a non-success
+        does not. fleet_hold=True (batched deploy only) adds
+        "fleet_hold": true, which the agent passes on as
+        SPHERO_BLE_FLEET_HOLD=1: the controller holds after connecting until
+        a /fleet/ble_release names its spawn_id. Returns the agent's JSON
+        payload on a 2xx response. Raises RuntimeError on timeout, transport error, non-2xx, or a non-success
         payload so the caller can roll back cleanly.
         """
         url = f'{worker.base_url}/spawn'
+        body = {
+            'name': sphero_name,
+            'port': port,
+            'external_localization': external_localization,
+        }
+        if fleet_hold:
+            body['fleet_hold'] = True
         try:
             resp = requests.post(
                 url,
-                json={
-                    'name': sphero_name,
-                    'port': port,
-                    'external_localization': external_localization,
-                },
+                json=body,
                 headers=self._agent_headers(),
                 timeout=AGENT_TIMEOUT,
             )
@@ -653,17 +990,27 @@ class SpheroInstanceManager:
                 'instance': None
             }
 
-    def _add_sphero_remote(self, sphero_name: str) -> Dict:
+    def _add_sphero_remote(self, sphero_name: str,
+                           worker_name: Optional[str] = None,
+                           fleet_hold: bool = False) -> Dict:
         """
         Spawn `sphero_name` on the least-loaded remote worker via its launcher
-        agent. Capacity is accounted only after a confirmed spawn; any failure
-        rolls back fully (no registry assignment, no instance entry, no fleet
-        robot) and returns a failure dict.
+        agent, or on `worker_name` when given (batched deploy). Capacity is
+        accounted only after a confirmed spawn; any failure rolls back fully
+        (no registry assignment, no instance entry, no fleet robot) and
+        returns a failure dict.
         """
-        try:
-            worker = self.worker_registry.select_worker()
-        except RuntimeError as exc:
-            return {'success': False, 'message': str(exc), 'instance': None}
+        if worker_name is not None:
+            worker = self.worker_registry.get(worker_name)
+            if worker is None or not worker.online or worker.free <= 0:
+                return {'success': False, 'instance': None,
+                        'message': f'worker {worker_name} unavailable'}
+        else:
+            try:
+                worker = self.worker_registry.select_worker()
+            except RuntimeError as exc:
+                return {'success': False, 'message': str(exc),
+                        'instance': None}
 
         # Coordinator allocates the port (the agent does not). Like the local
         # flow, this is a monotonic global counter that is NOT reclaimed on
@@ -677,6 +1024,7 @@ class SpheroInstanceManager:
             payload = self._agent_spawn(
                 worker, sphero_name, port,
                 external_localization=self.external_localization_enabled,
+                fleet_hold=fleet_hold,
             )
         except RuntimeError as exc:
             print(f"✗ Remote spawn of {sphero_name} on {worker.name} failed: {exc}")
@@ -698,7 +1046,8 @@ class SpheroInstanceManager:
             url = f'http://{worker.host}:{port}'
             if self.fleet_node is not None:
                 self.fleet_node.add_robot(
-                    sphero_name, sphero_name.replace('-', '_'))
+                    sphero_name, sphero_name.replace('-', '_'),
+                    worker=worker.name)
             instance_info = {
                 'name': sphero_name,
                 'port': port,
@@ -843,6 +1192,110 @@ class SpheroInstanceManager:
             'failed': len(results) - deployed,
             'results': results,
         }
+
+    # --- Batched deploy (one robot per worker per batch) --------------------
+
+    @staticmethod
+    def _dedupe(names: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for raw in names:
+            name = str(raw).strip()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
+
+    def _deploy_workers(self) -> List:
+        """Online workers with a free slot, in config order (refreshes the
+        online flags through the cached agent /status)."""
+        if self.worker_registry is None:
+            return []
+        out = []
+        for worker in self.worker_registry.all():
+            self._agent_status_cached(worker)
+            if worker.online and worker.free > 0:
+                out.append(worker)
+        return out
+
+    def should_batch_deploy(self, names: List[str]) -> bool:
+        """Batch only with >1 new robot and >1 usable worker; otherwise the
+        immediate add_spheros_batch path is used, as before."""
+        new = [n for n in self._dedupe(names) if n not in self.instances]
+        if len(new) < 2 or self.worker_registry is None:
+            return False
+        return len(self._deploy_workers()) > 1
+
+    def active_deploy_job(self) -> Optional[DeployJob]:
+        with self._deploy_lock:
+            for job in self._deploy_jobs.values():
+                if job.running:
+                    return job
+        return None
+
+    def get_deploy_job(self, job_id: Optional[str] = None
+                       ) -> Optional[DeployJob]:
+        """Job by id, or the newest job when job_id is None."""
+        with self._deploy_lock:
+            if job_id is None:
+                return (list(self._deploy_jobs.values())[-1]
+                        if self._deploy_jobs else None)
+            return self._deploy_jobs.get(job_id)
+
+    def start_deploy_job(self, names: List[str], run: bool = True
+                         ) -> DeployJob:
+        """Plan and start a batched deploy on a background thread.
+
+        Raises DeployBusy if a job is already running.
+        """
+        with self._deploy_lock:
+            for job in self._deploy_jobs.values():
+                if job.running:
+                    raise DeployBusy(job.job_id)
+            ordered = self._dedupe(names)
+            skipped = [n for n in ordered if n in self.instances]
+            todo = [n for n in ordered if n not in self.instances]
+            workers = [(w.name, w.free) for w in self._deploy_workers()]
+            batches, unassigned = plan_batches(todo, workers)
+            job = DeployJob(
+                uuid.uuid4().hex[:8], batches,
+                spawn=self._deploy_spawn,
+                robot_states=self._deploy_robot_states,
+                release=self.publish_ble_release,
+                unassigned=unassigned, skipped=skipped)
+            self._deploy_jobs[job.job_id] = job
+            while len(self._deploy_jobs) > DEPLOY_JOBS_KEPT:
+                del self._deploy_jobs[next(iter(self._deploy_jobs))]
+        print(f'[deploy] job {job.job_id}: {len(todo)} robot(s) in '
+              f'{len(batches)} batch(es) over {len(workers)} worker(s)'
+              + (f'; no slot for {", ".join(unassigned)}' if unassigned else ''))
+        if run:
+            job.start()
+        return job
+
+    def _deploy_spawn(self, name: str, worker_name: str) -> Dict:
+        if name in self.instances:
+            return {'success': False, 'message': f'{name} already deployed'}
+        return self._add_sphero_remote(name, worker_name=worker_name,
+                                       fleet_hold=True)
+
+    def _deploy_robot_states(self) -> Dict[str, Dict]:
+        robots = self.fleet_node.robots if self.fleet_node is not None else {}
+        return {i['name']: {'status': i['status'], 'holding': i['holding'],
+                            'stage': i['stage'], 'worker': i['worker'],
+                            'startup_complete': i['startup_complete'],
+                            'spawn_id': (robots.get(i['name']) or {})
+                            .get('spawn_id')}
+                for i in self.get_all_instances()}
+
+    def publish_ble_release(self, spawn_ids: List[str],
+                            reason: str) -> Optional[int]:
+        """Publish a fleet BLE release; returns its seq, or None without a
+        fleet node (nothing can be released then)."""
+        if self.fleet_node is None:
+            print(f'[deploy] no fleet node; cannot release {spawn_ids}')
+            return None
+        return self.fleet_node.publish_ble_release(spawn_ids, reason)
 
     def remove_spheros_batch(self, names: List[str]) -> Dict:
         """
@@ -1111,7 +1564,8 @@ class SpheroInstanceManager:
             List of instance dictionaries
         """
         result = []
-        for name, instance in self.instances.items():
+        # list(): a deploy job thread may add instances concurrently.
+        for name, instance in list(self.instances.items()):
             status = self._instance_status(instance)
             instance['status'] = status
             result.append({
@@ -1121,6 +1575,7 @@ class SpheroInstanceManager:
                 'added_at': instance['added_at'],
                 'url': instance['url'],
                 'worker': instance.get('worker'),  # None for local instances
+                **self._instance_detail(name, status),
             })
 
         return result
@@ -1140,7 +1595,9 @@ class SpheroInstanceManager:
         An explicit connection_state on /status overrides freshness at once:
         'disconnected' (reconnects exhausted; terminal, shown even after the
         process exits so local and remote read alike) and 'reconnecting'
-        (while its ~1 Hz repeats stay fresh).
+        (while its ~1 Hz repeats stay fresh). A fresh pre-connect beacon
+        ('initializing'/'connecting') reads 'connecting' with no time limit;
+        the finer stage is reported separately by _instance_detail().
         """
         name = instance['name']
         worker_name = instance.get('worker')
@@ -1169,6 +1626,14 @@ class SpheroInstanceManager:
                 and (now - link_state_at) <= HEARTBEAT_FRESH_SEC):
             return 'reconnecting'
 
+        # A live pre-connect beacon (~1 Hz) proves the process is up and
+        # waiting for / inside its BLE connect: 'connecting', even past
+        # INSTANCE_CONNECT_WINDOW. Checked before freshness so a respawned
+        # robot's old last_seen can't read 'running'.
+        if (link_state in PRE_CONNECT_STATES
+                and (now - link_state_at) <= HEARTBEAT_FRESH_SEC):
+            return 'connecting'
+
         # Connection truth: heartbeat/telemetry freshness from FleetNode.
         if last_seen > 0.0 and (now - last_seen) <= HEARTBEAT_FRESH_SEC:
             return 'running'
@@ -1195,6 +1660,27 @@ class SpheroInstanceManager:
             return 'connecting'
         return 'failed'
 
+    def _instance_detail(self, name: str, status: str) -> Dict:
+        """UI extras next to status: pre-connect `stage`, quiet-gate
+        `holding` and post-release `startup_complete`. stage is
+        'initializing'/'connecting' only while status is 'connecting' on a
+        fresh pre-connect beacon, else None."""
+        stage = None
+        holding = False
+        startup_complete = False
+        entry = (self.fleet_node.robots.get(name)
+                 if self.fleet_node is not None else None)
+        if entry is not None:
+            link_state = entry.get('link_state')
+            if (status == 'connecting' and link_state in PRE_CONNECT_STATES
+                    and (time.time() - entry.get('link_state_at', 0.0))
+                    <= HEARTBEAT_FRESH_SEC):
+                stage = link_state
+            holding = bool(entry.get('holding', False))
+            startup_complete = bool(entry.get('startup_complete', False))
+        return {'stage': stage, 'holding': holding,
+                'startup_complete': startup_complete}
+
     def workers_snapshot(self) -> Dict:
         """
         Snapshot of the worker registry for GET /api/workers. Refreshes each
@@ -1215,6 +1701,72 @@ class SpheroInstanceManager:
             'total_count': self.worker_registry.total_count(),
         }
 
+    def _agent_scan(self, worker, duration: float) -> Dict:
+        """
+        GET {base}/scan?duration=<s> on `worker`. Never raises. Results are
+        keyed by the registry worker called, not the response's 'worker' field.
+        Returns {'name', 'ok', 'busy', 'error', 'robots'}.
+        """
+        out = {'name': worker.name, 'ok': False, 'busy': False,
+               'error': None, 'robots': []}
+        try:
+            resp = requests.get(
+                f'{worker.base_url}/scan',
+                params={'duration': duration},
+                headers=self._agent_headers(),
+                timeout=(SCAN_CONNECT_TIMEOUT,
+                         2 * duration + SCAN_TIMEOUT_MARGIN),
+            )
+        except requests.RequestException as exc:
+            out['error'] = f'unreachable: {exc.__class__.__name__}'
+            return out
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict):
+            payload = {}
+        if resp.status_code == 409:
+            out['busy'] = True
+            out['error'] = str(payload.get('error') or 'busy')
+        elif resp.status_code // 100 != 2:
+            out['error'] = str(payload.get('error')
+                               or f'HTTP {resp.status_code}')
+        elif not payload:
+            out['error'] = 'bad response'
+        else:
+            robots = payload.get('robots')
+            out['robots'] = robots if isinstance(robots, list) else []
+            out['ok'] = True
+        return out
+
+    def scan_nearby(self, duration: float) -> Dict:
+        """
+        Fan a BLE scan out to every registered worker concurrently and merge
+        the results. A busy/failing/unreachable worker is reported in
+        `workers` and never fails the scan. Units already deployed or in the
+        fleet roster are dropped.
+        """
+        duration = min(max(float(duration), SCAN_MIN_SEC), SCAN_MAX_SEC)
+        if self.worker_registry is None:
+            return {'registry_loaded': False, 'robots': [], 'workers': []}
+        workers = self.worker_registry.all()
+        if not workers:
+            return {'registry_loaded': True, 'robots': [], 'workers': []}
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            results = list(pool.map(
+                lambda w: self._agent_scan(w, duration), workers))
+        exclude = set(self.instances)
+        if self.fleet_node is not None:
+            exclude |= set(self.fleet_node.robots)
+        return {
+            'registry_loaded': True,
+            'duration_s': duration,
+            'robots': merge_scan_results(results, exclude),
+            'workers': [{k: r[k] for k in ('name', 'ok', 'busy', 'error')}
+                        for r in results],
+        }
+
     def get_instance(self, sphero_name: str) -> Optional[Dict]:
         """Get information about a specific Sphero instance."""
         if sphero_name not in self.instances:
@@ -1231,6 +1783,7 @@ class SpheroInstanceManager:
             'added_at': instance['added_at'],
             'url': instance['url'],
             'worker': instance.get('worker'),  # None for local instances
+            **self._instance_detail(sphero_name, status),
         }
 
     def shutdown_all(self):
@@ -1279,6 +1832,49 @@ def get_workers():
     return jsonify({'success': True, **manager.workers_snapshot()})
 
 
+@app.route('/api/scan', methods=['GET'])
+def scan_nearby():
+    """BLE scan across all workers: advertising, not-yet-deployed Spheros.
+
+    Query: duration (s, default 4, clamped 1-10). Always 200 once the scan
+    ran; per-worker busy/error state is in `workers`.
+    """
+    duration = request.args.get('duration', SCAN_DEFAULT_SEC, type=float)
+    if duration is None or duration != duration:  # bad parse / NaN
+        duration = SCAN_DEFAULT_SEC
+    return jsonify({'success': True, **manager.scan_nearby(duration)})
+
+
+@app.route('/api/scan_groups', methods=['GET'])
+def get_scan_groups():
+    """Saved NEARBY scan groups: {groups: {name: [robot names]}}."""
+    return jsonify({'success': True, 'groups': list_scan_groups()})
+
+
+@app.route('/api/scan_groups/<path:group_name>', methods=['PUT'])
+def put_scan_group_route(group_name):
+    """Create or overwrite a scan group. Body: {robots: [names]}."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'success': False,
+                        'message': 'Invalid JSON body'}), 400
+    try:
+        groups = put_scan_group(group_name, body.get('robots'))
+    except ValueError as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    return jsonify({'success': True, 'groups': groups})
+
+
+@app.route('/api/scan_groups/<path:group_name>', methods=['DELETE'])
+def delete_scan_group_route(group_name):
+    """Delete a scan group (404 if it doesn't exist)."""
+    groups = delete_scan_group(group_name)
+    if groups is None:
+        return jsonify({'success': False,
+                        'message': 'No such group'}), 404
+    return jsonify({'success': True, 'groups': groups})
+
+
 @app.route('/api/spheros/<sphero_name>', methods=['GET'])
 def get_sphero(sphero_name):
     """Get information about a specific Sphero."""
@@ -1322,6 +1918,12 @@ def add_spheros_batch():
     Request: {names: [...]}. Per-item failures are reported in `results`
     rather than as HTTP errors; 400 only if `names` is missing/not a
     list/empty after normalization.
+
+    With more than one new robot and more than one usable worker this starts
+    a batched deploy job (one robot per worker per batch, spawned with
+    fleet_hold, one /fleet/ble_release at the end) and answers 202
+    {success, batched: true, job_id, job} at once; poll
+    GET /api/deploy_jobs/<job_id>. 409 while a deploy job is running.
     """
     data = request.get_json(silent=True)
     if not data or not isinstance(data.get('names'), list):
@@ -1337,7 +1939,75 @@ def add_spheros_batch():
             'message': 'No callsigns provided',
         }), 400
 
+    active = manager.active_deploy_job()
+    if active is not None:
+        return _deploy_busy(active.job_id)
+    if manager.should_batch_deploy(names):
+        try:
+            job = manager.start_deploy_job(names)
+        except DeployBusy as exc:
+            return _deploy_busy(exc.job_id)
+        return jsonify({'success': True, 'batched': True,
+                        'job_id': job.job_id, 'job': job.snapshot()}), 202
+
     return jsonify(manager.add_spheros_batch(names)), 200
+
+
+def _deploy_busy(job_id):
+    return jsonify({'success': False, 'job_id': job_id,
+                    'message': f'Deploy job {job_id} is still running'}), 409
+
+
+@app.route('/api/deploy_jobs/latest', methods=['GET'])
+def get_latest_deploy_job():
+    """Newest deploy job's progress, or job: null."""
+    job = manager.get_deploy_job()
+    return jsonify({'success': True,
+                    'job': job.snapshot() if job is not None else None})
+
+
+@app.route('/api/deploy_jobs/<job_id>', methods=['GET'])
+def get_deploy_job(job_id):
+    """Deploy job progress: batches, per-robot worker/state, drops."""
+    job = manager.get_deploy_job(job_id)
+    if job is None:
+        return jsonify({'success': False, 'message': 'No such job'}), 404
+    return jsonify({'success': True, 'job': job.snapshot()})
+
+
+@app.route('/api/deploy_jobs/<job_id>/release', methods=['POST'])
+def release_deploy_job(job_id):
+    """RELEASE NOW: release every job robot that is holding right now
+    (reason 'manual'), staggered like the end of the job, on a background
+    thread. Answers at once with the robots planned. The job keeps running."""
+    job = manager.get_deploy_job(job_id)
+    if job is None:
+        return jsonify({'success': False, 'message': 'No such job'}), 404
+    planned = job.release_now()
+    return jsonify({'success': True, 'released': planned,
+                    'job': job.snapshot()})
+
+
+@app.route('/api/fleet/ble_release', methods=['POST'])
+def release_fleet():
+    """RELEASE HELD: release every fleet-hold robot at once (spawn_ids
+    ['*'], one message, no stagger; the UI asks for confirmation)."""
+    seq = manager.publish_ble_release(['*'], 'manual')
+    if seq is None:
+        return jsonify({'success': False,
+                        'message': 'Fleet node not running'}), 503
+    return jsonify({'success': True, 'seq': seq})
+
+
+@app.route('/api/deploy_jobs/<job_id>/cancel', methods=['POST'])
+def cancel_deploy_job(job_id):
+    """Stop the job after its current batch, then release every robot it
+    spawned so nothing is left holding."""
+    job = manager.get_deploy_job(job_id)
+    if job is None:
+        return jsonify({'success': False, 'message': 'No such job'}), 404
+    job.cancel()
+    return jsonify({'success': True, 'job': job.snapshot()})
 
 
 @app.route('/api/spheros/batch_delete', methods=['POST'])
