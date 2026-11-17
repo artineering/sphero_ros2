@@ -8,6 +8,7 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
+  <exec_depend>std_msgs</exec_depend>
   <exec_depend>sphero_instance_controller</exec_depend>
   <exec_depend>python3-flask</exec_depend>
 

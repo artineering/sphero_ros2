@@ -26,6 +26,40 @@ Environment=ROS_DOMAIN_ID=<ROS_DOMAIN_ID>
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 Environment=CYCLONEDDS_URI=file:///<WORKSPACE>/cyclonedds-<LAN_NIC>.xml
 
+# --- BLE quiet gate (sphero_instance_device_controller_node) ---
+# Connected robots stay BLE-quiet while another robot on this Pi is still
+# connecting. "Still connecting" = this agent's /worker/<host>/connect_queue
+# (robots listed at spawn), falling back to the per-host flock when no queue is
+# heard. Defaults shown. Rollbacks:
+#   SPHERO_BLE_GATE_SOURCE=flock + MAX_HOLD=60 + SETTLE=3  -> previous gate
+#   SPHERO_BLE_QUIET_GATE=0                                 -> no gate
+#   SPHERO_BLE_PRECONNECT_STATUS=0  -> no 'initializing'/'connecting' on /status
+#                                      (needed while the webserver predates them)
+#   WORKER_CONNECT_QUEUE=0          -> agent runs Flask only, no ROS node
+#Environment=SPHERO_BLE_QUIET_GATE=1
+#Environment=SPHERO_BLE_GATE_SOURCE=auto
+#Environment=SPHERO_BLE_QUIET_MAX_HOLD=120
+#Environment=SPHERO_BLE_QUIET_SETTLE=1
+#Environment=SPHERO_BLE_QUEUE_WAIT=5
+#Environment=SPHERO_BLE_QUEUE_STALE=15
+#Environment=SPHERO_BLE_PRECONNECT_STATUS=1
+#Environment=SPHERO_BLE_PENDING_LOCK=/tmp/sphero_ble_pending.lock
+# Fleet hold: set per spawn by POST /spawn {"fleet_hold": true} (the agent
+# injects SPHERO_BLE_FLEET_HOLD=1/0; don't set it here). Robots then hold until
+# /fleet/ble_release names their spawn_id. Tunables:
+#Environment=SPHERO_BLE_FLEET_HOLD_MAX=900
+#Environment=SPHERO_BLE_FLEET_RELEASE_SKEW=2
+#Environment=SPHERO_BLE_HOLD_KEEPALIVE=30
+# Sensor stream: off by default (localization is the overhead camera); drops
+# are caught by the disconnect listener plus a slow liveness probe. Rollback to
+# the previous trimmed stream: SPHERO_SENSOR_STREAM=attitude.
+#Environment=SPHERO_SENSOR_STREAM=none
+#Environment=SPHERO_BLE_LIVENESS_PERIOD_NO_STREAM=15
+#Environment=WORKER_CONNECT_QUEUE=1
+#Environment=WORKER_CONNECT_ENTRY_TIMEOUT=150
+#Environment=WORKER_CONNECT_FIRST_BEACON=60
+#Environment=WORKER_CONNECT_BEACON_STALE=10
+
 # --- agent config ---
 Environment=WORKER_AGENT_TOKEN=<SHARED_TOKEN>
 Environment=WORKER_AGENT_HOST=<LAN_IP>

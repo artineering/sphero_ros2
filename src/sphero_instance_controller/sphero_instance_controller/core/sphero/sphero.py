@@ -326,8 +326,9 @@ class Sphero:
             True if successful, False otherwise
         """
         try:
-            # Query current location before reset
-            current_location = self.api.get_location()
+            # Query current location before reset (None when the locator
+            # isn't in the sensor stream)
+            current_location = self.api.get_location() or {}
             device_x = current_location.get('x', 0.0)
             device_y = current_location.get('y', 0.0)
 
@@ -716,15 +717,28 @@ class Sphero:
 
     # ===== Sensor Data =====
 
-    def update_sensors(self) -> bool:
+    def update_battery(self) -> bool:
+        """
+        Read battery voltage/percentage from the device (two BLE round trips).
+
+        Returns:
+            True if a query was attempted, False otherwise
+        """
+        return self.state.update_battery_from_device()
+
+    def update_sensors(self, streamed: bool = True) -> bool:
         """
         Update sensor data from the device.
+
+        Args:
+            streamed: False when the sensor stream is off: stream-fed values
+                (orientation, accel, gyro, location, velocity) are skipped.
 
         Returns:
             True if successful, False otherwise
         """
         try:
-            self.state.update_from_device()
+            self.state.update_from_device(streamed=streamed)
 
             # Update internal state tracking
             self._current_heading = self.state.get('motion', 'heading', 0)

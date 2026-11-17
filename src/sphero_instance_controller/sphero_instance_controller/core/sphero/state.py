@@ -607,12 +607,14 @@ class SpheroState:
 
         return result
 
-    def update_from_device(self):
+    def update_from_device(self, streamed=True):
         """
         Update the state by querying the Sphero device.
 
         This method queries all available sensors from the Sphero API
-        and updates the internal state accordingly.
+        and updates the internal state accordingly. streamed=False (sensor
+        stream off) skips orientation / accelerometer / gyroscope / device
+        location / velocity and keeps only commanded motion and LED values.
 
         Returns:
             bool: True if update was successful, False if no API available
@@ -626,70 +628,74 @@ class SpheroState:
         except ImportError:
             PacketDecodingException = Exception
 
-        # Query orientation from device
-        try:
-            orientation = self._api.get_orientation()
-            self.set('orientation', orientation.get('pitch', 0.0), 'pitch')
-            self.set('orientation', orientation.get('roll', 0.0), 'roll')
-            self.set('orientation', orientation.get('yaw', 0.0), 'yaw')
-        except PacketDecodingException:
-            pass  # Bluetooth packet collision - skip this update
-        except Exception:
-            pass  # Silent fail - sensor may not be available
-
-        # Query accelerometer from device
-        try:
-            accel = self._api.get_acceleration()
-            self.set('accelerometer', accel.get('x', 0.0), 'x')
-            self.set('accelerometer', accel.get('y', 0.0), 'y')
-            self.set('accelerometer', accel.get('z', 0.0), 'z')
-        except PacketDecodingException:
-            pass  # Bluetooth packet collision - skip this update
-        except Exception:
-            pass
-
-        # Query gyroscope from device
-        try:
-            gyro = self._api.get_gyroscope()
-            self.set('gyroscope', gyro.get('x', 0.0), 'x')
-            self.set('gyroscope', gyro.get('y', 0.0), 'y')
-            self.set('gyroscope', gyro.get('z', 0.0), 'z')
-        except PacketDecodingException:
-            pass  # Bluetooth packet collision - skip this update
-        except Exception:
-            pass
-
-        # Query location from device if we are using the sphero's internal localization
-        if not self.external_localization:
+        # Stream-fed values (SpheroEduAPI caches them from the sensor stream).
+        # With no stream they would be frozen, so they are left untouched
+        # (0 unless a stream ever ran) rather than republished as live.
+        if streamed:
+            # Query orientation from device
             try:
-                location = self._api.get_location()
-                device_x = location.get('x', 0.0)
-                device_y = location.get('y', 0.0)
+                orientation = self._api.get_orientation()
+                self.set('orientation', orientation.get('pitch', 0.0), 'pitch')
+                self.set('orientation', orientation.get('roll', 0.0), 'roll')
+                self.set('orientation', orientation.get('yaw', 0.0), 'yaw')
+            except PacketDecodingException:
+                pass  # Bluetooth packet collision - skip this update
+            except Exception:
+                pass  # Silent fail - sensor may not be available
 
-                # Apply position offset (for reset_aim functionality)
-                # This makes position relative to our coordinate system origin
-                new_x = device_x - self._position_offset_x
-                new_y = device_y - self._position_offset_y
-
-                # Only update position if change exceeds threshold (reduces noise)
-                if self._should_update_position(new_x, new_y):
-                    self.set('position', new_x, 'x')
-                    self.set('position', new_y, 'y')
-                    self._last_published_position = (new_x, new_y)
+            # Query accelerometer from device
+            try:
+                accel = self._api.get_acceleration()
+                self.set('accelerometer', accel.get('x', 0.0), 'x')
+                self.set('accelerometer', accel.get('y', 0.0), 'y')
+                self.set('accelerometer', accel.get('z', 0.0), 'z')
             except PacketDecodingException:
                 pass  # Bluetooth packet collision - skip this update
             except Exception:
                 pass
 
-        # Query velocity from device
-        try:
-            velocity = self._api.get_velocity()
-            self.set('velocity', velocity.get('x', 0.0), 'x')
-            self.set('velocity', velocity.get('y', 0.0), 'y')
-        except PacketDecodingException:
-            pass  # Bluetooth packet collision - skip this update
-        except Exception:
-            pass
+            # Query gyroscope from device
+            try:
+                gyro = self._api.get_gyroscope()
+                self.set('gyroscope', gyro.get('x', 0.0), 'x')
+                self.set('gyroscope', gyro.get('y', 0.0), 'y')
+                self.set('gyroscope', gyro.get('z', 0.0), 'z')
+            except PacketDecodingException:
+                pass  # Bluetooth packet collision - skip this update
+            except Exception:
+                pass
+
+            # Query location from device if we are using the sphero's internal localization
+            if not self.external_localization:
+                try:
+                    location = self._api.get_location()
+                    device_x = location.get('x', 0.0)
+                    device_y = location.get('y', 0.0)
+
+                    # Apply position offset (for reset_aim functionality)
+                    # This makes position relative to our coordinate system origin
+                    new_x = device_x - self._position_offset_x
+                    new_y = device_y - self._position_offset_y
+
+                    # Only update position if change exceeds threshold (reduces noise)
+                    if self._should_update_position(new_x, new_y):
+                        self.set('position', new_x, 'x')
+                        self.set('position', new_y, 'y')
+                        self._last_published_position = (new_x, new_y)
+                except PacketDecodingException:
+                    pass  # Bluetooth packet collision - skip this update
+                except Exception:
+                    pass
+
+            # Query velocity from device
+            try:
+                velocity = self._api.get_velocity()
+                self.set('velocity', velocity.get('x', 0.0), 'x')
+                self.set('velocity', velocity.get('y', 0.0), 'y')
+            except PacketDecodingException:
+                pass  # Bluetooth packet collision - skip this update
+            except Exception:
+                pass
 
         # Query heading from device
         try:
@@ -718,6 +724,25 @@ class SpheroState:
             self.set('led', led.get('blue', 0), 'blue')
         except Exception:
             pass
+
+        # Battery is NOT read here: each Power read is a blocking BLE round
+        # trip, and this runs at sensor_rate. See update_battery_from_device().
+
+        # Update timestamp is called automatically by set() method
+        return True
+
+    def update_battery_from_device(self):
+        """
+        Update the battery state by querying the Sphero device.
+
+        Two blocking BLE round trips (voltage, percentage), so call it at the
+        heartbeat rate, not the sensor rate.
+
+        Returns:
+            bool: True if a query was attempted, False if no toy available
+        """
+        if self._toy is None:
+            return False
 
         # Query battery state from device if available
         try:
@@ -760,7 +785,6 @@ class SpheroState:
         except Exception:
             pass
 
-        # Update timestamp is called automatically by set() method
         return True
 
     def query_property(self, property_name: str, subproperty: Optional[str] = None):

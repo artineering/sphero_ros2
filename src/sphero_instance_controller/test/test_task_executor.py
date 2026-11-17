@@ -579,6 +579,18 @@ class TestSpheroHandlerSmoke:
         assert ('roll', {'heading': 0, 'speed': 80, 'duration': 0}) in ex.sends
         assert ex.current_task is not None  # still running
 
+    def test_move_to_heading_uses_the_clockwise_sphero_convention(self, clock):
+        """Field +y (north) is Sphero 270, not 90.
+
+        Field bearings are counter-clockwise from +x; Sphero headings are
+        clockwise. A target straight along +x cannot tell the two apart, so
+        this uses an off-axis target that can.
+        """
+        ex = RecordingSphero(position={'x': 0.0, 'y': 0.0})
+        ex.add_task(make_task('move_to', x=0, y=100, speed=80))
+        ex.process_tasks()
+        assert ('roll', {'heading': 270, 'speed': 80, 'duration': 0}) in ex.sends
+
     def test_move_to_completes_when_within_tolerance(self, clock):
         ex = RecordingSphero(position={'x': 99.0, 'y': 0.0})
         # default tolerance is 10cm; we're 1cm from target

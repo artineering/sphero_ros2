@@ -69,6 +69,16 @@ class TaskType(Enum):
 
 # ===== High-level task handlers =====
 
+def field_bearing_to_heading(dx, dy) -> int:
+    """Field vector -> Sphero roll heading.
+
+    Field angles are counter-clockwise from +x; Sphero headings are CLOCKWISE
+    (its own docs: 0 is forward, 90 is right), so the sign flips. Sending the
+    raw atan2 bearing drives the robot mirrored about the x-axis.
+    """
+    return int(round(-math.degrees(math.atan2(dy, dx)))) % 360
+
+
 def execute_move_to(executor, task: TaskDescriptor) -> bool:
     """Move to a specific (x, y) target with stall detection."""
     target_x = task.parameters.get('x', 0)
@@ -90,7 +100,7 @@ def execute_move_to(executor, task: TaskDescriptor) -> bool:
         return True
 
     if 'command_sent' not in task.parameters:
-        target_heading = int(math.degrees(math.atan2(dy, dx))) % 360
+        target_heading = field_bearing_to_heading(dx, dy)
         executor._send_roll_command(target_heading, speed)
         task.parameters['command_sent'] = True
         task.parameters['last_distance'] = distance
@@ -407,7 +417,7 @@ def execute_proximity_step(executor, task: TaskDescriptor) -> bool:
         executor._send_stop_command()
         return True
 
-    heading = int(math.degrees(math.atan2(vy, vx))) % 360
+    heading = field_bearing_to_heading(vx, vy)
     speed = int(min(max_speed, max(mag, 1.0)))
     executor._send_roll_command(heading, speed)
     return True
